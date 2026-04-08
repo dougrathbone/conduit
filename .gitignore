@@ -1,0 +1,21 @@
+node_modules/
+out/
+dist/
+.DS_Store
+*.local
+*.env
+*.env.*
+!*.env.example
+.idea/
+.vscode/
+*.log
+npm-debug.log*
+
+# electron-builder
+dist/
+release/
+
+# SQLite
+*.db
+*.db-shm
+*.db-wal
