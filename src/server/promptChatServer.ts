@@ -1,5 +1,4 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { nanoid } from 'nanoid'
 import type { RunnerType } from '../shared/types'
 import { getAgent } from '../main/db/queries/agents'
 
@@ -64,7 +63,7 @@ function getAnthropicClient(): Anthropic {
 }
 
 export async function createSession(agentId: string, runner: RunnerType): Promise<string> {
-  const sessionId = nanoid()
+  const sessionId = crypto.randomUUID()
   sessions.set(sessionId, { id: sessionId, agentId, runner, messages: [] })
   return sessionId
 }

@@ -2,7 +2,6 @@
   "name": "conduit",
   "version": "0.1.0",
   "description": "A managed execution environment for AI CLI agents",
-  "main": "out/main/index.js",
   "author": {
     "name": "Doug Rathbone",
     "email": "dougrathbone@gmail.com"
@@ -14,23 +13,14 @@
     "url": "https://github.com/dougrathbone/conduit.git"
   },
   "scripts": {
-    "dev": "electron-vite dev",
-    "build": "electron-vite build",
-    "preview": "electron-vite preview",
-    "start": "electron .",
-    "pack": "npm run build && electron-builder --dir",
-    "dist": "npm run build && electron-builder",
-    "dist:mac": "npm run build && electron-builder --mac",
-    "dist:win": "npm run build && electron-builder --win",
-    "dist:linux": "npm run build && electron-builder --linux",
-    "build:server": "vite build --config vite.server.config.ts && tsc -p tsconfig.server.json",
-    "start:server": "node out/server/index.js",
+    "dev": "concurrently --names \"ui,server\" --prefix-colors \"cyan,magenta\" \"vite build --watch --config vite.server.config.ts\" \"tsx watch src/server/index.ts\"",
+    "build": "vite build --config vite.server.config.ts && tsc -p tsconfig.server.json",
+    "start": "node out/server/index.js",
     "docker:build": "docker build -t conduit .",
     "docker:run": "docker run -p 7456:7456 conduit",
-    "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "typecheck": "tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.web.json --noEmit",
     "lint": "eslint . --ext .ts,.tsx --report-unused-disable-directives",
-    "test": "vitest run",
-    "postinstall": "electron-builder install-app-deps"
+    "test": "vitest run"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.85.0",
@@ -47,10 +37,8 @@
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
     "drizzle-orm": "^0.38.3",
-    "electron-store": "^10.0.0",
     "express": "^4.21.2",
     "lucide-react": "^0.468.0",
-    "nanoid": "^5.0.9",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-resizable-panels": "^2.1.7",
@@ -59,7 +47,6 @@
     "zustand": "^5.0.3"
   },
   "devDependencies": {
-    "@electron/rebuild": "^3.7.1",
     "@types/better-sqlite3": "^7.6.12",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.7",
@@ -68,13 +55,12 @@
     "@types/ws": "^8.5.13",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
+    "concurrently": "^9.2.1",
     "drizzle-kit": "^0.30.1",
-    "electron": "^33.4.0",
-    "electron-builder": "^25.1.8",
-    "electron-vite": "^3.0.0",
     "eslint": "^9.17.0",
     "postcss": "^8.5.1",
     "tailwindcss": "^3.4.17",
+    "tsx": "^4.21.0",
     "typescript": "^5.7.3",
     "vite": "^6.0.7",
     "vitest": "^2.1.8"

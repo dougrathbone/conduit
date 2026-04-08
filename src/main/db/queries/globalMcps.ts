@@ -1,5 +1,4 @@
 import { eq } from 'drizzle-orm'
-import { nanoid } from 'nanoid'
 import { drizzleDb } from '../index'
 import { globalMcpServers } from '../schema'
 import type { GlobalMcpServer, McpServerEntry } from '../../../shared/types'
@@ -30,7 +29,7 @@ export function createGlobalMcp(
   data: Omit<GlobalMcpServer, 'id' | 'createdAt' | 'updatedAt'>
 ): GlobalMcpServer {
   const now = Date.now()
-  const id = nanoid()
+  const id = crypto.randomUUID()
 
   drizzleDb.insert(globalMcpServers).values({
     id,
