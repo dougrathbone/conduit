@@ -64,18 +64,42 @@ if (typeof document !== 'undefined') {
   applyTheme(initialTheme)
 }
 
+// ── URL routing helpers ───────────────────────────────────────────────────────
+
+function readUrlState(): { agentId: string | null; globalMcps: boolean } {
+  if (typeof window === 'undefined') return { agentId: null, globalMcps: false }
+  const path = window.location.pathname
+  const globalMcps = path === '/global-mcps'
+  const m = path.match(/^\/agents\/([^/]+)$/)
+  return { agentId: m ? m[1] : null, globalMcps }
+}
+
+function pushUrl(path: string) {
+  if (typeof window !== 'undefined' && window.location.pathname !== path) {
+    window.history.pushState(null, '', path)
+  }
+}
+
+const initialUrl = readUrlState()
+
 export const useUIStore = create<UIState>((set) => ({
-  selectedAgentId: null,
+  selectedAgentId: initialUrl.agentId,
   activeRunId: null,
   theme: initialTheme,
   sidebarWidth: getStoredSidebarWidth(),
-  showGlobalMcpManager: false,
+  showGlobalMcpManager: initialUrl.globalMcps,
 
-  selectAgent: (id) => set({ selectedAgentId: id, showGlobalMcpManager: false }),
+  selectAgent: (id) => {
+    pushUrl(id ? `/agents/${id}` : '/')
+    set({ selectedAgentId: id, showGlobalMcpManager: false })
+  },
 
   setActiveRun: (id) => set({ activeRunId: id }),
 
-  setShowGlobalMcpManager: (show) => set({ showGlobalMcpManager: show }),
+  setShowGlobalMcpManager: (show) => {
+    pushUrl(show ? '/global-mcps' : '/')
+    set({ showGlobalMcpManager: show })
+  },
 
   setTheme: (theme) => {
     try {
