@@ -1,0 +1,64 @@
+import type { RunOutputPayload, RunStatusChangePayload } from '@shared/types'
+
+function getConduit() {
+  if (typeof window === 'undefined' || !window.conduit) {
+    throw new Error(
+      'window.conduit is not available. Are you running outside of Electron? ' +
+        'The conduit API is only available in the Electron renderer process.'
+    )
+  }
+  return window.conduit
+}
+
+export const api = {
+  get agents() {
+    return getConduit().agents
+  },
+  get runs() {
+    return getConduit().runs
+  },
+  get gist() {
+    return getConduit().gist
+  },
+  get prefs() {
+    return getConduit().prefs
+  },
+  get shell() {
+    return getConduit().shell
+  },
+  get globalMcps() {
+    return getConduit().globalMcps
+  },
+  get mcpOAuth() {
+    return getConduit().mcpOAuth
+  },
+  onOutput: (cb: (payload: RunOutputPayload) => void): (() => void) => {
+    return getConduit().onOutput(cb)
+  },
+  onRunStatusChange: (cb: (payload: RunStatusChangePayload) => void): (() => void) => {
+    return getConduit().onRunStatusChange(cb)
+  },
+  onMcpOAuthComplete: (
+    cb: (payload: { serverUrl: string; success: boolean; error?: string }) => void
+  ): (() => void) => {
+    return getConduit().onMcpOAuthComplete(cb)
+  },
+  get promptChat() {
+    return getConduit().promptChat
+  },
+  onPromptChatToken: (
+    cb: (payload: { sessionId: string; token: string }) => void
+  ): (() => void) => {
+    return getConduit().onPromptChatToken(cb)
+  },
+  onPromptChatDone: (
+    cb: (payload: { sessionId: string; extractedPrompt?: string }) => void
+  ): (() => void) => {
+    return getConduit().onPromptChatDone(cb)
+  },
+  onPromptChatError: (
+    cb: (payload: { sessionId: string; error: string }) => void
+  ): (() => void) => {
+    return getConduit().onPromptChatError(cb)
+  },
+}
