@@ -74,6 +74,8 @@ export interface AgentConfig {
   envVars: Record<string, string>
   mcpConfig: McpServersConfig
   gistId?: string
+  /** If set, the agent runs in this directory instead of an ephemeral workspace */
+  workingDir?: string
   createdAt: number
   updatedAt: number
 }
@@ -108,6 +110,11 @@ export interface RunStatusChangePayload {
   exitCode?: number
   endedAt?: number
   durationMs?: number
+}
+
+export interface McpHealthResult {
+  status: 'healthy' | 'unhealthy'
+  message: string
 }
 
 export interface GlobalMcpServer {
@@ -154,6 +161,7 @@ export interface ConduitAPI {
     create: (data: Omit<GlobalMcpServer, 'id' | 'createdAt' | 'updatedAt'>) => Promise<GlobalMcpServer>
     update: (id: string, data: Partial<Omit<GlobalMcpServer, 'id' | 'createdAt' | 'updatedAt'>>) => Promise<GlobalMcpServer>
     delete: (id: string) => Promise<void>
+    checkHealth: (serverConfig: McpServerEntry) => Promise<McpHealthResult>
   }
   mcpOAuth: {
     getToken: (serverUrl: string) => Promise<OAuthToken | null>

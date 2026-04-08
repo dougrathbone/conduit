@@ -98,7 +98,7 @@ export function PromptEditor({
 
   return (
     <div className="space-y-1.5">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex flex-col gap-1">
         <div className="flex items-center gap-2">
           <Button
             variant="ghost"
@@ -174,7 +174,7 @@ export function PromptEditor({
         </div>
 
         {gistError && (
-          <p className="text-xs text-red-400 truncate max-w-xs">{gistError}</p>
+          <p className="text-xs text-red-400">{gistError}</p>
         )}
       </div>
 

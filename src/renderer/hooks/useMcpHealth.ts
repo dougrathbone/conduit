@@ -1,0 +1,13 @@
+import { useQuery } from '@tanstack/react-query'
+import { api } from '@renderer/lib/ipc'
+import type { McpServerEntry } from '@shared/types'
+
+export function useMcpHealth(serverId: string, serverConfig: McpServerEntry) {
+  return useQuery({
+    queryKey: ['mcpHealth', serverId],
+    queryFn: () => api.globalMcps.checkHealth(serverConfig),
+    staleTime: 30_000,
+    gcTime: 60_000,
+    retry: 0,
+  })
+}

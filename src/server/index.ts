@@ -119,6 +119,40 @@ const handlers: Record<string, HandlerFn> = {
     return Promise.resolve()
   },
 
+  'globalMcps:checkHealth': async ([serverConfig]) => {
+    const config = serverConfig as import('../shared/types').McpServerEntry
+    const isUrl = config.type === 'url' || !!config.url
+
+    if (isUrl && config.url) {
+      try {
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), 4000)
+        const res = await fetch(config.url, {
+          method: 'GET',
+          signal: controller.signal,
+          headers: { Accept: '*/*' },
+        })
+        clearTimeout(timeout)
+        return { status: 'healthy', message: `HTTP ${res.status} ${res.statusText}` }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'Connection failed'
+        return { status: 'unhealthy', message: msg }
+      }
+    }
+
+    // stdio type — check whether the command binary is available
+    const command = config.command ?? ''
+    if (!command) return { status: 'unhealthy', message: 'No command configured' }
+
+    try {
+      const { execSync } = await import('child_process')
+      execSync(`which ${command}`, { stdio: 'ignore' })
+      return { status: 'healthy', message: `${command} found in PATH` }
+    } catch {
+      return { status: 'unhealthy', message: `${command} not found in PATH` }
+    }
+  },
+
   // Gist
   'gist:save': async ([content, gistId]) => {
     const pat = getGithubPat()

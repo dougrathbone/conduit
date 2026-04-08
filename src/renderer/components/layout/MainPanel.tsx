@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { Trash2 } from 'lucide-react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
+import { useQueryClient } from '@tanstack/react-query'
 import { Button } from '@renderer/components/ui/button'
 import { AgentEditor } from '@renderer/components/agents/AgentEditor'
 import { RunControls } from '@renderer/components/runs/RunControls'
@@ -12,7 +13,7 @@ import { useRuns } from '@renderer/hooks/useRuns'
 import { useUIStore } from '@renderer/store/ui'
 import { cn } from '@renderer/lib/utils'
 import { api } from '@renderer/lib/ipc'
-import type { ExecutionRun, RunStatus, RunStatusChangePayload } from '@shared/types'
+import type { RunStatus, RunStatusChangePayload } from '@shared/types'
 
 type Tab = 'configure' | 'runs'
 
@@ -25,6 +26,7 @@ export function MainPanel({ agentId }: MainPanelProps) {
   const { data: runs } = useRuns(agentId)
   const deleteAgent = useDeleteAgent()
   const { activeRunId, setActiveRun, selectAgent } = useUIStore()
+  const queryClient = useQueryClient()
 
   const [tab, setTab] = useState<Tab>('configure')
   const [selectedHistoryRunId, setSelectedHistoryRunId] = useState<string | null>(null)
@@ -52,17 +54,12 @@ export function MainPanel({ agentId }: MainPanelProps) {
     const unsub = api.onRunStatusChange((payload: RunStatusChangePayload) => {
       if (payload.runId === activeRunId) {
         setLiveRunStatus(payload.status)
+        // Refresh the runs list so history shows updated status/duration
+        queryClient.invalidateQueries({ queryKey: ['runs', agentId] })
       }
     })
     return () => unsub()
-  }, [activeRunId])
-
-  // When a run starts, switch to runs tab and show terminal
-  const handleRunStarted = (run: ExecutionRun) => {
-    setActiveRun(run.id)
-    setSelectedHistoryRunId(null)
-    setTab('runs')
-  }
+  }, [activeRunId, agentId, queryClient])
 
   const handleDeleteAgent = async () => {
     if (!window.confirm(`Delete agent "${agent?.name}"? This cannot be undone.`)) return
@@ -91,6 +88,10 @@ export function MainPanel({ agentId }: MainPanelProps) {
             activeRunId={activeRunId}
             activeRunStatus={liveRunStatus}
             activeRunStartedAt={liveRunStartedAt}
+            onRunStarted={() => {
+              setSelectedHistoryRunId(null)
+              setTab('runs')
+            }}
           />
           <Button
             variant="ghost"

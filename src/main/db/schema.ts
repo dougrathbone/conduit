@@ -17,6 +17,7 @@ export const agents = sqliteTable('agents', {
   envVars: text('env_vars').notNull().default('{}'),
   mcpConfig: text('mcp_config').notNull().default('{"mcpServers":{}}'),
   gistId: text('gist_id'),
+  workingDir: text('working_dir'),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 })

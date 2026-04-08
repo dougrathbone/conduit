@@ -11,6 +11,7 @@ interface RunControlsProps {
   activeRunId: string | null
   activeRunStatus: RunStatus | null
   activeRunStartedAt: number | null
+  onRunStarted?: () => void
 }
 
 export function RunControls({
@@ -18,6 +19,7 @@ export function RunControls({
   activeRunId,
   activeRunStatus,
   activeRunStartedAt,
+  onRunStarted,
 }: RunControlsProps) {
   const { setActiveRun } = useUIStore()
   const startRun = useStartRun(agentId)
@@ -44,6 +46,7 @@ export function RunControls({
     try {
       const run = await startRun.mutateAsync()
       setActiveRun(run.id)
+      onRunStarted?.()
     } catch (e) {
       console.error('Failed to start run:', e)
     }
