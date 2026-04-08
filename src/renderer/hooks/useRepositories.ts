@@ -67,6 +67,13 @@ export function useTriggerRepoSync() {
   })
 }
 
+export function useTestRepoConnection() {
+  return useMutation({
+    mutationFn: (data: { url: string; authMethod: 'none' | 'pat' | 'ssh' }) =>
+      api.repos.testConnection(data),
+  })
+}
+
 /** Subscribe to real-time repo sync status events and invalidate the cache. */
 export function useRepoSyncEvents() {
   const queryClient = useQueryClient()
