@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  conduit:
+    image: ghcr.io/dougrathbone/conduit:latest
+    ports:
+      - "7456:7456"
+    volumes:
+      - conduit_data:/data
+      # Uncomment to make host CLI tools available inside the container:
+      # - /usr/local/bin/claude:/usr/local/bin/claude:ro
+      # - /usr/local/bin/amp:/usr/local/bin/amp:ro
+    environment:
+      - PORT=7456
+      - CONDUIT_DATA_DIR=/data
+      # Restrict access to specific IPs/CIDRs (comma-separated):
+      # - CONDUIT_ALLOWED_IPS=127.0.0.1,192.168.0.0/24,10.0.0.0/8
+
+volumes:
+  conduit_data:
