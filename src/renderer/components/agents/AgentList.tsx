@@ -12,6 +12,26 @@ const runnerLabels: Record<AgentConfig['runner'], string> = {
   cursor: 'Cursor',
 }
 
+// Compact inline SVG logos for sidebar
+function RunnerIcon({ runner, size = 11 }: { runner: AgentConfig['runner']; size?: number }) {
+  if (runner === 'claude') return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" style={{ flexShrink: 0 }}>
+      <path d="M13.827 3.54L19.66 18h-3.133l-1.224-3.24H8.697L7.473 18H4.34L10.173 3.54h3.654zm-1.827 4.09L9.73 12.48h4.54L12 7.63z"/>
+    </svg>
+  )
+  if (runner === 'amp') return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" style={{ flexShrink: 0 }}>
+      <path d="M13 2L4.5 13.5H11L10 22L19.5 10.5H13L13 2Z" strokeLinejoin="round"/>
+    </svg>
+  )
+  // cursor
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" style={{ flexShrink: 0 }}>
+      <path d="M4 3l16 9-7.5 1.5L9 21z"/>
+    </svg>
+  )
+}
+
 interface AgentItemProps {
   agent: AgentConfig
   isSelected: boolean
@@ -46,7 +66,8 @@ function AgentItem({ agent, isSelected, lastRunStatus, onClick }: AgentItemProps
         >
           {agent.name}
         </div>
-        <div className="text-xs text-[var(--text-secondary)] mt-0.5">
+        <div className="flex items-center gap-1 text-xs text-[var(--text-secondary)] mt-0.5">
+          <RunnerIcon runner={agent.runner} />
           {runnerLabels[agent.runner]}
         </div>
       </div>

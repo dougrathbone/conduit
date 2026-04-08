@@ -141,6 +141,28 @@ const handlers: Record<string, HandlerFn> = {
     }
   },
 
+  'gist:list': async () => {
+    const pat = getGithubPat()
+    if (!pat) throw new Error('GitHub PAT not configured')
+    const octokit = new Octokit({ auth: pat })
+    const response = await octokit.gists.list({ per_page: 100 })
+    return response.data.map((g) => ({
+      id: g.id,
+      description: g.description ?? '',
+      files: Object.fromEntries(
+        Object.entries(g.files ?? {}).map(([name, f]) => [
+          name,
+          { filename: f?.filename ?? name, language: f?.language ?? null, size: f?.size ?? 0 },
+        ])
+      ),
+      createdAt: g.created_at,
+      updatedAt: g.updated_at,
+      public: g.public,
+      htmlUrl: g.html_url,
+      isConduitPrompt: 'prompt.md' in (g.files ?? {}),
+    }))
+  },
+
   'gist:load': async ([gistId]) => {
     const pat = getGithubPat()
     if (!pat) throw new Error('GitHub PAT not configured')

@@ -2,12 +2,13 @@ import React, { useState } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import { oneDark } from '@codemirror/theme-one-dark'
 import { EditorView } from '@codemirror/view'
-import { Cloud, CloudDownload, ExternalLink, Loader2, Sparkles } from 'lucide-react'
+import { Cloud, CloudDownload, ExternalLink, FolderOpen, Loader2, Sparkles } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { useUIStore } from '@renderer/store/ui'
 import { useSaveGist, useLoadGist } from '@renderer/hooks/useGist'
 import { api } from '@renderer/lib/ipc'
 import { GistAuthDialog } from '@renderer/components/settings/GistAuthDialog'
+import { GistBrowserDialog } from '@renderer/components/settings/GistBrowserDialog'
 import { PromptChatPanel } from './PromptChatPanel'
 import type { RunnerType } from '@shared/types'
 
@@ -34,11 +35,26 @@ export function PromptEditor({
     (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
 
   const [showGistAuth, setShowGistAuth] = useState(false)
+  const [showGistBrowser, setShowGistBrowser] = useState(false)
   const [gistError, setGistError] = useState<string | null>(null)
   const [isChatOpen, setIsChatOpen] = useState(false)
 
   const saveGist = useSaveGist()
   const loadGist = useLoadGist()
+
+  const handleBrowseGists = async () => {
+    const pat = await api.prefs.get<string>('githubPat')
+    if (!pat) {
+      setShowGistAuth(true)
+      return
+    }
+    setShowGistBrowser(true)
+  }
+
+  const handleGistSelected = (content: string, newGistId: string) => {
+    onChange(content)
+    onGistIdChange(newGistId)
+  }
 
   const handleSaveToGist = async () => {
     setGistError(null)
@@ -128,6 +144,17 @@ export function PromptEditor({
             </>
           )}
 
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleBrowseGists}
+            className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] gap-1.5 text-xs"
+            title="Browse and load a prompt from GitHub Gists"
+          >
+            <FolderOpen className="h-3.5 w-3.5" />
+            Browse Gists
+          </Button>
+
           {agentId && runner && (
             <Button
               variant="ghost"
@@ -186,6 +213,12 @@ export function PromptEditor({
           setShowGistAuth(false)
           handleSaveToGist()
         }}
+      />
+
+      <GistBrowserDialog
+        open={showGistBrowser}
+        onClose={() => setShowGistBrowser(false)}
+        onSelect={handleGistSelected}
       />
     </div>
   )
