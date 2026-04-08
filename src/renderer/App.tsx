@@ -3,6 +3,7 @@ import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels'
 import { Sidebar } from './components/layout/Sidebar'
 import { MainPanel } from './components/layout/MainPanel'
 import { GlobalMcpManager } from './components/settings/GlobalMcpManager'
+import { PublishTargetManager } from './components/settings/PublishTargetManager'
 import { useUIStore } from './store/ui'
 import { useCreateAgent } from './hooks/useAgents'
 import { cn } from './lib/utils'
@@ -59,7 +60,7 @@ function EmptyState() {
 }
 
 export default function App() {
-  const { selectedAgentId, selectAgent, showGlobalMcpManager } = useUIStore()
+  const { selectedAgentId, selectAgent, showGlobalMcpManager, showPublishTargets } = useUIStore()
   const createAgent = useCreateAgent()
 
   const handleNewAgent = useCallback(async () => {
@@ -121,6 +122,8 @@ export default function App() {
           <div className="h-full">
             {showGlobalMcpManager ? (
               <GlobalMcpManager />
+            ) : showPublishTargets ? (
+              <PublishTargetManager />
             ) : selectedAgentId ? (
               <MainPanel agentId={selectedAgentId} />
             ) : (

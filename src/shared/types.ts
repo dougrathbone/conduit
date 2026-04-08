@@ -76,6 +76,8 @@ export interface AgentConfig {
   gistId?: string
   /** If set, the agent runs in this directory instead of an ephemeral workspace */
   workingDir?: string
+  /** IDs of publish targets to notify when a run completes */
+  publishTargetIds?: string[]
   createdAt: number
   updatedAt: number
 }
@@ -127,6 +129,31 @@ export interface GlobalMcpServer {
   updatedAt: number
 }
 
+// ── Publish Targets ─────────────────────────────────────────────────────────
+
+export type PublishTargetType = 'slack'
+
+export interface SlackPublishConfig {
+  /** Slack Bot User OAuth Token (xoxb-...) — used for chat.postMessage */
+  botToken?: string
+  /** Incoming Webhook URL — alternative to bot token */
+  webhookUrl?: string
+  /** Channel or user ID to post to (required for bot token mode) */
+  channel: string
+  /** Emoji icon for the bot (e.g. :robot_face:) — optional override */
+  iconEmoji?: string
+}
+
+export interface PublishTarget {
+  id: string
+  name: string
+  type: PublishTargetType
+  config: SlackPublishConfig
+  enabled: boolean
+  createdAt: number
+  updatedAt: number
+}
+
 // IPC API surface exposed via contextBridge
 export interface ConduitAPI {
   agents: {
@@ -162,6 +189,14 @@ export interface ConduitAPI {
     update: (id: string, data: Partial<Omit<GlobalMcpServer, 'id' | 'createdAt' | 'updatedAt'>>) => Promise<GlobalMcpServer>
     delete: (id: string) => Promise<void>
     checkHealth: (serverConfig: McpServerEntry) => Promise<McpHealthResult>
+  }
+  publishTargets: {
+    list: () => Promise<PublishTarget[]>
+    get: (id: string) => Promise<PublishTarget | null>
+    create: (data: Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>) => Promise<PublishTarget>
+    update: (id: string, data: Partial<Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>>) => Promise<PublishTarget>
+    delete: (id: string) => Promise<void>
+    test: (config: SlackPublishConfig) => Promise<{ success: boolean; error?: string }>
   }
   mcpOAuth: {
     getToken: (serverUrl: string) => Promise<OAuthToken | null>

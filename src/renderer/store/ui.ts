@@ -8,12 +8,14 @@ interface UIState {
   theme: Theme
   sidebarWidth: number
   showGlobalMcpManager: boolean
+  showPublishTargets: boolean
   // Actions
   selectAgent: (id: string | null) => void
   setActiveRun: (id: string | null) => void
   setTheme: (theme: Theme) => void
   setSidebarWidth: (w: number) => void
   setShowGlobalMcpManager: (show: boolean) => void
+  setShowPublishTargets: (show: boolean) => void
 }
 
 function applyTheme(theme: Theme) {
@@ -66,12 +68,13 @@ if (typeof document !== 'undefined') {
 
 // ── URL routing helpers ───────────────────────────────────────────────────────
 
-function readUrlState(): { agentId: string | null; globalMcps: boolean } {
-  if (typeof window === 'undefined') return { agentId: null, globalMcps: false }
+function readUrlState(): { agentId: string | null; globalMcps: boolean; publishTargets: boolean } {
+  if (typeof window === 'undefined') return { agentId: null, globalMcps: false, publishTargets: false }
   const path = window.location.pathname
   const globalMcps = path === '/global-mcps'
+  const publishTargets = path === '/publish-targets'
   const m = path.match(/^\/agents\/([^/]+)$/)
-  return { agentId: m ? m[1] : null, globalMcps }
+  return { agentId: m ? m[1] : null, globalMcps, publishTargets }
 }
 
 function pushUrl(path: string) {
@@ -88,17 +91,23 @@ export const useUIStore = create<UIState>((set) => ({
   theme: initialTheme,
   sidebarWidth: getStoredSidebarWidth(),
   showGlobalMcpManager: initialUrl.globalMcps,
+  showPublishTargets: initialUrl.publishTargets,
 
   selectAgent: (id) => {
     pushUrl(id ? `/agents/${id}` : '/')
-    set({ selectedAgentId: id, showGlobalMcpManager: false })
+    set({ selectedAgentId: id, showGlobalMcpManager: false, showPublishTargets: false })
   },
 
   setActiveRun: (id) => set({ activeRunId: id }),
 
   setShowGlobalMcpManager: (show) => {
     pushUrl(show ? '/global-mcps' : '/')
-    set({ showGlobalMcpManager: show })
+    set({ showGlobalMcpManager: show, showPublishTargets: false })
+  },
+
+  setShowPublishTargets: (show) => {
+    pushUrl(show ? '/publish-targets' : '/')
+    set({ showPublishTargets: show, showGlobalMcpManager: false })
   },
 
   setTheme: (theme) => {

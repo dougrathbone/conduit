@@ -14,6 +14,14 @@ import {
   updateGlobalMcp,
   deleteGlobalMcp,
 } from '../main/db/queries/globalMcps'
+import {
+  listPublishTargets,
+  getPublishTarget,
+  createPublishTarget,
+  updatePublishTarget,
+  deletePublishTarget,
+} from '../main/db/queries/publishTargets'
+import { testSlackConfig } from './publisher'
 import { getGithubPat, setGithubPat, serverStoreGet, serverStoreSet } from './store'
 import { readLogFile } from './utils'
 import { Octokit } from '@octokit/rest'
@@ -23,7 +31,9 @@ import { createIpRestrictionMiddleware } from './middleware/ipRestriction'
 import type {
   AgentConfig,
   GlobalMcpServer,
+  PublishTarget,
   RunnerType,
+  SlackPublishConfig,
 } from '../shared/types'
 
 const PORT = process.env.PORT || 7456
@@ -152,6 +162,27 @@ const handlers: Record<string, HandlerFn> = {
       return { status: 'unhealthy', message: `${command} not found in PATH` }
     }
   },
+
+  // Publish Targets
+  'publishTargets:list': () => Promise.resolve(listPublishTargets()),
+  'publishTargets:get': ([id]) => Promise.resolve(getPublishTarget(id as string)),
+  'publishTargets:create': ([data]) =>
+    Promise.resolve(
+      createPublishTarget(data as Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>)
+    ),
+  'publishTargets:update': ([id, data]) =>
+    Promise.resolve(
+      updatePublishTarget(
+        id as string,
+        data as Partial<Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>>
+      )
+    ),
+  'publishTargets:delete': ([id]) => {
+    deletePublishTarget(id as string)
+    return Promise.resolve()
+  },
+  'publishTargets:test': ([config]) =>
+    testSlackConfig(config as SlackPublishConfig),
 
   // Gist
   'gist:save': async ([content, gistId]) => {

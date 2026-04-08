@@ -11,6 +11,7 @@ import { LOGS_DIR } from '../main/utils/paths'
 import { buildClaudeArgs, parseClaudeOutput } from '../main/execution/adapters/claude'
 import { buildAmpArgs, parseAmpOutput } from '../main/execution/adapters/amp'
 import { buildCursorArgs, CURSOR_NOTICE } from '../main/execution/adapters/cursor'
+import { publishRunResult } from './publisher'
 
 /** Function signature for broadcasting events to all connected WebSocket clients */
 export type BroadcastFn = (channel: string, payload: unknown) => void
@@ -149,7 +150,7 @@ export async function startRunServer(
     const endedAt = Date.now()
     const durationMs = endedAt - run.startedAt
 
-    updateRun(runId, {
+    const finalRun = updateRun(runId, {
       status,
       endedAt,
       durationMs,
@@ -163,6 +164,11 @@ export async function startRunServer(
       endedAt,
       durationMs,
     })
+
+    // Publish to configured targets (fire-and-forget)
+    publishRunResult(agentId, finalRun).catch((err) =>
+      console.error(`[server/runner] Publish failed for run ${runId}:`, err)
+    )
   }
 
   // 6. Spawn process based on runner type
