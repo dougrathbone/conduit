@@ -1,0 +1,159 @@
+export type RunnerType = 'claude' | 'amp' | 'cursor'
+
+export interface ChatMessage {
+  role: 'user' | 'assistant'
+  content: string
+  timestamp: number
+}
+
+export interface PromptChatSession {
+  id: string
+  agentId: string
+  runner: RunnerType
+  messages: ChatMessage[]
+  extractedPrompt?: string
+}
+
+export type RunStatus = 'running' | 'completed' | 'failed' | 'stopped' | 'launched'
+
+export interface McpOAuthConfig {
+  clientId: string
+  authorizationUrl: string  // override discovery if known
+  tokenUrl: string          // override discovery if known
+  scopes: string[]
+}
+
+export interface McpServerEntry {
+  command?: string
+  args?: string[]
+  type?: 'url' | 'stdio'
+  url?: string
+  headers?: Record<string, string>
+  env?: Record<string, string>
+  oauth?: McpOAuthConfig
+}
+
+export interface OAuthToken {
+  serverUrl: string
+  accessToken: string
+  refreshToken?: string
+  expiresAt?: number   // unix ms, undefined = no expiry
+  tokenType: string    // 'Bearer'
+  scope?: string
+}
+
+export interface McpServersConfig {
+  mcpServers: Record<string, McpServerEntry>
+}
+
+export interface AgentConfig {
+  id: string
+  name: string
+  runner: RunnerType
+  prompt: string
+  envVars: Record<string, string>
+  mcpConfig: McpServersConfig
+  gistId?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ExecutionRun {
+  id: string
+  agentId: string
+  status: RunStatus
+  startedAt: number
+  endedAt?: number
+  durationMs?: number
+  workspacePath?: string
+  logPath: string
+  exitCode?: number
+}
+
+export interface LogEntry {
+  t: number
+  stream: 'stdout' | 'stderr' | 'system'
+  chunk: string
+}
+
+export interface RunOutputPayload {
+  runId: string
+  stream: 'stdout' | 'stderr' | 'system'
+  chunks: string[]
+}
+
+export interface RunStatusChangePayload {
+  runId: string
+  status: RunStatus
+  exitCode?: number
+  endedAt?: number
+  durationMs?: number
+}
+
+export interface GlobalMcpServer {
+  id: string
+  name: string
+  serverKey: string
+  serverConfig: McpServerEntry
+  enabled: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+// IPC API surface exposed via contextBridge
+export interface ConduitAPI {
+  agents: {
+    list: () => Promise<AgentConfig[]>
+    get: (id: string) => Promise<AgentConfig | null>
+    create: (data: Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>) => Promise<AgentConfig>
+    update: (id: string, data: Partial<Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>>) => Promise<AgentConfig>
+    delete: (id: string) => Promise<void>
+  }
+  runs: {
+    list: (agentId: string) => Promise<ExecutionRun[]>
+    start: (agentId: string) => Promise<ExecutionRun>
+    stop: (runId: string) => Promise<void>
+    getLog: (runId: string) => Promise<LogEntry[]>
+  }
+  onOutput: (cb: (payload: RunOutputPayload) => void) => () => void
+  onRunStatusChange: (cb: (payload: RunStatusChangePayload) => void) => () => void
+  gist: {
+    save: (content: string, gistId?: string) => Promise<string>
+    load: (gistId: string) => Promise<string>
+  }
+  prefs: {
+    get: <T>(key: string) => Promise<T | undefined>
+    set: (key: string, value: unknown) => Promise<void>
+  }
+  shell: {
+    openExternal: (url: string) => Promise<void>
+  }
+  globalMcps: {
+    list: () => Promise<GlobalMcpServer[]>
+    create: (data: Omit<GlobalMcpServer, 'id' | 'createdAt' | 'updatedAt'>) => Promise<GlobalMcpServer>
+    update: (id: string, data: Partial<Omit<GlobalMcpServer, 'id' | 'createdAt' | 'updatedAt'>>) => Promise<GlobalMcpServer>
+    delete: (id: string) => Promise<void>
+  }
+  mcpOAuth: {
+    getToken: (serverUrl: string) => Promise<OAuthToken | null>
+    startAuth: (serverId: string, isGlobal: boolean) => Promise<void>
+    revokeToken: (serverUrl: string) => Promise<void>
+  }
+  onMcpOAuthComplete: (
+    cb: (payload: { serverUrl: string; success: boolean; error?: string }) => void
+  ) => () => void
+  promptChat: {
+    start: (agentId: string, runner: RunnerType) => Promise<string>
+    send: (sessionId: string, message: string) => Promise<void>
+    close: (sessionId: string) => Promise<void>
+  }
+  onPromptChatToken: (cb: (payload: { sessionId: string; token: string }) => void) => () => void
+  onPromptChatDone: (cb: (payload: { sessionId: string; extractedPrompt?: string }) => void) => () => void
+  onPromptChatError: (cb: (payload: { sessionId: string; error: string }) => void) => () => void
+}
+
+declare global {
+  interface Window {
+    conduit: ConduitAPI
+  }
+}
