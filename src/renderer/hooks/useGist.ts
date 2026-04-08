@@ -1,4 +1,4 @@
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { api } from '@renderer/lib/ipc'
 
 export function useSaveGist() {
@@ -11,5 +11,14 @@ export function useSaveGist() {
 export function useLoadGist() {
   return useMutation({
     mutationFn: (gistId: string) => api.gist.load(gistId),
+  })
+}
+
+export function useListGists(enabled: boolean) {
+  return useQuery({
+    queryKey: ['gists'],
+    queryFn: () => api.gist.list(),
+    enabled,
+    staleTime: 30_000,
   })
 }

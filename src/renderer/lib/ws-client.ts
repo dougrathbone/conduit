@@ -129,6 +129,7 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       save: (content: string, gistId?: string) =>
         invoke<string>('gist:save', content, gistId),
       load: (gistId: string) => invoke<string>('gist:load', gistId),
+      list: () => invoke('gist:list') as any,
     },
 
     prefs: {

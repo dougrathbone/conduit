@@ -1,5 +1,25 @@
 export type RunnerType = 'claude' | 'amp' | 'cursor'
 
+export interface GistFile {
+  filename: string
+  language: string | null
+  size: number
+  truncated?: boolean
+  content?: string
+}
+
+export interface GistSummary {
+  id: string
+  description: string
+  files: Record<string, GistFile>
+  createdAt: string
+  updatedAt: string
+  public: boolean
+  htmlUrl: string
+  /** true when the gist contains a prompt.md file (Conduit-managed) */
+  isConduitPrompt: boolean
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
@@ -120,6 +140,7 @@ export interface ConduitAPI {
   gist: {
     save: (content: string, gistId?: string) => Promise<string>
     load: (gistId: string) => Promise<string>
+    list: () => Promise<GistSummary[]>
   }
   prefs: {
     get: <T>(key: string) => Promise<T | undefined>

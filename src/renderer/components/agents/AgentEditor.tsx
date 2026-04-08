@@ -1,18 +1,78 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { CheckCircle2, Loader2 } from 'lucide-react'
 import { Input } from '@renderer/components/ui/input'
-import { Select } from '@renderer/components/ui/select'
 import { PromptEditor } from './PromptEditor'
 import { EnvVarEditor } from './EnvVarEditor'
 import { McpEditor } from './McpEditor'
 import { useAgent, useUpdateAgent } from '@renderer/hooks/useAgents'
 import type { AgentConfig, RunnerType } from '@shared/types'
 
-const RUNNER_OPTIONS: { value: RunnerType; label: string }[] = [
-  { value: 'claude', label: 'Claude Code' },
-  { value: 'amp', label: 'Amp' },
-  { value: 'cursor', label: 'Cursor' },
+// Inline SVG logos for each runner
+const RunnerLogos: Record<RunnerType, React.FC<{ size?: number; active?: boolean }>> = {
+  claude: ({ size = 22 }) => (
+    // Anthropic Claude mark — simplified stylised "A" shape
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M13.827 3.54L19.66 18h-3.133l-1.224-3.24H8.697L7.473 18H4.34L10.173 3.54h3.654zm-1.827 4.09L9.73 12.48h4.54L12 7.63z" fill="currentColor"/>
+    </svg>
+  ),
+  amp: ({ size = 22 }) => (
+    // Amp "lightning bolt" style mark
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M13 2L4.5 13.5H11L10 22L19.5 10.5H13L13 2Z" fill="currentColor" strokeLinejoin="round"/>
+    </svg>
+  ),
+  cursor: ({ size = 22 }) => (
+    // Cursor — stylised cursor/arrow shape
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+      <path d="M4 3l16 9-7.5 1.5L9 21z" fill="currentColor"/>
+    </svg>
+  ),
+}
+
+const RUNNER_OPTIONS: { value: RunnerType; label: string; description: string }[] = [
+  { value: 'claude', label: 'Claude Code', description: 'Anthropic' },
+  { value: 'amp',    label: 'Amp',         description: 'Sourcegraph' },
+  { value: 'cursor', label: 'Cursor',      description: 'Anysphere' },
 ]
+
+function RunnerPicker({
+  value,
+  onChange,
+}: {
+  value: RunnerType
+  onChange: (r: RunnerType) => void
+}) {
+  return (
+    <div className="flex gap-2">
+      {RUNNER_OPTIONS.map((opt) => {
+        const Logo = RunnerLogos[opt.value]
+        const active = value === opt.value
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => onChange(opt.value)}
+            className="flex flex-col items-center gap-1.5 rounded-xl px-4 py-3 transition-all duration-150 flex-1 group"
+            style={{
+              background: active ? 'var(--accent)' : 'var(--bg-secondary)',
+              border: `1.5px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+              color: active ? '#fff' : 'var(--text-secondary)',
+              boxShadow: active ? '0 2px 12px rgba(129,140,248,0.35)' : 'none',
+            }}
+          >
+            <span style={{ opacity: active ? 1 : 0.6 }} className="transition-opacity group-hover:opacity-100">
+              <Logo size={20} active={active} />
+            </span>
+            <span className="text-[10px] font-semibold tracking-wide leading-tight" style={{ fontFamily: 'monospace' }}>
+              {opt.label}
+            </span>
+            <span className="text-[9px] opacity-60 leading-none">{opt.description}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
 
 interface AgentEditorProps {
   agentId: string
@@ -140,16 +200,10 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
           <label className="block text-xs font-medium text-[var(--text-secondary)]">
             Runner
           </label>
-          <Select
+          <RunnerPicker
             value={draft.runner ?? 'claude'}
-            onChange={(e) => handleChange('runner', e.target.value as RunnerType)}
-          >
-            {RUNNER_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
-                {opt.label}
-              </option>
-            ))}
-          </Select>
+            onChange={(r) => handleChange('runner', r)}
+          />
         </div>
 
         {/* Prompt */}
