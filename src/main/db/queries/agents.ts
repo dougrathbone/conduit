@@ -14,6 +14,7 @@ function rowToAgentConfig(row: typeof agents.$inferSelect): AgentConfig {
     gistId: row.gistId ?? undefined,
     workingDir: row.workingDir ?? undefined,
     publishTargetIds: row.publishTargetIds ? JSON.parse(row.publishTargetIds) as string[] : undefined,
+    repositoryId: row.repositoryId ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -46,6 +47,7 @@ export function createAgent(
     gistId: data.gistId ?? null,
     workingDir: data.workingDir ?? null,
     publishTargetIds: data.publishTargetIds ? JSON.stringify(data.publishTargetIds) : null,
+    repositoryId: data.repositoryId ?? null,
     createdAt: now,
     updatedAt: now,
   }).run()
@@ -73,6 +75,7 @@ export function updateAgent(
   if ('gistId' in data) updateValues.gistId = data.gistId ?? null
   if ('workingDir' in data) updateValues.workingDir = data.workingDir ?? null
   if ('publishTargetIds' in data) updateValues.publishTargetIds = data.publishTargetIds ? JSON.stringify(data.publishTargetIds) : null
+  if ('repositoryId' in data) updateValues.repositoryId = data.repositoryId ?? null
 
   drizzleDb.update(agents).set(updateValues).where(eq(agents.id, id)).run()
 

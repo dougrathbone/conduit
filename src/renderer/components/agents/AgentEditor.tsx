@@ -7,6 +7,7 @@ import { EnvVarEditor } from './EnvVarEditor'
 import { McpEditor } from './McpEditor'
 import { useAgent, useUpdateAgent } from '@renderer/hooks/useAgents'
 import { usePublishTargets } from '@renderer/hooks/usePublishTargets'
+import { useRepositories, useRepoSyncEvents } from '@renderer/hooks/useRepositories'
 import { useUIStore } from '@renderer/store/ui'
 import { cn } from '@renderer/lib/utils'
 import type { AgentConfig, RunnerType } from '@shared/types'
@@ -88,7 +89,9 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   const { data: agent, isLoading } = useAgent(agentId)
   const updateAgent = useUpdateAgent()
   const { data: allPublishTargets = [] } = usePublishTargets()
-  const { setShowPublishTargets } = useUIStore()
+  const { data: allRepos = [] } = useRepositories()
+  useRepoSyncEvents()
+  const { setShowPublishTargets, setShowRepositories } = useUIStore()
 
   const [draft, setDraft] = useState<Partial<AgentConfig>>({})
   const [saveState, setSaveState] = useState<SaveState>('idle')
@@ -108,6 +111,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
         gistId: agent.gistId,
         workingDir: agent.workingDir,
         publishTargetIds: agent.publishTargetIds,
+        repositoryId: agent.repositoryId,
       })
     }
   }, [agent])
@@ -142,8 +146,8 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
       clearTimeout(debounceRef.current)
       debounceRef.current = null
     }
-    const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds } = draft
-    save({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds })
+    const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId } = draft
+    save({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId })
   }, [draft, save])
 
   useEffect(() => {
@@ -156,8 +160,8 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     (field: keyof typeof draft, value: unknown) => {
       const updated = { ...draft, [field]: value }
       setDraft(updated)
-      const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds } = updated
-      scheduleSave({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds })
+      const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId } = updated
+      scheduleSave({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId })
     },
     [draft, scheduleSave]
   )
@@ -231,21 +235,69 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
           />
         </div>
 
-        {/* Working Directory */}
+        {/* Repository */}
         <div className="space-y-1.5">
           <label className="block text-xs font-medium text-[var(--text-secondary)]">
-            Working Directory
+            Repository
           </label>
-          <Input
-            value={draft.workingDir ?? ''}
-            onChange={(e) => handleChange('workingDir', e.target.value || undefined)}
-            placeholder="Leave blank for ephemeral workspace (e.g. /Users/you/code/myrepo)"
-            className="font-mono text-xs"
-          />
+          <select
+            value={draft.repositoryId ?? ''}
+            onChange={(e) => handleChange('repositoryId', e.target.value || undefined)}
+            className="w-full h-9 rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] px-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
+          >
+            <option value="">None (ephemeral workspace)</option>
+            {allRepos.map((repo) => (
+              <option key={repo.id} value={repo.id}>
+                {repo.name} ({repo.defaultBranch}) — {repo.syncStatus === 'ready' ? 'ready' : repo.syncStatus}
+              </option>
+            ))}
+          </select>
+          {draft.repositoryId && (() => {
+            const repo = allRepos.find((r) => r.id === draft.repositoryId)
+            if (!repo) return null
+            return (
+              <div className="flex items-center gap-2 text-xs">
+                <div className={cn(
+                  'w-2 h-2 rounded-full',
+                  repo.syncStatus === 'ready' ? 'bg-green-500' :
+                  repo.syncStatus === 'error' ? 'bg-red-500' :
+                  repo.syncStatus === 'cloning' || repo.syncStatus === 'syncing' ? 'bg-yellow-500' :
+                  'bg-[var(--text-secondary)]'
+                )} />
+                <span className="text-[var(--text-secondary)]">
+                  {repo.syncStatus === 'ready' ? 'Ready' : repo.syncStatus === 'error' ? `Error: ${repo.syncError}` : repo.syncStatus}
+                </span>
+              </div>
+            )
+          })()}
           <p className="text-xs text-[var(--text-secondary)]">
-            If set, the agent runs inside this directory instead of a temporary workspace. Required for agents that need access to a git repository.
+            Assign a managed repository to give the agent an isolated worktree per run.{' '}
+            <button
+              onClick={() => setShowRepositories(true)}
+              className="text-[var(--accent)] hover:underline"
+            >
+              Manage repositories
+            </button>
           </p>
         </div>
+
+        {/* Working Directory (hidden when repo is selected) */}
+        {!draft.repositoryId && (
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[var(--text-secondary)]">
+              Working Directory
+            </label>
+            <Input
+              value={draft.workingDir ?? ''}
+              onChange={(e) => handleChange('workingDir', e.target.value || undefined)}
+              placeholder="Leave blank for ephemeral workspace (e.g. /Users/you/code/myrepo)"
+              className="font-mono text-xs"
+            />
+            <p className="text-xs text-[var(--text-secondary)]">
+              If set, the agent runs inside this directory instead of a temporary workspace.
+            </p>
+          </div>
+        )}
 
         {/* Prompt */}
         <div className="space-y-1.5">

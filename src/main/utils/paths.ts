@@ -30,9 +30,12 @@ const dataDir = resolveDataDir()
 
 export const DB_PATH: string = path.join(dataDir, 'conduit.db')
 export const LOGS_DIR: string = path.join(dataDir, 'logs')
+export const REPOS_DIR: string = path.join(dataDir, 'repos')
 export const WORKSPACES_BASE: string = os.tmpdir()
 
-// Ensure LOGS_DIR exists on module import
-if (!fs.existsSync(LOGS_DIR)) {
-  fs.mkdirSync(LOGS_DIR, { recursive: true })
+// Ensure directories exist on module import
+for (const dir of [LOGS_DIR, REPOS_DIR]) {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
+  }
 }

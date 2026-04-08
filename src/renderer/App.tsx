@@ -4,6 +4,7 @@ import { Sidebar } from './components/layout/Sidebar'
 import { MainPanel } from './components/layout/MainPanel'
 import { GlobalMcpManager } from './components/settings/GlobalMcpManager'
 import { PublishTargetManager } from './components/settings/PublishTargetManager'
+import { RepositoryManager } from './components/settings/RepositoryManager'
 import { useUIStore } from './store/ui'
 import { useCreateAgent } from './hooks/useAgents'
 import { cn } from './lib/utils'
@@ -60,7 +61,7 @@ function EmptyState() {
 }
 
 export default function App() {
-  const { selectedAgentId, selectAgent, showGlobalMcpManager, showPublishTargets } = useUIStore()
+  const { selectedAgentId, selectAgent, showGlobalMcpManager, showPublishTargets, showRepositories } = useUIStore()
   const createAgent = useCreateAgent()
 
   const handleNewAgent = useCallback(async () => {
@@ -120,7 +121,9 @@ export default function App() {
         {/* Main content */}
         <Panel defaultSize={78} minSize={40}>
           <div className="h-full">
-            {showGlobalMcpManager ? (
+            {showRepositories ? (
+              <RepositoryManager />
+            ) : showGlobalMcpManager ? (
               <GlobalMcpManager />
             ) : showPublishTargets ? (
               <PublishTargetManager />

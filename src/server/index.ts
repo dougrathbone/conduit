@@ -21,6 +21,14 @@ import {
   updatePublishTarget,
   deletePublishTarget,
 } from '../main/db/queries/publishTargets'
+import {
+  listRepositories,
+  getRepository,
+  createRepository,
+  updateRepository,
+  deleteRepository,
+} from '../main/db/queries/repositories'
+import { RepoSyncService } from './repoSync'
 import { testSlackConfig } from './publisher'
 import { getGithubPat, setGithubPat, serverStoreGet, serverStoreSet } from './store'
 import { readLogFile } from './utils'
@@ -32,6 +40,7 @@ import type {
   AgentConfig,
   GlobalMcpServer,
   PublishTarget,
+  Repository,
   RunnerType,
   SlackPublishConfig,
 } from '../shared/types'
@@ -161,6 +170,34 @@ const handlers: Record<string, HandlerFn> = {
     } catch {
       return { status: 'unhealthy', message: `${command} not found in PATH` }
     }
+  },
+
+  // Repositories
+  'repos:list': () => Promise.resolve(listRepositories()),
+  'repos:get': ([id]) => Promise.resolve(getRepository(id as string)),
+  'repos:create': async ([data]) => {
+    const repo = createRepository(
+      data as Omit<Repository, 'id' | 'createdAt' | 'updatedAt' | 'syncStatus' | 'clonePath'>
+    )
+    // Trigger initial clone asynchronously
+    repoSyncService.triggerSync(repo.id).catch((err) =>
+      console.error(`[server] Initial sync failed for repo ${repo.id}:`, err)
+    )
+    return repo
+  },
+  'repos:update': ([id, data]) =>
+    Promise.resolve(
+      updateRepository(
+        id as string,
+        data as Partial<Omit<Repository, 'id' | 'createdAt' | 'updatedAt'>>
+      )
+    ),
+  'repos:delete': ([id]) => {
+    deleteRepository(id as string)
+    return Promise.resolve()
+  },
+  'repos:triggerSync': async ([id]) => {
+    await repoSyncService.triggerSync(id as string)
   },
 
   // Publish Targets
@@ -353,6 +390,10 @@ for (const run of orphaned) {
 if (orphaned.length > 0) {
   console.log(`[server] Marked ${orphaned.length} orphaned run(s) as failed`)
 }
+
+// Start the repository sync service (clones new repos, fetches existing ones)
+const repoSyncService = new RepoSyncService(broadcast)
+repoSyncService.start()
 
 httpServer.listen(PORT, () => {
   console.log(`Conduit server running at http://localhost:${PORT}`)

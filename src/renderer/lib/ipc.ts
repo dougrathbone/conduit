@@ -1,4 +1,4 @@
-import type { RunOutputPayload, RunStatusChangePayload } from '@shared/types'
+import type { RunOutputPayload, RunStatusChangePayload, RepoSyncStatusPayload } from '@shared/types'
 
 function getConduit() {
   if (typeof window === 'undefined' || !window.conduit) {
@@ -28,6 +28,15 @@ export const api = {
   },
   get globalMcps() {
     return getConduit().globalMcps
+  },
+  get repos() {
+    return getConduit().repos
+  },
+  onRepoSyncStatus: (cb: (payload: RepoSyncStatusPayload) => void): (() => void) => {
+    return getConduit().onRepoSyncStatus(cb)
+  },
+  get publishTargets() {
+    return getConduit().publishTargets
   },
   get mcpOAuth() {
     return getConduit().mcpOAuth

@@ -78,6 +78,8 @@ export interface AgentConfig {
   workingDir?: string
   /** IDs of publish targets to notify when a run completes */
   publishTargetIds?: string[]
+  /** ID of a managed repository to use as the workspace */
+  repositoryId?: string
   createdAt: number
   updatedAt: number
 }
@@ -127,6 +129,31 @@ export interface GlobalMcpServer {
   enabled: boolean
   createdAt: number
   updatedAt: number
+}
+
+// ── Repositories ────────────────────────────────────────────────────────────
+
+export type RepoSyncStatus = 'pending' | 'cloning' | 'ready' | 'syncing' | 'error'
+
+export interface Repository {
+  id: string
+  name: string
+  url: string
+  defaultBranch: string
+  authMethod: 'none' | 'pat' | 'ssh'
+  syncStatus: RepoSyncStatus
+  syncError?: string
+  lastSyncedAt?: number
+  clonePath?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface RepoSyncStatusPayload {
+  repoId: string
+  syncStatus: RepoSyncStatus
+  syncError?: string
+  lastSyncedAt?: number
 }
 
 // ── Publish Targets ─────────────────────────────────────────────────────────
@@ -190,6 +217,15 @@ export interface ConduitAPI {
     delete: (id: string) => Promise<void>
     checkHealth: (serverConfig: McpServerEntry) => Promise<McpHealthResult>
   }
+  repos: {
+    list: () => Promise<Repository[]>
+    get: (id: string) => Promise<Repository | null>
+    create: (data: Omit<Repository, 'id' | 'createdAt' | 'updatedAt' | 'syncStatus' | 'clonePath'>) => Promise<Repository>
+    update: (id: string, data: Partial<Omit<Repository, 'id' | 'createdAt' | 'updatedAt'>>) => Promise<Repository>
+    delete: (id: string) => Promise<void>
+    triggerSync: (id: string) => Promise<void>
+  }
+  onRepoSyncStatus: (cb: (payload: RepoSyncStatusPayload) => void) => () => void
   publishTargets: {
     list: () => Promise<PublishTarget[]>
     get: (id: string) => Promise<PublishTarget | null>
