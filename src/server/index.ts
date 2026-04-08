@@ -40,9 +40,10 @@ const httpServer = createServer(app)
 const wss = new WebSocketServer({ noServer: true })
 
 // Serve the built renderer static files.
-// When compiled, this file lives at out/server/index.js, so the renderer
-// output at out/renderer/ is one level up then into renderer/.
-const RENDERER_DIR = path.join(__dirname, '../renderer')
+// Use process.cwd() so this resolves correctly whether running via:
+//   - tsx src/server/index.ts  (__dirname = src/server/)
+//   - node out/server/index.js (__dirname = out/server/)
+const RENDERER_DIR = path.join(process.cwd(), 'out', 'renderer')
 
 // ─── IP Restrictions ──────────────────────────────────────────────────────────
 
