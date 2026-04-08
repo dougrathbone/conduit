@@ -31,11 +31,73 @@ function extractPublishContent(stdout: string): string | null {
   return stdout.slice(contentStart, endIdx).trim()
 }
 
+/**
+ * Convert markdown formatting to Slack mrkdwn.
+ *
+ * - **bold** → *bold*
+ * - [text](url) → <url|text>
+ * - `code` stays as `code`
+ * - ```block``` stays as ```block```
+ */
+function markdownToSlackMrkdwn(text: string): string {
+  let result = text
+
+  // Convert markdown links [text](url) → <url|text>
+  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>')
+
+  // Convert **bold** → *bold* (Slack uses single asterisk)
+  // Be careful not to touch already-single asterisks
+  result = result.replace(/\*\*([^*]+)\*\*/g, '*$1*')
+
+  return result
+}
+
+interface SlackBlock {
+  type: string
+  text?: { type: string; text: string }
+}
+
 async function postToSlack(
   config: SlackPublishConfig,
   message: string
 ): Promise<void> {
-  const body: Record<string, unknown> = { text: message }
+  const slackMessage = markdownToSlackMrkdwn(message)
+
+  // Use a section block for proper mrkdwn rendering
+  const blocks: SlackBlock[] = []
+
+  // Slack blocks have a 3000 char limit per text field — split if needed
+  const chunks: string[] = []
+  if (slackMessage.length <= 3000) {
+    chunks.push(slackMessage)
+  } else {
+    // Split on double-newlines (paragraph boundaries)
+    const paragraphs = slackMessage.split(/\n\n+/)
+    let current = ''
+    for (const p of paragraphs) {
+      if (current.length + p.length + 2 > 3000) {
+        if (current) chunks.push(current.trim())
+        current = p
+      } else {
+        current += (current ? '\n\n' : '') + p
+      }
+    }
+    if (current) chunks.push(current.trim())
+  }
+
+  for (const chunk of chunks) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: chunk },
+    })
+  }
+
+  const body: Record<string, unknown> = {
+    text: message, // Fallback plain text for notifications
+    blocks,
+    unfurl_links: false,
+    unfurl_media: false,
+  }
   if (config.iconEmoji) body.icon_emoji = config.iconEmoji
 
   if (config.webhookUrl) {
