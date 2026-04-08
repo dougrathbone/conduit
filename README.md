@@ -2,6 +2,8 @@
 
 A self-hosted web application for managing and running AI CLI agents (Claude Code, Amp, Cursor) with ephemeral workspaces, terminal streaming, MCP server management, and GitHub Gist integration.
 
+![Conduit screenshot](docs/screenshot.png)
+
 ## Features
 
 - **Multi-runner support** — Claude Code, Amp, and Cursor agents
