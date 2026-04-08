@@ -49,13 +49,43 @@ export function injectOAuthTokens(config: McpServersConfig): McpServersConfig {
 }
 
 /**
+ * Expands ${VAR_NAME} placeholders in MCP server config strings using process.env.
+ * Applies to env values and args strings. Unset variables are left as-is.
+ */
+function expandEnvVars(value: string): string {
+  return value.replace(/\$\{([^}]+)\}/g, (match, name) => process.env[name] ?? match)
+}
+
+function resolveServerEnv(entry: McpServerEntry): McpServerEntry {
+  const resolved: McpServerEntry = { ...entry }
+  if (entry.env) {
+    resolved.env = Object.fromEntries(
+      Object.entries(entry.env).map(([k, v]) => [k, expandEnvVars(v)])
+    )
+  }
+  if (entry.args) {
+    resolved.args = entry.args.map(expandEnvVars)
+  }
+  return resolved
+}
+
+function resolveAllEnvVars(config: McpServersConfig): McpServersConfig {
+  return {
+    mcpServers: Object.fromEntries(
+      Object.entries(config.mcpServers).map(([key, entry]) => [key, resolveServerEnv(entry)])
+    ),
+  }
+}
+
+/**
  * Writes an MCP config JSON file to the OS temp directory.
  * Returns the path to the written file.
  */
 export function writeMcpConfig(runId: string, config: McpServersConfig): string {
   const withTokens = injectOAuthTokens(config)
+  const withEnv = resolveAllEnvVars(withTokens)
   const filePath = path.join(os.tmpdir(), `conduit-mcp-${runId}.json`)
-  fs.writeFileSync(filePath, JSON.stringify(withTokens, null, 2), 'utf8')
+  fs.writeFileSync(filePath, JSON.stringify(withEnv, null, 2), 'utf8')
   return filePath
 }
 
