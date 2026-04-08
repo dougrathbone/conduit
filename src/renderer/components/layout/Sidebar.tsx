@@ -1,17 +1,20 @@
 import React from 'react'
-import { Plus, Sun, Moon, Monitor, Server } from 'lucide-react'
+import { Plus, Sun, Moon, Monitor, Server, Send } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { AgentList } from '@renderer/components/agents/AgentList'
 import { useUIStore } from '@renderer/store/ui'
 import { useCreateAgent } from '@renderer/hooks/useAgents'
 import { useGlobalMcps } from '@renderer/hooks/useGlobalMcps'
+import { usePublishTargets } from '@renderer/hooks/usePublishTargets'
 import { cn } from '@renderer/lib/utils'
 
 export function Sidebar() {
-  const { theme, setTheme, selectAgent, showGlobalMcpManager, setShowGlobalMcpManager } = useUIStore()
+  const { theme, setTheme, selectAgent, showGlobalMcpManager, setShowGlobalMcpManager, showPublishTargets, setShowPublishTargets } = useUIStore()
   const createAgent = useCreateAgent()
   const { data: globalMcps = [] } = useGlobalMcps()
+  const { data: publishTargets = [] } = usePublishTargets()
   const enabledGlobalCount = globalMcps.filter((m) => m.enabled).length
+  const enabledPublishCount = publishTargets.filter((t) => t.enabled).length
 
   const handleNewAgent = async () => {
     try {
@@ -44,8 +47,8 @@ export function Sidebar() {
     >
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-3 border-b border-[var(--border)]">
-        <span className="text-sm font-semibold tracking-wide text-[var(--text-primary)]">
-          CONDUIT
+        <span className="text-xl font-bold tracking-wide text-[var(--accent)]" style={{ fontFamily: 'monospace' }}>
+          &gt;_conduit
         </span>
         <button
           onClick={cycleTheme}
@@ -75,8 +78,8 @@ export function Sidebar() {
         <AgentList />
       </div>
 
-      {/* Footer: Global MCPs */}
-      <div className="border-t border-[var(--border)] px-3 py-2">
+      {/* Footer: Global MCPs + Publish Targets */}
+      <div className="border-t border-[var(--border)] px-3 py-2 space-y-1">
         <button
           onClick={() => setShowGlobalMcpManager(true)}
           className={cn(
@@ -98,6 +101,30 @@ export function Sidebar() {
               )}
             >
               {enabledGlobalCount}
+            </span>
+          )}
+        </button>
+        <button
+          onClick={() => setShowPublishTargets(true)}
+          className={cn(
+            'w-full flex items-center gap-2 px-2.5 py-2 rounded-md text-xs font-medium transition-colors',
+            showPublishTargets
+              ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
+              : 'text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)] hover:text-[var(--text-primary)]'
+          )}
+        >
+          <Send className="h-3.5 w-3.5 flex-shrink-0" />
+          <span className="flex-1 text-left">Publish Targets</span>
+          {enabledPublishCount > 0 && (
+            <span
+              className={cn(
+                'px-1.5 py-0.5 rounded text-[10px] font-medium',
+                showPublishTargets
+                  ? 'bg-[var(--accent)]/20 text-[var(--accent)]'
+                  : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)]'
+              )}
+            >
+              {enabledPublishCount}
             </span>
           )}
         </button>

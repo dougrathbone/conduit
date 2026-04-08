@@ -6,8 +6,10 @@ import type {
   ExecutionRun,
   LogEntry,
   GlobalMcpServer,
+  PublishTarget,
   OAuthToken,
   RunnerType,
+  SlackPublishConfig,
 } from '@shared/types'
 
 /**
@@ -154,6 +156,20 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       delete: (id: string) => invoke<void>('globalMcps:delete', id),
       checkHealth: (serverConfig: import('@shared/types').McpServerEntry) =>
         invoke<import('@shared/types').McpHealthResult>('globalMcps:checkHealth', serverConfig),
+    },
+
+    publishTargets: {
+      list: () => invoke<PublishTarget[]>('publishTargets:list'),
+      get: (id: string) => invoke<PublishTarget | null>('publishTargets:get', id),
+      create: (data: Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>) =>
+        invoke<PublishTarget>('publishTargets:create', data),
+      update: (
+        id: string,
+        data: Partial<Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>>
+      ) => invoke<PublishTarget>('publishTargets:update', id, data),
+      delete: (id: string) => invoke<void>('publishTargets:delete', id),
+      test: (config: SlackPublishConfig) =>
+        invoke<{ success: boolean; error?: string }>('publishTargets:test', config),
     },
 
     mcpOAuth: {

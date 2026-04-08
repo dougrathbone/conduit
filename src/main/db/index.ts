@@ -51,6 +51,16 @@ export function initDb(): void {
       FOREIGN KEY (agent_id) REFERENCES agents(id)
     );
 
+    CREATE TABLE IF NOT EXISTS publish_targets (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'slack',
+      config TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS oauth_tokens (
       server_url TEXT PRIMARY KEY,
       access_token TEXT NOT NULL,
@@ -63,6 +73,7 @@ export function initDb(): void {
 
   // Migrations: add columns added after initial schema
   try { db.exec('ALTER TABLE agents ADD COLUMN working_dir TEXT') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE agents ADD COLUMN publish_target_ids TEXT') } catch { /* already exists */ }
 
   drizzleDb = drizzle(db, { schema })
 }

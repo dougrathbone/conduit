@@ -1,11 +1,14 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
-import { CheckCircle2, Loader2, Save } from 'lucide-react'
+import { CheckCircle2, Loader2, Save, Send } from 'lucide-react'
 import { Input } from '@renderer/components/ui/input'
 import { Button } from '@renderer/components/ui/button'
 import { PromptEditor } from './PromptEditor'
 import { EnvVarEditor } from './EnvVarEditor'
 import { McpEditor } from './McpEditor'
 import { useAgent, useUpdateAgent } from '@renderer/hooks/useAgents'
+import { usePublishTargets } from '@renderer/hooks/usePublishTargets'
+import { useUIStore } from '@renderer/store/ui'
+import { cn } from '@renderer/lib/utils'
 import type { AgentConfig, RunnerType } from '@shared/types'
 
 // Inline SVG logos for each runner
@@ -84,6 +87,8 @@ type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 export function AgentEditor({ agentId }: AgentEditorProps) {
   const { data: agent, isLoading } = useAgent(agentId)
   const updateAgent = useUpdateAgent()
+  const { data: allPublishTargets = [] } = usePublishTargets()
+  const { setShowPublishTargets } = useUIStore()
 
   const [draft, setDraft] = useState<Partial<AgentConfig>>({})
   const [saveState, setSaveState] = useState<SaveState>('idle')
@@ -102,6 +107,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
         mcpConfig: agent.mcpConfig,
         gistId: agent.gistId,
         workingDir: agent.workingDir,
+        publishTargetIds: agent.publishTargetIds,
       })
     }
   }, [agent])
@@ -136,8 +142,8 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
       clearTimeout(debounceRef.current)
       debounceRef.current = null
     }
-    const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir } = draft
-    save({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir })
+    const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds } = draft
+    save({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds })
   }, [draft, save])
 
   useEffect(() => {
@@ -150,8 +156,8 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     (field: keyof typeof draft, value: unknown) => {
       const updated = { ...draft, [field]: value }
       setDraft(updated)
-      const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir } = updated
-      scheduleSave({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir })
+      const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds } = updated
+      scheduleSave({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds })
     },
     [draft, scheduleSave]
   )
@@ -276,6 +282,78 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
             value={draft.mcpConfig ?? { mcpServers: {} }}
             onChange={(v) => handleChange('mcpConfig', v)}
           />
+        </div>
+
+        {/* Publish Targets */}
+        <div className="space-y-1.5">
+          <label className="block text-xs font-medium text-[var(--text-secondary)]">
+            Publish Targets
+          </label>
+          {allPublishTargets.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-[var(--border)] px-4 py-3 text-center">
+              <p className="text-xs text-[var(--text-secondary)]">
+                No publish targets configured.
+              </p>
+              <button
+                onClick={() => setShowPublishTargets(true)}
+                className="text-xs text-[var(--accent)] hover:underline mt-1"
+              >
+                Create a publish target
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-1.5">
+              {allPublishTargets.map((target) => {
+                const selected = (draft.publishTargetIds ?? []).includes(target.id)
+                return (
+                  <button
+                    key={target.id}
+                    type="button"
+                    onClick={() => {
+                      const current = draft.publishTargetIds ?? []
+                      const next = selected
+                        ? current.filter((id) => id !== target.id)
+                        : [...current, target.id]
+                      handleChange('publishTargetIds', next.length > 0 ? next : undefined)
+                    }}
+                    className={cn(
+                      'w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border text-left transition-all',
+                      selected
+                        ? 'border-[var(--accent)] bg-[var(--accent)]/10'
+                        : 'border-[var(--border)] bg-[var(--bg-secondary)] hover:border-[var(--text-secondary)]'
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        'w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center transition-colors',
+                        selected
+                          ? 'bg-[var(--accent)] border-[var(--accent)]'
+                          : 'border-[var(--text-secondary)]'
+                      )}
+                    >
+                      {selected && (
+                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                          <path d="M2 5L4 7L8 3" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                      )}
+                    </div>
+                    <Send className="h-3 w-3 flex-shrink-0 text-[var(--text-secondary)]" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-xs font-medium text-[var(--text-primary)] truncate">
+                        {target.name}
+                      </p>
+                      <p className="text-[10px] text-[var(--text-secondary)] truncate">
+                        {target.config.webhookUrl ? 'Webhook' : `#${target.config.channel}`}
+                      </p>
+                    </div>
+                    {!target.enabled && (
+                      <span className="text-[10px] text-amber-400 flex-shrink-0">disabled</span>
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -18,6 +18,7 @@ export const agents = sqliteTable('agents', {
   mcpConfig: text('mcp_config').notNull().default('{"mcpServers":{}}'),
   gistId: text('gist_id'),
   workingDir: text('working_dir'),
+  publishTargetIds: text('publish_target_ids'),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 })
@@ -27,6 +28,16 @@ export const globalMcpServers = sqliteTable('global_mcp_servers', {
   name: text('name').notNull(),
   serverKey: text('server_key').notNull(),
   serverConfig: text('server_config').notNull(),
+  enabled: integer('enabled').notNull().default(1),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+})
+
+export const publishTargets = sqliteTable('publish_targets', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  type: text('type').notNull().default('slack'),
+  config: text('config').notNull().default('{}'),
   enabled: integer('enabled').notNull().default(1),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
