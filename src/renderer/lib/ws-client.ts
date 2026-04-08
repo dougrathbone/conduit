@@ -197,8 +197,8 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
         data: Partial<Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>>
       ) => invoke<PublishTarget>('publishTargets:update', id, data),
       delete: (id: string) => invoke<void>('publishTargets:delete', id),
-      test: (config: SlackPublishConfig) =>
-        invoke<{ success: boolean; error?: string }>('publishTargets:test', config),
+      test: (type: import('@shared/types').PublishTargetType, config: import('@shared/types').PublishConfig) =>
+        invoke<{ success: boolean; error?: string }>('publishTargets:test', type, config),
     },
 
     mcpOAuth: {

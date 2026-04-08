@@ -29,7 +29,7 @@ import {
   deleteRepository,
 } from '../main/db/queries/repositories'
 import { RepoSyncService } from './repoSync'
-import { testSlackConfig } from './publisher'
+import { testPublishTarget } from './publisher'
 import { listMcpTools } from './mcpTools'
 import { getGithubPat, setGithubPat, serverStoreGet, serverStoreSet } from './store'
 import { readLogFile } from './utils'
@@ -235,8 +235,8 @@ const handlers: Record<string, HandlerFn> = {
     deletePublishTarget(id as string)
     return Promise.resolve()
   },
-  'publishTargets:test': ([config]) =>
-    testSlackConfig(config as SlackPublishConfig),
+  'publishTargets:test': ([type, config]) =>
+    testPublishTarget(type as import('../shared/types').PublishTargetType, config as import('../shared/types').PublishConfig),
 
   // Gist
   'gist:save': async ([content, gistId]) => {

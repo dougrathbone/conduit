@@ -168,7 +168,7 @@ export interface RepoSyncStatusPayload {
 
 // ── Publish Targets ─────────────────────────────────────────────────────────
 
-export type PublishTargetType = 'slack'
+export type PublishTargetType = 'slack' | 'email' | 'webhook'
 
 export interface SlackPublishConfig {
   /** Slack Bot User OAuth Token (xoxb-...) — used for chat.postMessage */
@@ -181,11 +181,43 @@ export interface SlackPublishConfig {
   iconEmoji?: string
 }
 
+export interface EmailPublishConfig {
+  /** SMTP host */
+  smtpHost: string
+  /** SMTP port (default 587) */
+  smtpPort: number
+  /** SMTP username */
+  smtpUser: string
+  /** SMTP password or app password */
+  smtpPass: string
+  /** Use TLS (default true) */
+  smtpSecure: boolean
+  /** From address */
+  from: string
+  /** Comma-separated recipient addresses */
+  to: string
+  /** Email subject template — {{agentName}} and {{status}} are replaced */
+  subject: string
+}
+
+export interface WebhookPublishConfig {
+  /** URL to POST to */
+  url: string
+  /** HTTP method (default POST) */
+  method: 'POST' | 'PUT'
+  /** Optional headers as key-value pairs */
+  headers: Record<string, string>
+  /** Optional shared secret for HMAC-SHA256 signature in X-Conduit-Signature header */
+  secret?: string
+}
+
+export type PublishConfig = SlackPublishConfig | EmailPublishConfig | WebhookPublishConfig
+
 export interface PublishTarget {
   id: string
   name: string
   type: PublishTargetType
-  config: SlackPublishConfig
+  config: PublishConfig
   enabled: boolean
   createdAt: number
   updatedAt: number
@@ -244,7 +276,7 @@ export interface ConduitAPI {
     create: (data: Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>) => Promise<PublishTarget>
     update: (id: string, data: Partial<Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>>) => Promise<PublishTarget>
     delete: (id: string) => Promise<void>
-    test: (config: SlackPublishConfig) => Promise<{ success: boolean; error?: string }>
+    test: (type: PublishTargetType, config: PublishConfig) => Promise<{ success: boolean; error?: string }>
   }
   mcpOAuth: {
     getToken: (serverUrl: string) => Promise<OAuthToken | null>

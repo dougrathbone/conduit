@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@renderer/lib/ipc'
-import type { PublishTarget, SlackPublishConfig } from '@shared/types'
+import type { PublishTarget, PublishTargetType, PublishConfig } from '@shared/types'
 
 const PUBLISH_TARGETS_KEY = ['publishTargets'] as const
 
@@ -58,6 +58,7 @@ export function useDeletePublishTarget() {
 
 export function useTestPublishTarget() {
   return useMutation({
-    mutationFn: (config: SlackPublishConfig) => api.publishTargets.test(config),
+    mutationFn: ({ type, config }: { type: PublishTargetType; config: PublishConfig }) =>
+      api.publishTargets.test(type, config),
   })
 }

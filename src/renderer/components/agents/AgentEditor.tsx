@@ -384,7 +384,7 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
                         {target.name}
                       </p>
                       <p className="text-[10px] text-[var(--text-secondary)] truncate">
-                        {target.config.webhookUrl ? 'Webhook' : `#${target.config.channel}`}
+                        {target.type === 'slack' ? ((target.config as any).webhookUrl ? 'Slack Webhook' : `Slack → #${(target.config as any).channel}`) : target.type === 'email' ? `Email → ${(target.config as any).to}` : `Webhook → ${(target.config as any).url}`}
                       </p>
                     </div>
                     {!target.enabled && (
