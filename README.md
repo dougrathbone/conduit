@@ -10,6 +10,7 @@ A self-hosted web application for managing and running AI CLI agents (Claude Cod
 - **Live terminal streaming** — xterm.js with full ANSI colour output
 - **MCP management** — global and per-agent MCP servers with OAuth support and health indicators
 - **GitHub Gist integration** — save/load/browse prompts; AI-assisted prompt crafting
+- **Publish targets** — deliver agent output to Slack (bot token or webhook), email (SMTP), or arbitrary webhooks (with HMAC signing)
 - **Working directory** — run agents inside an existing repo instead of an ephemeral workspace
 - **URL routing** — agent detail view survives page refresh
 - **IP allowlist** — restrict portal access by CIDR range
@@ -125,6 +126,8 @@ src/
 
 **`global_mcp_servers`** — id, name, serverKey, serverConfig (JSON), enabled, createdAt, updatedAt
 
+**`publish_targets`** — id, name, type (`slack|email|webhook`), config (JSON), enabled, createdAt, updatedAt
+
 **`oauth_tokens`** — serverUrl, accessToken, refreshToken, expiresAt, tokenType, scope
 
 Run output is stored as NDJSON in `{CONDUIT_DATA_DIR}/logs/{runId}.jsonl` with entries `{t, stream, chunk}`.
@@ -142,6 +145,30 @@ The prompt is written to the CLI's stdin rather than passed as a positional argu
 ### MCP configuration
 
 Agent-specific and global MCP servers are merged before each run (agent config wins on key conflict). `${ENV_VAR}` placeholders in `env` and `args` fields are expanded from the server's process environment. OAuth tokens are injected as `Authorization: Bearer` headers automatically.
+
+## Publish targets
+
+Publish targets let agents deliver their output to external channels. Create targets in the **Publish Targets** panel and assign them to agents in the agent editor.
+
+| Type | Delivery | Config |
+|------|----------|--------|
+| **Slack** | `chat.postMessage` API or incoming webhook | Bot token + channel ID, or webhook URL |
+| **Email** | SMTP | Host, port, TLS, credentials, from/to addresses, subject template |
+| **Webhook** | HTTP POST/PUT | URL, custom headers, optional HMAC-SHA256 signing secret |
+
+### Agent-controlled content
+
+The agent controls what gets published. If the agent's output contains a publish block:
+
+```
+<!--CONDUIT:PUBLISH-->
+Your formatted summary here (supports **markdown** and [links](url))
+<!--/CONDUIT:PUBLISH-->
+```
+
+Only the content between the tags is sent. Otherwise, the full stdout is delivered.
+
+For Slack targets, markdown is automatically converted to mrkdwn (`**bold**` → `*bold*`, `[text](url)` → `<url|text>`). For email, markdown is converted to HTML. Webhooks receive a JSON payload: `{ content, agent, runId, timestamp }`.
 
 ## Seeding global MCPs
 
