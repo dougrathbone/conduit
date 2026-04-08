@@ -1,5 +1,4 @@
 import { eq } from 'drizzle-orm'
-import { nanoid } from 'nanoid'
 import { drizzleDb } from '../index'
 import { agents } from '../schema'
 import type { AgentConfig, McpServersConfig } from '../../../shared/types'
@@ -33,7 +32,7 @@ export function createAgent(
   data: Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>
 ): AgentConfig {
   const now = Date.now()
-  const id = nanoid()
+  const id = crypto.randomUUID()
 
   drizzleDb.insert(agents).values({
     id,

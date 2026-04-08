@@ -1,5 +1,4 @@
 import { eq, desc } from 'drizzle-orm'
-import { nanoid } from 'nanoid'
 import { drizzleDb } from '../index'
 import { runs } from '../schema'
 import type { ExecutionRun, RunStatus } from '../../../shared/types'
@@ -37,7 +36,7 @@ export function getRun(id: string): ExecutionRun | null {
 export function createRun(
   data: Omit<ExecutionRun, 'id'>
 ): ExecutionRun {
-  const id = nanoid()
+  const id = crypto.randomUUID()
 
   drizzleDb.insert(runs).values({
     id,

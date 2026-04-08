@@ -13,24 +13,28 @@ RUN npm ci
 
 COPY . .
 
-# Build React renderer (→ out/renderer/) and compile TypeScript server (→ out/server/)
-RUN npm run build:server
+# Build React renderer → out/renderer/
+RUN npx vite build --config vite.server.config.ts
 
 # ─── Production stage ────────────────────────────────────────────────────────
 FROM node:22-slim
 
 WORKDIR /app
 
-# Runtime dependency for better-sqlite3
+# Build tools for better-sqlite3 native module
 RUN apt-get update && \
-    apt-get install -y libsqlite3-dev && \
+    apt-get install -y python3 make g++ && \
     rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm ci
 
-# Copy the built output from the builder stage
-COPY --from=builder /app/out ./out
+# Copy TypeScript source (tsx runs TS directly — no separate compile step)
+COPY src ./src
+COPY tsconfig*.json ./
+
+# Copy built frontend from builder
+COPY --from=builder /app/out/renderer ./out/renderer
 
 # /data is the persistent volume for the SQLite DB, logs, and prefs
 VOLUME /data
@@ -39,4 +43,4 @@ ENV PORT=7456
 
 EXPOSE 7456
 
-CMD ["node", "out/server/index.js"]
+CMD ["npx", "tsx", "src/server/index.ts"]
