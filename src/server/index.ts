@@ -30,6 +30,15 @@ import {
 } from '../main/db/queries/repositories'
 import { RepoSyncService } from './repoSync'
 import { testPublishTarget } from './publisher'
+import {
+  listTriggers,
+  getTrigger,
+  createTrigger,
+  updateTrigger,
+  deleteTrigger,
+} from '../main/db/queries/triggers'
+import { TriggerService } from './triggers/triggerService'
+import { createTriggerRoutes } from './triggers/triggerRoutes'
 import { listMcpTools } from './mcpTools'
 import { getGithubPat, setGithubPat, serverStoreGet, serverStoreSet } from './store'
 import { readLogFile } from './utils'
@@ -44,6 +53,7 @@ import type {
   Repository,
   RunnerType,
   SlackPublishConfig,
+  Trigger,
 } from '../shared/types'
 
 const PORT = process.env.PORT || 7456
@@ -92,6 +102,15 @@ function broadcast(channel: string, payload: unknown): void {
     }
   }
 }
+
+// ─── Trigger service ──────────────────────────────────────────────────────────
+
+const triggerService = new TriggerService(broadcast)
+
+// Inbound trigger HTTP endpoints (must be registered before SPA catch-all but after triggerService)
+// Express registers middleware in order, and our catch-all is app.get('*') which only matches GET,
+// so POST routes registered here will work correctly.
+app.use('/api/triggers', express.json({ limit: '1mb' }), createTriggerRoutes(triggerService))
 
 // ─── Channel handlers ─────────────────────────────────────────────────────────
 
@@ -237,6 +256,28 @@ const handlers: Record<string, HandlerFn> = {
   },
   'publishTargets:test': ([type, config]) =>
     testPublishTarget(type as import('../shared/types').PublishTargetType, config as import('../shared/types').PublishConfig),
+
+  // Triggers
+  'triggers:list': ([agentId]) => Promise.resolve(listTriggers(agentId as string)),
+  'triggers:get': ([id]) => Promise.resolve(getTrigger(id as string)),
+  'triggers:create': ([data]) => {
+    const trigger = createTrigger(data as Omit<Trigger, 'id' | 'createdAt' | 'updatedAt'>)
+    triggerService.registerTrigger(trigger)
+    return Promise.resolve(trigger)
+  },
+  'triggers:update': ([id, data]) => {
+    const trigger = updateTrigger(
+      id as string,
+      data as Partial<Omit<Trigger, 'id' | 'createdAt' | 'updatedAt'>>
+    )
+    triggerService.registerTrigger(trigger)
+    return Promise.resolve(trigger)
+  },
+  'triggers:delete': ([id]) => {
+    triggerService.unregisterTrigger(id as string)
+    deleteTrigger(id as string)
+    return Promise.resolve()
+  },
 
   // Gist
   'gist:save': async ([content, gistId]) => {
@@ -411,6 +452,9 @@ if (orphaned.length > 0) {
 // Start the repository sync service (clones new repos, fetches existing ones)
 const repoSyncService = new RepoSyncService(broadcast)
 repoSyncService.start()
+
+// Start the trigger service (registers cron jobs from DB)
+triggerService.start()
 
 httpServer.listen(PORT, () => {
   console.log(`Conduit server running at http://localhost:${PORT}`)

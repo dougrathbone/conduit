@@ -38,6 +38,12 @@ export const api = {
   get publishTargets() {
     return getConduit().publishTargets
   },
+  get triggers() {
+    return getConduit().triggers
+  },
+  onTriggerFired: (cb: (payload: import('@shared/types').TriggerFiredPayload) => void): (() => void) => {
+    return getConduit().onTriggerFired(cb)
+  },
   get mcpOAuth() {
     return getConduit().mcpOAuth
   },

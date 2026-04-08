@@ -9,6 +9,8 @@ import type {
   GlobalMcpServer,
   PublishTarget,
   Repository,
+  Trigger,
+  TriggerFiredPayload,
   OAuthToken,
   RunnerType,
   SlackPublishConfig,
@@ -29,6 +31,7 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
   const promptDoneListeners = new Set<(p: { sessionId: string; extractedPrompt?: string }) => void>()
   const promptErrorListeners = new Set<(p: { sessionId: string; error: string }) => void>()
   const repoSyncStatusListeners = new Set<(p: RepoSyncStatusPayload) => void>()
+  const triggerFiredListeners = new Set<(p: TriggerFiredPayload) => void>()
   let idCounter = 0
 
   ws.onmessage = (event) => {
@@ -80,6 +83,10 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       } else if (msg.channel === 'repo:syncStatus') {
         repoSyncStatusListeners.forEach((cb) =>
           cb(msg.payload as RepoSyncStatusPayload)
+        )
+      } else if (msg.channel === 'trigger:fired') {
+        triggerFiredListeners.forEach((cb) =>
+          cb(msg.payload as TriggerFiredPayload)
         )
       }
     }
@@ -199,6 +206,21 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       delete: (id: string) => invoke<void>('publishTargets:delete', id),
       test: (type: import('@shared/types').PublishTargetType, config: import('@shared/types').PublishConfig) =>
         invoke<{ success: boolean; error?: string }>('publishTargets:test', type, config),
+    },
+
+    triggers: {
+      list: (agentId: string) => invoke<Trigger[]>('triggers:list', agentId),
+      get: (id: string) => invoke<Trigger | null>('triggers:get', id),
+      create: (data: Omit<Trigger, 'id' | 'createdAt' | 'updatedAt'>) =>
+        invoke<Trigger>('triggers:create', data),
+      update: (id: string, data: Partial<Omit<Trigger, 'id' | 'createdAt' | 'updatedAt'>>) =>
+        invoke<Trigger>('triggers:update', id, data),
+      delete: (id: string) => invoke<void>('triggers:delete', id),
+    },
+
+    onTriggerFired: (cb: (payload: TriggerFiredPayload) => void): (() => void) => {
+      triggerFiredListeners.add(cb)
+      return () => triggerFiredListeners.delete(cb)
     },
 
     mcpOAuth: {

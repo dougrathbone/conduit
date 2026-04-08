@@ -1,7 +1,7 @@
 import { eq, desc } from 'drizzle-orm'
 import { drizzleDb } from '../index'
 import { runs } from '../schema'
-import type { ExecutionRun, RunStatus } from '../../../shared/types'
+import type { ExecutionRun, RunStatus, TriggerContext } from '../../../shared/types'
 
 function rowToExecutionRun(row: typeof runs.$inferSelect): ExecutionRun {
   return {
@@ -14,6 +14,7 @@ function rowToExecutionRun(row: typeof runs.$inferSelect): ExecutionRun {
     workspacePath: row.workspacePath ?? undefined,
     logPath: row.logPath,
     exitCode: row.exitCode ?? undefined,
+    triggerContext: row.triggerContext ? JSON.parse(row.triggerContext) as TriggerContext : undefined,
   }
 }
 
@@ -48,6 +49,7 @@ export function createRun(
     workspacePath: data.workspacePath ?? null,
     logPath: data.logPath,
     exitCode: data.exitCode ?? null,
+    triggerContext: data.triggerContext ? JSON.stringify(data.triggerContext) : null,
   }).run()
 
   const created = getRun(id)
