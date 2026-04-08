@@ -199,6 +199,18 @@ const handlers: Record<string, HandlerFn> = {
   'repos:triggerSync': async ([id]) => {
     await repoSyncService.triggerSync(id as string)
   },
+  'repos:testConnection': async ([data]) => {
+    const { testRepoConnection } = await import('./gitOps')
+    const { url, authMethod } = data as { url: string; authMethod: 'none' | 'pat' | 'ssh' }
+    const pat = authMethod === 'pat' ? getGithubPat() : undefined
+    try {
+      const message = await testRepoConnection(url, pat)
+      return { success: true, message }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      return { success: false, message }
+    }
+  },
 
   // Publish Targets
   'publishTargets:list': () => Promise.resolve(listPublishTargets()),

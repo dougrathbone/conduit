@@ -176,6 +176,8 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       ) => invoke<Repository>('repos:update', id, data),
       delete: (id: string) => invoke<void>('repos:delete', id),
       triggerSync: (id: string) => invoke<void>('repos:triggerSync', id),
+      testConnection: (data: { url: string; authMethod: 'none' | 'pat' | 'ssh' }) =>
+        invoke<{ success: boolean; message: string }>('repos:testConnection', data),
     },
 
     onRepoSyncStatus: (cb: (payload: RepoSyncStatusPayload) => void): (() => void) => {

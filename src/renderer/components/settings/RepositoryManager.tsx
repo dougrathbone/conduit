@@ -8,6 +8,7 @@ import {
   useUpdateRepository,
   useDeleteRepository,
   useTriggerRepoSync,
+  useTestRepoConnection,
   useRepoSyncEvents,
 } from '@renderer/hooks/useRepositories'
 import { cn } from '@renderer/lib/utils'
@@ -72,8 +73,15 @@ interface InlineFormProps {
 
 function InlineForm({ initial, onSave, onCancel, saving }: InlineFormProps) {
   const [form, setForm] = useState<FormState>(initial)
+  const testMutation = useTestRepoConnection()
 
   const isValid = form.name.trim().length > 0 && form.url.trim().length > 0 && form.defaultBranch.trim().length > 0
+  const canTest = form.url.trim().length > 0
+
+  const handleTest = () => {
+    testMutation.reset()
+    testMutation.mutate({ url: form.url.trim(), authMethod: form.authMethod })
+  }
 
   return (
     <div className="border border-[var(--border)] rounded-lg bg-[var(--bg-secondary)] p-4 space-y-4">
@@ -147,15 +155,48 @@ function InlineForm({ initial, onSave, onCancel, saving }: InlineFormProps) {
         </p>
       </div>
 
+      {/* Test result */}
+      {testMutation.data?.success && (
+        <div className="text-xs px-3 py-2 rounded-md bg-green-500/10 text-green-400 border border-green-500/20">
+          {testMutation.data.message}
+        </div>
+      )}
+      {testMutation.data && !testMutation.data.success && (
+        <div className="text-xs px-3 py-2 rounded-md bg-red-500/10 text-red-400 border border-red-500/20">
+          Connection failed: {testMutation.data.message}
+        </div>
+      )}
+      {testMutation.error && (
+        <div className="text-xs px-3 py-2 rounded-md bg-red-500/10 text-red-400 border border-red-500/20">
+          Test failed: {testMutation.error instanceof Error ? testMutation.error.message : String(testMutation.error)}
+        </div>
+      )}
+
       {/* Actions */}
-      <div className="flex items-center justify-end gap-2 pt-1">
-        <Button variant="ghost" size="sm" onClick={onCancel} disabled={saving}>
-          Cancel
+      <div className="flex items-center justify-between pt-1">
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleTest}
+          disabled={!canTest || testMutation.isPending}
+          className="gap-1.5 text-xs"
+        >
+          {testMutation.isPending ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : (
+            <FolderGit2 className="h-3 w-3" />
+          )}
+          Test Connection
         </Button>
-        <Button size="sm" onClick={() => onSave(form)} disabled={!isValid || saving}>
-          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
-          Save
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="ghost" size="sm" onClick={onCancel} disabled={saving}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={() => onSave(form)} disabled={!isValid || saving}>
+            {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+            Save
+          </Button>
+        </div>
       </div>
     </div>
   )

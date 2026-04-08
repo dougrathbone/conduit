@@ -224,6 +224,7 @@ export interface ConduitAPI {
     update: (id: string, data: Partial<Omit<Repository, 'id' | 'createdAt' | 'updatedAt'>>) => Promise<Repository>
     delete: (id: string) => Promise<void>
     triggerSync: (id: string) => Promise<void>
+    testConnection: (data: { url: string; authMethod: 'none' | 'pat' | 'ssh' }) => Promise<{ success: boolean; message: string }>
   }
   onRepoSyncStatus: (cb: (payload: RepoSyncStatusPayload) => void) => () => void
   publishTargets: {

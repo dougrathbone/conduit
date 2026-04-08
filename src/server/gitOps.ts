@@ -44,6 +44,17 @@ export function buildAuthUrl(url: string, pat?: string): string {
 }
 
 /**
+ * Test connectivity to a remote repository via `git ls-remote`.
+ * Returns the default branch ref on success, or throws on failure.
+ */
+export async function testRepoConnection(url: string, pat?: string): Promise<string> {
+  const authUrl = buildAuthUrl(url, pat)
+  const output = await runGit(['ls-remote', '--heads', authUrl])
+  const refCount = output.split('\n').filter((l) => l.trim()).length
+  return `Connected — ${refCount} branch${refCount !== 1 ? 'es' : ''} found`
+}
+
+/**
  * Clone a repository as a bare clone (no working tree).
  */
 export async function cloneRepo(
