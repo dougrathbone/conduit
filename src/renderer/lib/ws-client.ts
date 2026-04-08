@@ -2,11 +2,13 @@ import type {
   ConduitAPI,
   RunOutputPayload,
   RunStatusChangePayload,
+  RepoSyncStatusPayload,
   AgentConfig,
   ExecutionRun,
   LogEntry,
   GlobalMcpServer,
   PublishTarget,
+  Repository,
   OAuthToken,
   RunnerType,
   SlackPublishConfig,
@@ -26,6 +28,7 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
   const promptTokenListeners = new Set<(p: { sessionId: string; token: string }) => void>()
   const promptDoneListeners = new Set<(p: { sessionId: string; extractedPrompt?: string }) => void>()
   const promptErrorListeners = new Set<(p: { sessionId: string; error: string }) => void>()
+  const repoSyncStatusListeners = new Set<(p: RepoSyncStatusPayload) => void>()
   let idCounter = 0
 
   ws.onmessage = (event) => {
@@ -73,6 +76,10 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       } else if (msg.channel === 'promptChat:error') {
         promptErrorListeners.forEach((cb) =>
           cb(msg.payload as { sessionId: string; error: string })
+        )
+      } else if (msg.channel === 'repo:syncStatus') {
+        repoSyncStatusListeners.forEach((cb) =>
+          cb(msg.payload as RepoSyncStatusPayload)
         )
       }
     }
@@ -156,6 +163,24 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       delete: (id: string) => invoke<void>('globalMcps:delete', id),
       checkHealth: (serverConfig: import('@shared/types').McpServerEntry) =>
         invoke<import('@shared/types').McpHealthResult>('globalMcps:checkHealth', serverConfig),
+    },
+
+    repos: {
+      list: () => invoke<Repository[]>('repos:list'),
+      get: (id: string) => invoke<Repository | null>('repos:get', id),
+      create: (data: Omit<Repository, 'id' | 'createdAt' | 'updatedAt' | 'syncStatus' | 'clonePath'>) =>
+        invoke<Repository>('repos:create', data),
+      update: (
+        id: string,
+        data: Partial<Omit<Repository, 'id' | 'createdAt' | 'updatedAt'>>
+      ) => invoke<Repository>('repos:update', id, data),
+      delete: (id: string) => invoke<void>('repos:delete', id),
+      triggerSync: (id: string) => invoke<void>('repos:triggerSync', id),
+    },
+
+    onRepoSyncStatus: (cb: (payload: RepoSyncStatusPayload) => void): (() => void) => {
+      repoSyncStatusListeners.add(cb)
+      return () => repoSyncStatusListeners.delete(cb)
     },
 
     publishTargets: {

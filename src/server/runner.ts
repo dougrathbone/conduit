@@ -5,9 +5,11 @@ import * as path from 'path'
 import type { ExecutionRun, LogEntry } from '../shared/types'
 import { createRun, updateRun } from '../main/db/queries/runs'
 import { getAgent } from '../main/db/queries/agents'
+import { getRepository } from '../main/db/queries/repositories'
 import { createWorkspace, deleteWorkspace } from '../main/execution/workspace'
 import { writeMcpConfig, deleteMcpConfig, buildMergedMcpConfig } from '../main/utils/mcp'
 import { LOGS_DIR } from '../main/utils/paths'
+import { createWorktree, removeWorktree } from './gitOps'
 import { buildClaudeArgs, parseClaudeOutput } from '../main/execution/adapters/claude'
 import { buildAmpArgs, parseAmpOutput } from '../main/execution/adapters/amp'
 import { buildCursorArgs, CURSOR_NOTICE } from '../main/execution/adapters/cursor'
@@ -26,10 +28,20 @@ const activeProcesses = new Map<string, ActiveRun>()
 
 /**
  * Cleanup helper: remove workspace + MCP config file for a run.
+ * If worktreeClonePath is set, the workspace is a git worktree and needs special removal.
  */
-function cleanupRun(runId: string, workspacePath: string | undefined, ephemeral: boolean): void {
+function cleanupRun(
+  runId: string,
+  workspacePath: string | undefined,
+  ephemeral: boolean,
+  worktreeClonePath?: string
+): void {
   deleteMcpConfig(runId)
-  if (ephemeral && workspacePath) {
+  if (worktreeClonePath && workspacePath) {
+    removeWorktree(worktreeClonePath, workspacePath).catch((err) =>
+      console.error(`[runner] Failed to remove worktree: ${err}`)
+    )
+  } else if (ephemeral && workspacePath) {
     deleteWorkspace(workspacePath)
   }
 }
@@ -49,9 +61,34 @@ export async function startRunServer(
   const agent = getAgent(agentId)
   if (!agent) throw new Error(`Agent ${agentId} not found`)
 
-  // 2. Determine workspace: use agent's fixed workingDir or create an ephemeral one
-  const isEphemeral = !agent.workingDir
-  const workspacePath = agent.workingDir ?? createWorkspace(agentId)
+  // 2. Determine workspace: repo worktree > fixed workingDir > ephemeral
+  let workspacePath: string
+  let isEphemeral: boolean
+  let worktreeClonePath: string | undefined
+
+  if (agent.repositoryId) {
+    const repo = getRepository(agent.repositoryId)
+    if (!repo) throw new Error(`Repository ${agent.repositoryId} not found`)
+    if (repo.syncStatus !== 'ready') {
+      throw new Error(
+        `Repository "${repo.name}" is not ready (status: ${repo.syncStatus}).` +
+        (repo.syncError ? ` Error: ${repo.syncError}` : ' Please wait for sync to complete.')
+      )
+    }
+    // Generate a run-scoped worktree path under the bare clone
+    const tempRunId = crypto.randomUUID()
+    const worktreeDir = path.join(repo.clonePath!, 'worktrees-run', tempRunId)
+    await createWorktree(repo.clonePath!, worktreeDir, repo.defaultBranch)
+    workspacePath = worktreeDir
+    worktreeClonePath = repo.clonePath!
+    isEphemeral = false
+  } else if (agent.workingDir) {
+    workspacePath = agent.workingDir
+    isEphemeral = false
+  } else {
+    workspacePath = createWorkspace(agentId)
+    isEphemeral = true
+  }
 
   // 4. Create run record (log path updated after we have the runId)
   const runRecord = createRun({
@@ -133,7 +170,7 @@ export async function startRunServer(
     if (finalized) return
     finalized = true
     activeProcesses.delete(runId)
-    cleanupRun(runId, workspacePath, isEphemeral)
+    cleanupRun(runId, workspacePath, isEphemeral, worktreeClonePath)
 
     // Flush any remaining buffered output
     if (stdoutBuffer.length > 0) {
@@ -182,7 +219,7 @@ export async function startRunServer(
       })
       child.unref()
     } catch (err) {
-      cleanupRun(runId, workspacePath, isEphemeral)
+      cleanupRun(runId, workspacePath, isEphemeral, worktreeClonePath)
       logStream.end()
       updateRun(runId, { status: 'failed', endedAt: Date.now() })
       broadcast('run:statusChange', { runId, status: 'failed' })
@@ -193,7 +230,7 @@ export async function startRunServer(
 
     // Mark as launched (not completed — it's a GUI app)
     activeProcesses.delete(runId)
-    cleanupRun(runId, workspacePath, isEphemeral)
+    cleanupRun(runId, workspacePath, isEphemeral, worktreeClonePath)
     logStream.end()
 
     const endedAt = Date.now()
@@ -229,7 +266,7 @@ export async function startRunServer(
       child.stdin.end()
     }
   } catch (err) {
-    cleanupRun(runId, workspacePath, isEphemeral)
+    cleanupRun(runId, workspacePath, isEphemeral, worktreeClonePath)
     logStream.end()
     updateRun(runId, { status: 'failed', endedAt: Date.now() })
     broadcast('run:statusChange', { runId, status: 'failed' })

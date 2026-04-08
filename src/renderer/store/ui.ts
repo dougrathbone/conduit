@@ -9,6 +9,7 @@ interface UIState {
   sidebarWidth: number
   showGlobalMcpManager: boolean
   showPublishTargets: boolean
+  showRepositories: boolean
   // Actions
   selectAgent: (id: string | null) => void
   setActiveRun: (id: string | null) => void
@@ -16,6 +17,7 @@ interface UIState {
   setSidebarWidth: (w: number) => void
   setShowGlobalMcpManager: (show: boolean) => void
   setShowPublishTargets: (show: boolean) => void
+  setShowRepositories: (show: boolean) => void
 }
 
 function applyTheme(theme: Theme) {
@@ -68,13 +70,14 @@ if (typeof document !== 'undefined') {
 
 // ── URL routing helpers ───────────────────────────────────────────────────────
 
-function readUrlState(): { agentId: string | null; globalMcps: boolean; publishTargets: boolean } {
-  if (typeof window === 'undefined') return { agentId: null, globalMcps: false, publishTargets: false }
+function readUrlState(): { agentId: string | null; globalMcps: boolean; publishTargets: boolean; repositories: boolean } {
+  if (typeof window === 'undefined') return { agentId: null, globalMcps: false, publishTargets: false, repositories: false }
   const path = window.location.pathname
   const globalMcps = path === '/global-mcps'
   const publishTargets = path === '/publish-targets'
+  const repositories = path === '/repositories'
   const m = path.match(/^\/agents\/([^/]+)$/)
-  return { agentId: m ? m[1] : null, globalMcps, publishTargets }
+  return { agentId: m ? m[1] : null, globalMcps, publishTargets, repositories }
 }
 
 function pushUrl(path: string) {
@@ -92,22 +95,28 @@ export const useUIStore = create<UIState>((set) => ({
   sidebarWidth: getStoredSidebarWidth(),
   showGlobalMcpManager: initialUrl.globalMcps,
   showPublishTargets: initialUrl.publishTargets,
+  showRepositories: initialUrl.repositories,
 
   selectAgent: (id) => {
     pushUrl(id ? `/agents/${id}` : '/')
-    set({ selectedAgentId: id, showGlobalMcpManager: false, showPublishTargets: false })
+    set({ selectedAgentId: id, showGlobalMcpManager: false, showPublishTargets: false, showRepositories: false })
   },
 
   setActiveRun: (id) => set({ activeRunId: id }),
 
   setShowGlobalMcpManager: (show) => {
     pushUrl(show ? '/global-mcps' : '/')
-    set({ showGlobalMcpManager: show, showPublishTargets: false })
+    set({ showGlobalMcpManager: show, showPublishTargets: false, showRepositories: false })
   },
 
   setShowPublishTargets: (show) => {
     pushUrl(show ? '/publish-targets' : '/')
-    set({ showPublishTargets: show, showGlobalMcpManager: false })
+    set({ showPublishTargets: show, showGlobalMcpManager: false, showRepositories: false })
+  },
+
+  setShowRepositories: (show) => {
+    pushUrl(show ? '/repositories' : '/')
+    set({ showRepositories: show, showGlobalMcpManager: false, showPublishTargets: false })
   },
 
   setTheme: (theme) => {

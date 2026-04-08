@@ -1,20 +1,23 @@
 import React from 'react'
-import { Plus, Sun, Moon, Monitor, Server, Send } from 'lucide-react'
+import { Plus, Sun, Moon, Monitor, Server, Send, FolderGit2 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { AgentList } from '@renderer/components/agents/AgentList'
 import { useUIStore } from '@renderer/store/ui'
 import { useCreateAgent } from '@renderer/hooks/useAgents'
 import { useGlobalMcps } from '@renderer/hooks/useGlobalMcps'
 import { usePublishTargets } from '@renderer/hooks/usePublishTargets'
+import { useRepositories } from '@renderer/hooks/useRepositories'
 import { cn } from '@renderer/lib/utils'
 
 export function Sidebar() {
-  const { theme, setTheme, selectAgent, showGlobalMcpManager, setShowGlobalMcpManager, showPublishTargets, setShowPublishTargets } = useUIStore()
+  const { theme, setTheme, selectAgent, showGlobalMcpManager, setShowGlobalMcpManager, showPublishTargets, setShowPublishTargets, showRepositories, setShowRepositories } = useUIStore()
   const createAgent = useCreateAgent()
   const { data: globalMcps = [] } = useGlobalMcps()
   const { data: publishTargets = [] } = usePublishTargets()
+  const { data: repositories = [] } = useRepositories()
   const enabledGlobalCount = globalMcps.filter((m) => m.enabled).length
   const enabledPublishCount = publishTargets.filter((t) => t.enabled).length
+  const readyRepoCount = repositories.filter((r) => r.syncStatus === 'ready').length
 
   const handleNewAgent = async () => {
     try {
@@ -78,8 +81,32 @@ export function Sidebar() {
         <AgentList />
       </div>
 
-      {/* Footer: Global MCPs + Publish Targets */}
+      {/* Footer: Repos + Global MCPs + Publish Targets */}
       <div className="border-t border-[var(--border)] px-3 py-2 space-y-1">
+        <button
+          onClick={() => setShowRepositories(true)}
+          className={cn(
+            'w-full flex items-center gap-2 px-2.5 py-2 rounded-md text-xs font-medium transition-colors',
+            showRepositories
+              ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
+              : 'text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)] hover:text-[var(--text-primary)]'
+          )}
+        >
+          <FolderGit2 className="h-3.5 w-3.5 flex-shrink-0" />
+          <span className="flex-1 text-left">Repositories</span>
+          {readyRepoCount > 0 && (
+            <span
+              className={cn(
+                'px-1.5 py-0.5 rounded text-[10px] font-medium',
+                showRepositories
+                  ? 'bg-[var(--accent)]/20 text-[var(--accent)]'
+                  : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)]'
+              )}
+            >
+              {readyRepoCount}
+            </span>
+          )}
+        </button>
         <button
           onClick={() => setShowGlobalMcpManager(true)}
           className={cn(

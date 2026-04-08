@@ -19,6 +19,7 @@ export const agents = sqliteTable('agents', {
   gistId: text('gist_id'),
   workingDir: text('working_dir'),
   publishTargetIds: text('publish_target_ids'),
+  repositoryId: text('repository_id'),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 })
@@ -39,6 +40,20 @@ export const publishTargets = sqliteTable('publish_targets', {
   type: text('type').notNull().default('slack'),
   config: text('config').notNull().default('{}'),
   enabled: integer('enabled').notNull().default(1),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+})
+
+export const repositories = sqliteTable('repositories', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  url: text('url').notNull(),
+  defaultBranch: text('default_branch').notNull().default('main'),
+  authMethod: text('auth_method').notNull().default('none'),
+  syncStatus: text('sync_status').notNull().default('pending'),
+  syncError: text('sync_error'),
+  lastSyncedAt: integer('last_synced_at'),
+  clonePath: text('clone_path'),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 })

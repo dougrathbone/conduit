@@ -69,11 +69,26 @@ export function initDb(): void {
       token_type TEXT NOT NULL DEFAULT 'Bearer',
       scope TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS repositories (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      url TEXT NOT NULL,
+      default_branch TEXT NOT NULL DEFAULT 'main',
+      auth_method TEXT NOT NULL DEFAULT 'none',
+      sync_status TEXT NOT NULL DEFAULT 'pending',
+      sync_error TEXT,
+      last_synced_at INTEGER,
+      clone_path TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
   `)
 
   // Migrations: add columns added after initial schema
   try { db.exec('ALTER TABLE agents ADD COLUMN working_dir TEXT') } catch { /* already exists */ }
   try { db.exec('ALTER TABLE agents ADD COLUMN publish_target_ids TEXT') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE agents ADD COLUMN repository_id TEXT') } catch { /* already exists */ }
 
   drizzleDb = drizzle(db, { schema })
 }
