@@ -1,9 +1,12 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import { Bot, Loader2 } from 'lucide-react'
 import { cn } from '@renderer/lib/utils'
 import { useAgents } from '@renderer/hooks/useAgents'
+import { useRuns } from '@renderer/hooks/useRuns'
 import { useUIStore } from '@renderer/store/ui'
 import { StatusDot } from '@renderer/components/ui/badge'
+import { api } from '@renderer/lib/ipc'
+import { useQueryClient } from '@tanstack/react-query'
 import type { AgentConfig, RunStatus } from '@shared/types'
 
 const runnerLabels: Record<AgentConfig['runner'], string> = {
@@ -35,11 +38,14 @@ function RunnerIcon({ runner, size = 11 }: { runner: AgentConfig['runner']; size
 interface AgentItemProps {
   agent: AgentConfig
   isSelected: boolean
-  lastRunStatus?: RunStatus
   onClick: () => void
 }
 
-function AgentItem({ agent, isSelected, lastRunStatus, onClick }: AgentItemProps) {
+function AgentItem({ agent, isSelected, onClick }: AgentItemProps) {
+  const { data: runs } = useRuns(agent.id)
+  const latestRun = runs?.[0]
+  const lastRunStatus = latestRun?.status as RunStatus | undefined
+
   return (
     <button
       onClick={onClick}
@@ -78,6 +84,15 @@ function AgentItem({ agent, isSelected, lastRunStatus, onClick }: AgentItemProps
 export function AgentList() {
   const { data: agents, isLoading, error } = useAgents()
   const { selectedAgentId, selectAgent } = useUIStore()
+  const queryClient = useQueryClient()
+
+  // Invalidate run queries when any run status changes so dots update in real-time
+  useEffect(() => {
+    const unsub = api.onRunStatusChange(() => {
+      queryClient.invalidateQueries({ queryKey: ['runs'] })
+    })
+    return unsub
+  }, [queryClient])
 
   if (isLoading) {
     return (
@@ -115,6 +130,7 @@ export function AgentList() {
           isSelected={agent.id === selectedAgentId}
           onClick={() => selectAgent(agent.id)}
         />
+
       ))}
     </div>
   )

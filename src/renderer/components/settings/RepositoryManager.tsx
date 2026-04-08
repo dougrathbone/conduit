@@ -1,7 +1,8 @@
-import React, { useState } from 'react'
-import { Plus, Pencil, Trash2, Info, Loader2, X, Check, RefreshCw, FolderGit2 } from 'lucide-react'
+import React, { useState, useEffect } from 'react'
+import { Plus, Pencil, Trash2, Info, Loader2, X, Check, RefreshCw, FolderGit2, ExternalLink } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
+import { api } from '@renderer/lib/ipc'
 import {
   useRepositories,
   useCreateRepository,
@@ -74,6 +75,30 @@ interface InlineFormProps {
 function InlineForm({ initial, onSave, onCancel, saving }: InlineFormProps) {
   const [form, setForm] = useState<FormState>(initial)
   const testMutation = useTestRepoConnection()
+  const [pat, setPat] = useState('')
+  const [patStatus, setPatStatus] = useState<'loading' | 'configured' | 'missing'>('loading')
+  const [patSaving, setPatSaving] = useState(false)
+
+  // Check if a PAT is already configured
+  useEffect(() => {
+    api.prefs.get<string>('githubPat').then((val) => {
+      setPatStatus(val ? 'configured' : 'missing')
+    }).catch(() => setPatStatus('missing'))
+  }, [])
+
+  const handleSavePat = async () => {
+    if (!pat.trim()) return
+    setPatSaving(true)
+    try {
+      await api.prefs.set('githubPat', pat.trim())
+      setPat('')
+      setPatStatus('configured')
+    } catch {
+      // ignore
+    } finally {
+      setPatSaving(false)
+    }
+  }
 
   const isValid = form.name.trim().length > 0 && form.url.trim().length > 0 && form.defaultBranch.trim().length > 0
   const canTest = form.url.trim().length > 0
@@ -146,13 +171,68 @@ function InlineForm({ initial, onSave, onCancel, saving }: InlineFormProps) {
             </button>
           ))}
         </div>
-        <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
-          {form.authMethod === 'pat'
-            ? 'Uses your configured GitHub PAT (same as Gist auth).'
-            : form.authMethod === 'ssh'
-            ? 'Uses your system SSH agent. Ensure your key is loaded.'
-            : 'No authentication — for public repositories only.'}
-        </p>
+        {form.authMethod === 'pat' ? (
+          <div className="space-y-2">
+            {patStatus === 'configured' ? (
+              <div className="flex items-center gap-2 text-xs">
+                <div className="w-2 h-2 rounded-full bg-green-500" />
+                <span className="text-[var(--text-secondary)]">GitHub PAT configured</span>
+                <button
+                  type="button"
+                  onClick={() => setPatStatus('missing')}
+                  className="text-[var(--accent)] hover:underline ml-1"
+                >
+                  Update
+                </button>
+              </div>
+            ) : patStatus === 'loading' ? (
+              <div className="flex items-center gap-2 text-xs text-[var(--text-secondary)]">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                Checking...
+              </div>
+            ) : (
+              <div className="space-y-2">
+                <div className="space-y-1">
+                  <label className="block text-xs text-[var(--text-secondary)]">
+                    GitHub Personal Access Token
+                  </label>
+                  <div className="flex gap-2">
+                    <Input
+                      type="password"
+                      value={pat}
+                      onChange={(e) => setPat(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') handleSavePat() }}
+                      placeholder="ghp_..."
+                      className="font-mono text-xs flex-1"
+                    />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={handleSavePat}
+                      disabled={!pat.trim() || patSaving}
+                    >
+                      {patSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : 'Save'}
+                    </Button>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => api.shell.openExternal('https://github.com/settings/tokens/new?scopes=repo&description=Conduit').catch(console.error)}
+                  className="flex items-center gap-1.5 text-[10px] text-[var(--accent)] hover:underline"
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  Create token at github.com/settings/tokens
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
+            {form.authMethod === 'ssh'
+              ? 'Uses your system SSH agent. Ensure your key is loaded.'
+              : 'No authentication — for public repositories only.'}
+          </p>
+        )}
       </div>
 
       {/* Test result */}
