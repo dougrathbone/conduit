@@ -30,6 +30,7 @@ import {
 } from '../main/db/queries/repositories'
 import { RepoSyncService } from './repoSync'
 import { testSlackConfig } from './publisher'
+import { listMcpTools } from './mcpTools'
 import { getGithubPat, setGithubPat, serverStoreGet, serverStoreSet } from './store'
 import { readLogFile } from './utils'
 import { Octokit } from '@octokit/rest'
@@ -170,6 +171,10 @@ const handlers: Record<string, HandlerFn> = {
     } catch {
       return { status: 'unhealthy', message: `${command} not found in PATH` }
     }
+  },
+
+  'globalMcps:listTools': async ([serverConfig]) => {
+    return listMcpTools(serverConfig as import('../shared/types').McpServerEntry)
   },
 
   // Repositories
