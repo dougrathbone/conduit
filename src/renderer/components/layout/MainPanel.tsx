@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react'
-import { Trash2 } from 'lucide-react'
+import React, { useState, useEffect, useRef } from 'react'
+import { Trash2, Save, CheckCircle2, Loader2 } from 'lucide-react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import { useQueryClient } from '@tanstack/react-query'
 import { Button } from '@renderer/components/ui/button'
-import { AgentEditor } from '@renderer/components/agents/AgentEditor'
+import { AgentEditor, type AgentEditorHandle } from '@renderer/components/agents/AgentEditor'
 import { RunControls } from '@renderer/components/runs/RunControls'
 import { RunHistory } from '@renderer/components/runs/RunHistory'
 import { RunDetail } from '@renderer/components/runs/RunDetail'
@@ -34,6 +34,8 @@ export function MainPanel({ agentId }: MainPanelProps) {
   // Track live run status locally so RunControls can react
   const [liveRunStatus, setLiveRunStatus] = useState<RunStatus | null>(null)
   const [liveRunStartedAt, setLiveRunStartedAt] = useState<number | null>(null)
+  const editorRef = useRef<AgentEditorHandle>(null)
+  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
 
   // When the active run changes, sync local status
   useEffect(() => {
@@ -83,6 +85,30 @@ export function MainPanel({ agentId }: MainPanelProps) {
           {agent?.name ?? 'Agent'}
         </h1>
         <div className="flex items-center gap-2">
+          {saveState === 'saved' && (
+            <span className="flex items-center gap-1 text-xs text-green-500">
+              <CheckCircle2 className="h-3 w-3" />
+              Saved
+            </span>
+          )}
+          {saveState === 'error' && (
+            <span className="text-xs text-red-400">Failed</span>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => editorRef.current?.saveNow()}
+            disabled={saveState === 'saving'}
+            className="gap-1.5 text-xs"
+            title="Save agent configuration"
+          >
+            {saveState === 'saving' ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Save className="h-3 w-3" />
+            )}
+            Save
+          </Button>
           <RunControls
             agentId={agentId}
             activeRunId={activeRunId}
@@ -127,7 +153,7 @@ export function MainPanel({ agentId }: MainPanelProps) {
       <div className="flex-1 min-h-0">
         {tab === 'configure' && (
           <div className="h-full overflow-y-auto">
-            <AgentEditor agentId={agentId} />
+            <AgentEditor ref={editorRef} agentId={agentId} onSaveStateChange={setSaveState} />
           </div>
         )}
 

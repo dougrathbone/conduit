@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react'
-import { CheckCircle2, Loader2, Save, Send } from 'lucide-react'
+import React, { useEffect, useState, useCallback, useRef, useImperativeHandle, forwardRef } from 'react'
+import { Loader2, Send } from 'lucide-react'
 import { Input } from '@renderer/components/ui/input'
 import { Button } from '@renderer/components/ui/button'
 import { PromptEditor } from './PromptEditor'
@@ -81,11 +81,17 @@ function RunnerPicker({
 
 interface AgentEditorProps {
   agentId: string
+  onSaveStateChange?: (state: SaveState) => void
 }
 
-type SaveState = 'idle' | 'saving' | 'saved' | 'error'
+export type SaveState = 'idle' | 'saving' | 'saved' | 'error'
 
-export function AgentEditor({ agentId }: AgentEditorProps) {
+export interface AgentEditorHandle {
+  saveNow: () => void
+  saveState: SaveState
+}
+
+export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(function AgentEditor({ agentId, onSaveStateChange }, ref) {
   const { data: agent, isLoading } = useAgent(agentId)
   const updateAgent = useUpdateAgent()
   const { data: allPublishTargets = [] } = usePublishTargets()
@@ -116,19 +122,24 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     }
   }, [agent])
 
+  const setSaveStateAndNotify = useCallback((state: SaveState) => {
+    setSaveState(state)
+    onSaveStateChange?.(state)
+  }, [onSaveStateChange])
+
   const save = useCallback(
     async (updates: Partial<Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>>) => {
-      setSaveState('saving')
+      setSaveStateAndNotify('saving')
       try {
         await updateAgent.mutateAsync({ id: agentId, data: updates })
-        setSaveState('saved')
-        setTimeout(() => setSaveState('idle'), 2000)
+        setSaveStateAndNotify('saved')
+        setTimeout(() => setSaveStateAndNotify('idle'), 2000)
       } catch {
-        setSaveState('error')
-        setTimeout(() => setSaveState('idle'), 3000)
+        setSaveStateAndNotify('error')
+        setTimeout(() => setSaveStateAndNotify('idle'), 3000)
       }
     },
-    [agentId, updateAgent]
+    [agentId, updateAgent, setSaveStateAndNotify]
   )
 
   const scheduleSave = useCallback(
@@ -149,6 +160,11 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId } = draft
     save({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId })
   }, [draft, save])
+
+  useImperativeHandle(ref, () => ({
+    saveNow,
+    saveState,
+  }), [saveNow, saveState])
 
   useEffect(() => {
     return () => {
@@ -185,33 +201,6 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   return (
     <div className="flex flex-col h-full overflow-y-auto">
       <div className="flex-1 px-6 py-5 space-y-6 max-w-2xl">
-        {/* Save controls */}
-        <div className="flex items-center justify-end gap-2">
-          {saveState === 'saved' && (
-            <span className="flex items-center gap-1.5 text-xs text-green-500">
-              <CheckCircle2 className="h-3 w-3" />
-              Saved
-            </span>
-          )}
-          {saveState === 'error' && (
-            <span className="text-xs text-red-400">Failed to save</span>
-          )}
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={saveNow}
-            disabled={saveState === 'saving'}
-            className="gap-1.5 text-xs"
-          >
-            {saveState === 'saving' ? (
-              <Loader2 className="h-3 w-3 animate-spin" />
-            ) : (
-              <Save className="h-3 w-3" />
-            )}
-            {saveState === 'saving' ? 'Saving…' : 'Save'}
-          </Button>
-        </div>
-
         {/* Name */}
         <div className="space-y-1.5">
           <label className="block text-xs font-medium text-[var(--text-secondary)]">
@@ -410,4 +399,4 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
       </div>
     </div>
   )
-}
+})

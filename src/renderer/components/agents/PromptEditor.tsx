@@ -1,7 +1,7 @@
 import React, { useState } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import { oneDark } from '@codemirror/theme-one-dark'
-import { EditorView } from '@codemirror/view'
+import { EditorView, placeholder as cmPlaceholder } from '@codemirror/view'
 import { Cloud, CloudDownload, ExternalLink, FolderOpen, Loader2, Sparkles } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { useUIStore } from '@renderer/store/ui'
@@ -11,6 +11,31 @@ import { GistAuthDialog } from '@renderer/components/settings/GistAuthDialog'
 import { GistBrowserDialog } from '@renderer/components/settings/GistBrowserDialog'
 import { PromptChatPanel } from './PromptChatPanel'
 import type { RunnerType } from '@shared/types'
+
+const PROMPT_PLACEHOLDER = `You are a [role]. Your job is to [objective].
+
+## Context
+- Repository: [repo name and what it does]
+- Key paths: src/[relevant directories]
+- Stack: [languages, frameworks, key dependencies]
+
+## Task
+1. [First step — e.g. investigate, search, read specific files]
+2. [Second step — e.g. make changes, run tests]
+3. [Final step — e.g. validate, summarize findings]
+
+## Constraints
+- Only modify files in [scope]
+- Run tests before finishing: [test command]
+- Do not change [protected files or patterns]
+
+## Output
+When done, summarize what you did and any issues found.
+
+To publish results to Slack, wrap your summary in:
+<!--CONDUIT:PUBLISH-->
+Your formatted summary here (supports **markdown** and [links](url))
+<!--/CONDUIT:PUBLISH-->`
 
 interface PromptEditorProps {
   value: string
@@ -184,6 +209,7 @@ export function PromptEditor({
           height="300px"
           extensions={[
             EditorView.lineWrapping,
+            cmPlaceholder(PROMPT_PLACEHOLDER),
           ]}
           theme={isDark ? oneDark : undefined}
           onChange={onChange}
@@ -195,14 +221,23 @@ export function PromptEditor({
         />
       </div>
 
+      {/* Craft with AI modal overlay */}
       {isChatOpen && agentId && runner && (
-        <div className="mt-3" style={{ height: '520px' }}>
-          <PromptChatPanel
-            agentId={agentId}
-            runner={runner}
-            onApplyPrompt={handleApplyPrompt}
-            onClose={() => setIsChatOpen(false)}
+        <div className="fixed inset-0 z-50 flex items-center justify-center">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+            onClick={() => setIsChatOpen(false)}
           />
+          {/* Modal */}
+          <div className="relative w-full max-w-2xl h-[80vh] mx-4">
+            <PromptChatPanel
+              agentId={agentId}
+              runner={runner}
+              onApplyPrompt={handleApplyPrompt}
+              onClose={() => setIsChatOpen(false)}
+            />
+          </div>
         </div>
       )}
 
