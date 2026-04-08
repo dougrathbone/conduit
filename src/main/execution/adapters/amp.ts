@@ -1,13 +1,14 @@
 /**
  * Build the CLI arguments for the `amp` binary.
+ * The prompt is NOT included here — it is written to stdin after spawn to avoid
+ * being consumed by --mcp-config's variadic <configs...> parser.
  */
-export function buildAmpArgs(prompt: string, mcpConfigPath: string): string[] {
+export function buildAmpArgs(mcpConfigPath: string): string[] {
   return [
     'run',
     '--dangerously-allow-all',
     '--mcp-config',
     mcpConfigPath,
-    prompt,
   ]
 }
 

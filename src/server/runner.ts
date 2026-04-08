@@ -26,9 +26,9 @@ const activeProcesses = new Map<string, ActiveRun>()
 /**
  * Cleanup helper: remove workspace + MCP config file for a run.
  */
-function cleanupRun(runId: string, workspacePath: string | undefined): void {
+function cleanupRun(runId: string, workspacePath: string | undefined, ephemeral: boolean): void {
   deleteMcpConfig(runId)
-  if (workspacePath) {
+  if (ephemeral && workspacePath) {
     deleteWorkspace(workspacePath)
   }
 }
@@ -48,8 +48,9 @@ export async function startRunServer(
   const agent = getAgent(agentId)
   if (!agent) throw new Error(`Agent ${agentId} not found`)
 
-  // 2. Create workspace
-  const workspacePath = createWorkspace(agentId)
+  // 2. Determine workspace: use agent's fixed workingDir or create an ephemeral one
+  const isEphemeral = !agent.workingDir
+  const workspacePath = agent.workingDir ?? createWorkspace(agentId)
 
   // 4. Create run record (log path updated after we have the runId)
   const runRecord = createRun({
@@ -131,7 +132,7 @@ export async function startRunServer(
     if (finalized) return
     finalized = true
     activeProcesses.delete(runId)
-    cleanupRun(runId, workspacePath)
+    cleanupRun(runId, workspacePath, isEphemeral)
 
     // Flush any remaining buffered output
     if (stdoutBuffer.length > 0) {
@@ -175,7 +176,7 @@ export async function startRunServer(
       })
       child.unref()
     } catch (err) {
-      cleanupRun(runId, workspacePath)
+      cleanupRun(runId, workspacePath, isEphemeral)
       logStream.end()
       updateRun(runId, { status: 'failed', endedAt: Date.now() })
       broadcast('run:statusChange', { runId, status: 'failed' })
@@ -186,7 +187,7 @@ export async function startRunServer(
 
     // Mark as launched (not completed — it's a GUI app)
     activeProcesses.delete(runId)
-    cleanupRun(runId, workspacePath)
+    cleanupRun(runId, workspacePath, isEphemeral)
     logStream.end()
 
     const endedAt = Date.now()
@@ -204,18 +205,25 @@ export async function startRunServer(
   try {
     const cliArgs =
       agent.runner === 'amp'
-        ? buildAmpArgs(agent.prompt, mcpConfigPath)
-        : buildClaudeArgs(agent.prompt, mcpConfigPath)
+        ? buildAmpArgs(mcpConfigPath)
+        : buildClaudeArgs(mcpConfigPath)
 
     const binary = agent.runner === 'amp' ? 'amp' : 'claude'
 
     child = spawn(binary, cliArgs, {
       cwd: workspacePath,
       env: { ...process.env, ...agent.envVars },
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
+
+    // Write prompt to stdin — avoids --mcp-config <configs...> greedily
+    // consuming the prompt as an additional config path argument.
+    if (child.stdin) {
+      child.stdin.write(agent.prompt)
+      child.stdin.end()
+    }
   } catch (err) {
-    cleanupRun(runId, workspacePath)
+    cleanupRun(runId, workspacePath, isEphemeral)
     logStream.end()
     updateRun(runId, { status: 'failed', endedAt: Date.now() })
     broadcast('run:statusChange', { runId, status: 'failed' })
@@ -239,7 +247,8 @@ export async function startRunServer(
     rl.on('line', (line) => {
       const parsed = parseOutput(line)
       if (parsed !== null) {
-        handleStdoutChunk(parsed)
+        // readline strips the newline — add \r\n so xterm renders on separate lines
+        handleStdoutChunk(parsed + '\r\n')
       }
     })
   }

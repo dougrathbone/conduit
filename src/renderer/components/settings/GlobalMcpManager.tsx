@@ -2,7 +2,7 @@ import React, { useState, useCallback } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import { json } from '@codemirror/lang-json'
 import { oneDark } from '@codemirror/theme-one-dark'
-import { Plus, Pencil, Trash2, Info, Loader2, X, Check, ChevronDown, ChevronRight } from 'lucide-react'
+import { Plus, Pencil, Trash2, Info, Loader2, X, Check, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
 import { useUIStore } from '@renderer/store/ui'
@@ -12,9 +12,44 @@ import {
   useUpdateGlobalMcp,
   useDeleteGlobalMcp,
 } from '@renderer/hooks/useGlobalMcps'
+import { useMcpHealth } from '@renderer/hooks/useMcpHealth'
 import { cn } from '@renderer/lib/utils'
 import { McpOAuthButton } from './McpOAuthButton'
 import type { GlobalMcpServer, McpServerEntry, McpOAuthConfig } from '@shared/types'
+
+function McpHealthDot({ serverId, serverConfig }: { serverId: string; serverConfig: McpServerEntry }) {
+  const { data, isLoading, isFetching, refetch } = useMcpHealth(serverId, serverConfig)
+
+  const pending = isLoading || isFetching
+  const color = pending
+    ? '#F59E0B'
+    : data?.status === 'healthy'
+    ? '#22C55E'
+    : '#EF4444'
+
+  const label = pending
+    ? 'Checking…'
+    : data?.status === 'healthy'
+    ? `Connected · ${data.message}`
+    : `Not connected · ${data?.message ?? 'Unknown error'}`
+
+  return (
+    <button
+      onClick={(e) => { e.stopPropagation(); refetch() }}
+      title={label}
+      className="flex items-center gap-1 flex-shrink-0 group"
+      aria-label={label}
+    >
+      <span
+        className={cn('inline-block w-2 h-2 rounded-full transition-colors', pending && 'animate-pulse')}
+        style={{ backgroundColor: color }}
+      />
+      <RefreshCw
+        className="h-2.5 w-2.5 text-[var(--text-secondary)] opacity-0 group-hover:opacity-60 transition-opacity"
+      />
+    </button>
+  )
+}
 
 const DEFAULT_SERVER_CONFIG: McpServerEntry = {
   command: 'npx',
@@ -390,6 +425,11 @@ function ServerRow({ server, isDark }: ServerRowProps) {
           {server.serverKey} · {serverType}
         </p>
       </div>
+
+      {/* Health indicator */}
+      {server.enabled && (
+        <McpHealthDot serverId={server.id} serverConfig={server.serverConfig} />
+      )}
 
       {/* OAuth button for URL-type servers */}
       {serverType === 'url' && server.serverConfig.url && server.serverConfig.oauth && (

@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
-import { CheckCircle2, Loader2 } from 'lucide-react'
+import { CheckCircle2, Loader2, Save } from 'lucide-react'
 import { Input } from '@renderer/components/ui/input'
+import { Button } from '@renderer/components/ui/button'
 import { PromptEditor } from './PromptEditor'
 import { EnvVarEditor } from './EnvVarEditor'
 import { McpEditor } from './McpEditor'
@@ -9,10 +10,10 @@ import type { AgentConfig, RunnerType } from '@shared/types'
 
 // Inline SVG logos for each runner
 const RunnerLogos: Record<RunnerType, React.FC<{ size?: number; active?: boolean }>> = {
-  claude: ({ size = 22 }) => (
-    // Anthropic Claude mark — simplified stylised "A" shape
+  claude: ({ size = 22, active }) => (
+    // Anthropic Claude mark — starburst / 4-pointed star in brand orange
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-      <path d="M13.827 3.54L19.66 18h-3.133l-1.224-3.24H8.697L7.473 18H4.34L10.173 3.54h3.654zm-1.827 4.09L9.73 12.48h4.54L12 7.63z" fill="currentColor"/>
+      <path d="M12 2L13.7 10.3L22 12L13.7 13.7L12 22L10.3 13.7L2 12L10.3 10.3Z" fill={active ? 'currentColor' : '#E97327'}/>
     </svg>
   ),
   amp: ({ size = 22 }) => (
@@ -22,9 +23,9 @@ const RunnerLogos: Record<RunnerType, React.FC<{ size?: number; active?: boolean
     </svg>
   ),
   cursor: ({ size = 22 }) => (
-    // Cursor — stylised cursor/arrow shape
+    // Cursor — stylised mouse pointer cursor with tail notch
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
-      <path d="M4 3l16 9-7.5 1.5L9 21z" fill="currentColor"/>
+      <path d="M4.5 2L4.5 18.5L7.5 15L10 21.5L12 20.5L9.5 14L15.5 14Z" fill="currentColor"/>
     </svg>
   ),
 }
@@ -100,6 +101,7 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
         envVars: agent.envVars,
         mcpConfig: agent.mcpConfig,
         gistId: agent.gistId,
+        workingDir: agent.workingDir,
       })
     }
   }, [agent])
@@ -129,6 +131,15 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     [save]
   )
 
+  const saveNow = useCallback(() => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current)
+      debounceRef.current = null
+    }
+    const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir } = draft
+    save({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir })
+  }, [draft, save])
+
   useEffect(() => {
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
@@ -139,8 +150,8 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
     (field: keyof typeof draft, value: unknown) => {
       const updated = { ...draft, [field]: value }
       setDraft(updated)
-      const { name, runner, prompt, envVars, mcpConfig, gistId } = updated
-      scheduleSave({ name, runner, prompt, envVars, mcpConfig, gistId })
+      const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir } = updated
+      scheduleSave({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir })
     },
     [draft, scheduleSave]
   )
@@ -164,14 +175,8 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
   return (
     <div className="flex flex-col h-full overflow-y-auto">
       <div className="flex-1 px-6 py-5 space-y-6 max-w-2xl">
-        {/* Save indicator */}
-        <div className="flex items-center justify-end h-5">
-          {saveState === 'saving' && (
-            <span className="flex items-center gap-1.5 text-xs text-[var(--text-secondary)]">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              Saving...
-            </span>
-          )}
+        {/* Save controls */}
+        <div className="flex items-center justify-end gap-2">
           {saveState === 'saved' && (
             <span className="flex items-center gap-1.5 text-xs text-green-500">
               <CheckCircle2 className="h-3 w-3" />
@@ -181,6 +186,20 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
           {saveState === 'error' && (
             <span className="text-xs text-red-400">Failed to save</span>
           )}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={saveNow}
+            disabled={saveState === 'saving'}
+            className="gap-1.5 text-xs"
+          >
+            {saveState === 'saving' ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Save className="h-3 w-3" />
+            )}
+            {saveState === 'saving' ? 'Saving…' : 'Save'}
+          </Button>
         </div>
 
         {/* Name */}
@@ -204,6 +223,22 @@ export function AgentEditor({ agentId }: AgentEditorProps) {
             value={draft.runner ?? 'claude'}
             onChange={(r) => handleChange('runner', r)}
           />
+        </div>
+
+        {/* Working Directory */}
+        <div className="space-y-1.5">
+          <label className="block text-xs font-medium text-[var(--text-secondary)]">
+            Working Directory
+          </label>
+          <Input
+            value={draft.workingDir ?? ''}
+            onChange={(e) => handleChange('workingDir', e.target.value || undefined)}
+            placeholder="Leave blank for ephemeral workspace (e.g. /Users/you/code/myrepo)"
+            className="font-mono text-xs"
+          />
+          <p className="text-xs text-[var(--text-secondary)]">
+            If set, the agent runs inside this directory instead of a temporary workspace. Required for agents that need access to a git repository.
+          </p>
         </div>
 
         {/* Prompt */}

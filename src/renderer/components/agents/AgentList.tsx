@@ -15,8 +15,8 @@ const runnerLabels: Record<AgentConfig['runner'], string> = {
 // Compact inline SVG logos for sidebar
 function RunnerIcon({ runner, size = 11 }: { runner: AgentConfig['runner']; size?: number }) {
   if (runner === 'claude') return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" style={{ flexShrink: 0 }}>
-      <path d="M13.827 3.54L19.66 18h-3.133l-1.224-3.24H8.697L7.473 18H4.34L10.173 3.54h3.654zm-1.827 4.09L9.73 12.48h4.54L12 7.63z"/>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+      <path d="M12 2L13.7 10.3L22 12L13.7 13.7L12 22L10.3 13.7L2 12L10.3 10.3Z" fill="#E97327"/>
     </svg>
   )
   if (runner === 'amp') return (
@@ -26,8 +26,8 @@ function RunnerIcon({ runner, size = 11 }: { runner: AgentConfig['runner']; size
   )
   // cursor
   return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" style={{ flexShrink: 0 }}>
-      <path d="M4 3l16 9-7.5 1.5L9 21z"/>
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" style={{ flexShrink: 0 }}>
+      <path d="M4.5 2L4.5 18.5L7.5 15L10 21.5L12 20.5L9.5 14L15.5 14Z" fill="currentColor"/>
     </svg>
   )
 }

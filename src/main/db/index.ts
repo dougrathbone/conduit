@@ -23,6 +23,7 @@ export function initDb(): void {
       env_vars TEXT NOT NULL DEFAULT '{}',
       mcp_config TEXT NOT NULL DEFAULT '{"mcpServers":{}}',
       gist_id TEXT,
+      working_dir TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -59,6 +60,9 @@ export function initDb(): void {
       scope TEXT
     );
   `)
+
+  // Migrations: add columns added after initial schema
+  try { db.exec('ALTER TABLE agents ADD COLUMN working_dir TEXT') } catch { /* already exists */ }
 
   drizzleDb = drizzle(db, { schema })
 }

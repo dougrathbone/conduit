@@ -152,6 +152,8 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
         data: Partial<Omit<GlobalMcpServer, 'id' | 'createdAt' | 'updatedAt'>>
       ) => invoke<GlobalMcpServer>('globalMcps:update', id, data),
       delete: (id: string) => invoke<void>('globalMcps:delete', id),
+      checkHealth: (serverConfig: import('@shared/types').McpServerEntry) =>
+        invoke<import('@shared/types').McpHealthResult>('globalMcps:checkHealth', serverConfig),
     },
 
     mcpOAuth: {

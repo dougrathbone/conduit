@@ -12,6 +12,7 @@ function rowToAgentConfig(row: typeof agents.$inferSelect): AgentConfig {
     envVars: JSON.parse(row.envVars ?? '{}') as Record<string, string>,
     mcpConfig: JSON.parse(row.mcpConfig ?? '{"mcpServers":{}}') as McpServersConfig,
     gistId: row.gistId ?? undefined,
+    workingDir: row.workingDir ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
@@ -42,6 +43,7 @@ export function createAgent(
     envVars: JSON.stringify(data.envVars ?? {}),
     mcpConfig: JSON.stringify(data.mcpConfig ?? { mcpServers: {} }),
     gistId: data.gistId ?? null,
+    workingDir: data.workingDir ?? null,
     createdAt: now,
     updatedAt: now,
   }).run()
@@ -67,6 +69,7 @@ export function updateAgent(
   if (data.envVars !== undefined) updateValues.envVars = JSON.stringify(data.envVars)
   if (data.mcpConfig !== undefined) updateValues.mcpConfig = JSON.stringify(data.mcpConfig)
   if ('gistId' in data) updateValues.gistId = data.gistId ?? null
+  if ('workingDir' in data) updateValues.workingDir = data.workingDir ?? null
 
   drizzleDb.update(agents).set(updateValues).where(eq(agents.id, id)).run()
 
