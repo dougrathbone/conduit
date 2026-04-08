@@ -61,6 +61,19 @@ export function initDb(): void {
       updated_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS triggers (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT NOT NULL,
+      config TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_triggered_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+    );
+
     CREATE TABLE IF NOT EXISTS oauth_tokens (
       server_url TEXT PRIMARY KEY,
       access_token TEXT NOT NULL,
@@ -89,6 +102,7 @@ export function initDb(): void {
   try { db.exec('ALTER TABLE agents ADD COLUMN working_dir TEXT') } catch { /* already exists */ }
   try { db.exec('ALTER TABLE agents ADD COLUMN publish_target_ids TEXT') } catch { /* already exists */ }
   try { db.exec('ALTER TABLE agents ADD COLUMN repository_id TEXT') } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE runs ADD COLUMN trigger_context TEXT') } catch { /* already exists */ }
 
   drizzleDb = drizzle(db, { schema })
 }

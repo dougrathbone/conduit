@@ -58,6 +58,20 @@ export const repositories = sqliteTable('repositories', {
   updatedAt: integer('updated_at').notNull(),
 })
 
+export const triggers = sqliteTable('triggers', {
+  id: text('id').primaryKey(),
+  agentId: text('agent_id')
+    .notNull()
+    .references(() => agents.id),
+  name: text('name').notNull(),
+  type: text('type').notNull(),
+  config: text('config').notNull().default('{}'),
+  enabled: integer('enabled').notNull().default(1),
+  lastTriggeredAt: integer('last_triggered_at'),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+})
+
 export const runs = sqliteTable('runs', {
   id: text('id').primaryKey(),
   agentId: text('agent_id')
@@ -70,4 +84,5 @@ export const runs = sqliteTable('runs', {
   workspacePath: text('workspace_path'),
   logPath: text('log_path').notNull(),
   exitCode: integer('exit_code'),
+  triggerContext: text('trigger_context'),
 })

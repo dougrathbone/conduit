@@ -2,7 +2,7 @@ import { spawn, ChildProcess } from 'child_process'
 import { createInterface } from 'readline'
 import * as fs from 'fs'
 import * as path from 'path'
-import type { ExecutionRun, LogEntry } from '../shared/types'
+import type { ExecutionRun, LogEntry, TriggerContext } from '../shared/types'
 import { createRun, updateRun } from '../main/db/queries/runs'
 import { getAgent } from '../main/db/queries/agents'
 import { getRepository } from '../main/db/queries/repositories'
@@ -14,6 +14,7 @@ import { buildClaudeArgs, parseClaudeOutput } from '../main/execution/adapters/c
 import { buildAmpArgs, parseAmpOutput } from '../main/execution/adapters/amp'
 import { buildCursorArgs, CURSOR_NOTICE } from '../main/execution/adapters/cursor'
 import { publishRunResult } from './publisher'
+import { buildTriggeredPrompt } from './triggers/promptBuilder'
 
 /** Function signature for broadcasting events to all connected WebSocket clients */
 export type BroadcastFn = (channel: string, payload: unknown) => void
@@ -55,7 +56,8 @@ function cleanupRun(
  */
 export async function startRunServer(
   agentId: string,
-  broadcast: BroadcastFn
+  broadcast: BroadcastFn,
+  triggerContext?: TriggerContext
 ): Promise<ExecutionRun> {
   // 1. Load agent
   const agent = getAgent(agentId)
@@ -100,6 +102,7 @@ export async function startRunServer(
     exitCode: undefined,
     endedAt: undefined,
     durationMs: undefined,
+    triggerContext: triggerContext ?? undefined,
   })
 
   const runId = runRecord.id
@@ -261,8 +264,11 @@ export async function startRunServer(
 
     // Write prompt to stdin — avoids --mcp-config <configs...> greedily
     // consuming the prompt as an additional config path argument.
+    const fullPrompt = triggerContext
+      ? buildTriggeredPrompt(agent.prompt, triggerContext)
+      : agent.prompt
     if (child.stdin) {
-      child.stdin.write(agent.prompt)
+      child.stdin.write(fullPrompt)
       child.stdin.end()
     }
   } catch (err) {

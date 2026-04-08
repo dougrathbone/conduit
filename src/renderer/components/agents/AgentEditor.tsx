@@ -5,6 +5,7 @@ import { Button } from '@renderer/components/ui/button'
 import { PromptEditor } from './PromptEditor'
 import { EnvVarEditor } from './EnvVarEditor'
 import { McpEditor } from './McpEditor'
+import { TriggerEditor } from './TriggerEditor'
 import { useAgent, useUpdateAgent } from '@renderer/hooks/useAgents'
 import { usePublishTargets } from '@renderer/hooks/usePublishTargets'
 import { useRepositories, useRepoSyncEvents } from '@renderer/hooks/useRepositories'
@@ -396,6 +397,9 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
             </div>
           )}
         </div>
+
+        {/* Triggers */}
+        <TriggerEditor agentId={agentId} />
       </div>
     </div>
   )

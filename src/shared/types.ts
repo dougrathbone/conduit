@@ -94,6 +94,7 @@ export interface ExecutionRun {
   workspacePath?: string
   logPath: string
   exitCode?: number
+  triggerContext?: TriggerContext
 }
 
 export interface LogEntry {
@@ -223,6 +224,58 @@ export interface PublishTarget {
   updatedAt: number
 }
 
+// ── Triggers ────────────────────────────────────────────────────────────────
+
+export type TriggerType = 'cron' | 'slack' | 'webhook'
+
+export interface CronTriggerConfig {
+  expression: string
+  timezone?: string
+}
+
+export interface SlackTriggerConfig {
+  channelFilter?: string
+}
+
+export interface WebhookTriggerConfig {
+  secret?: string
+}
+
+export type TriggerConfig = CronTriggerConfig | SlackTriggerConfig | WebhookTriggerConfig
+
+export interface Trigger {
+  id: string
+  agentId: string
+  name: string
+  type: TriggerType
+  config: TriggerConfig
+  enabled: boolean
+  lastTriggeredAt?: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface TriggerContext {
+  triggerId: string
+  triggerType: TriggerType
+  payload?: string
+  slackMeta?: {
+    userId: string
+    userName?: string
+    channelId: string
+    channelName?: string
+    messageTs: string
+    threadTs?: string
+  }
+}
+
+export interface TriggerFiredPayload {
+  triggerId: string
+  agentId: string
+  runId: string
+  triggerType: TriggerType
+}
+
 // IPC API surface exposed via contextBridge
 export interface ConduitAPI {
   agents: {
@@ -278,6 +331,14 @@ export interface ConduitAPI {
     delete: (id: string) => Promise<void>
     test: (type: PublishTargetType, config: PublishConfig) => Promise<{ success: boolean; error?: string }>
   }
+  triggers: {
+    list: (agentId: string) => Promise<Trigger[]>
+    get: (id: string) => Promise<Trigger | null>
+    create: (data: Omit<Trigger, 'id' | 'createdAt' | 'updatedAt'>) => Promise<Trigger>
+    update: (id: string, data: Partial<Omit<Trigger, 'id' | 'createdAt' | 'updatedAt'>>) => Promise<Trigger>
+    delete: (id: string) => Promise<void>
+  }
+  onTriggerFired: (cb: (payload: TriggerFiredPayload) => void) => () => void
   mcpOAuth: {
     getToken: (serverUrl: string) => Promise<OAuthToken | null>
     startAuth: (serverId: string, isGlobal: boolean) => Promise<void>
