@@ -121,6 +121,16 @@ export interface McpHealthResult {
   message: string
 }
 
+export interface McpToolInfo {
+  name: string
+  description?: string
+}
+
+export interface McpToolsResult {
+  tools: McpToolInfo[]
+  error?: string
+}
+
 export interface GlobalMcpServer {
   id: string
   name: string
@@ -216,6 +226,7 @@ export interface ConduitAPI {
     update: (id: string, data: Partial<Omit<GlobalMcpServer, 'id' | 'createdAt' | 'updatedAt'>>) => Promise<GlobalMcpServer>
     delete: (id: string) => Promise<void>
     checkHealth: (serverConfig: McpServerEntry) => Promise<McpHealthResult>
+    listTools: (serverConfig: McpServerEntry) => Promise<McpToolsResult>
   }
   repos: {
     list: () => Promise<Repository[]>

@@ -163,6 +163,8 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       delete: (id: string) => invoke<void>('globalMcps:delete', id),
       checkHealth: (serverConfig: import('@shared/types').McpServerEntry) =>
         invoke<import('@shared/types').McpHealthResult>('globalMcps:checkHealth', serverConfig),
+      listTools: (serverConfig: import('@shared/types').McpServerEntry) =>
+        invoke<import('@shared/types').McpToolsResult>('globalMcps:listTools', serverConfig),
     },
 
     repos: {

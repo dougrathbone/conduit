@@ -13,6 +13,7 @@ import {
   useDeleteGlobalMcp,
 } from '@renderer/hooks/useGlobalMcps'
 import { useMcpHealth } from '@renderer/hooks/useMcpHealth'
+import { useMcpTools } from '@renderer/hooks/useMcpTools'
 import { cn } from '@renderer/lib/utils'
 import { McpOAuthButton } from './McpOAuthButton'
 import type { GlobalMcpServer, McpServerEntry, McpOAuthConfig } from '@shared/types'
@@ -340,6 +341,25 @@ interface ServerRowProps {
   isDark: boolean
 }
 
+function McpToolCount({ serverId, serverConfig }: { serverId: string; serverConfig: McpServerEntry }) {
+  const { data, isLoading } = useMcpTools(serverId, serverConfig)
+
+  if (isLoading) return <span className="text-[10px] text-[var(--text-secondary)] opacity-50">loading tools…</span>
+  if (!data || data.error) return null
+  if (data.tools.length === 0) return null
+
+  const toolNames = data.tools.map(t => t.name).join('\n')
+
+  return (
+    <span
+      className="text-[10px] text-[var(--accent)] opacity-80"
+      title={toolNames}
+    >
+      {data.tools.length} tool{data.tools.length !== 1 ? 's' : ''} available
+    </span>
+  )
+}
+
 function ServerRow({ server, isDark }: ServerRowProps) {
   const [editing, setEditing] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
@@ -421,9 +441,17 @@ function ServerRow({ server, isDark }: ServerRowProps) {
             <span className="ml-2 text-xs text-[var(--text-secondary)] font-normal">(disabled)</span>
           )}
         </p>
-        <p className="text-xs text-[var(--text-secondary)] font-mono truncate">
-          {server.serverKey} · {serverType}
-        </p>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-[var(--text-secondary)] font-mono truncate">
+            {server.serverKey} · {serverType}
+          </span>
+          {server.enabled && (
+            <>
+              <span className="text-[var(--text-secondary)] opacity-30">·</span>
+              <McpToolCount serverId={server.id} serverConfig={server.serverConfig} />
+            </>
+          )}
+        </div>
       </div>
 
       {/* Health indicator */}
