@@ -19,3 +19,6 @@ release/
 *.db
 *.db-shm
 *.db-wal
+
+# TypeScript build info
+*.tsbuildinfo
