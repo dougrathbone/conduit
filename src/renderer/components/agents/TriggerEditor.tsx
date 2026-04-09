@@ -54,19 +54,105 @@ function getWebhookUrl(triggerId: string): string {
   return `${base}/api/triggers/webhook/${triggerId}`
 }
 
+// ── Schedule helpers ─────────────────────────────────────────────────────────
+
+const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone
+
+type ScheduleMode = 'preset' | 'custom'
+
+interface SchedulePreset {
+  label: string
+  cron: string
+}
+
+const SCHEDULE_PRESETS: SchedulePreset[] = [
+  { label: 'Every hour',          cron: '0 * * * *' },
+  { label: 'Every 6 hours',       cron: '0 */6 * * *' },
+  { label: 'Daily',               cron: '0 9 * * *' },
+  { label: 'Weekdays',            cron: '0 9 * * 1-5' },
+  { label: 'Weekly (Monday)',      cron: '0 9 * * 1' },
+  { label: 'Monthly (1st)',        cron: '0 9 1 * *' },
+]
+
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as const
+const WEEKDAY_CRON = [1, 2, 3, 4, 5, 6, 0] // cron values
+
+function parseCronToPreset(expr: string): string | null {
+  const preset = SCHEDULE_PRESETS.find(p => p.cron === expr)
+  return preset ? preset.cron : null
+}
+
+/** Build a cron expression from time + days. */
+function buildCronFromSchedule(hour: number, minute: number, days: number[]): string {
+  const daysPart = days.length === 0 || days.length === 7 ? '*' : days.join(',')
+  return `${minute} ${hour} * * ${daysPart}`
+}
+
+/** Parse hour/minute/days from a cron expression if possible. */
+function parseCronSchedule(expr: string): { hour: number; minute: number; days: number[] } | null {
+  const parts = expr.trim().split(/\s+/)
+  if (parts.length !== 5) return null
+  const [minPart, hourPart, , , dayPart] = parts
+  const minute = parseInt(minPart)
+  const hour = parseInt(hourPart)
+  if (isNaN(minute) || isNaN(hour)) return null
+
+  let days: number[] = []
+  if (dayPart !== '*') {
+    days = dayPart.split(',').map(d => parseInt(d)).filter(d => !isNaN(d))
+    // Handle ranges like 1-5
+    if (dayPart.includes('-')) {
+      const [start, end] = dayPart.split('-').map(Number)
+      if (!isNaN(start) && !isNaN(end)) {
+        days = []
+        for (let i = start; i <= end; i++) days.push(i)
+      }
+    }
+  }
+  return { hour, minute, days }
+}
+
+// Common timezones grouped by region
+const TIMEZONE_GROUPS: { label: string; zones: string[] }[] = [
+  { label: 'Americas', zones: [
+    'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+    'America/Toronto', 'America/Vancouver', 'America/Sao_Paulo', 'America/Mexico_City',
+  ]},
+  { label: 'Europe', zones: [
+    'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Amsterdam',
+    'Europe/Madrid', 'Europe/Rome', 'Europe/Stockholm', 'Europe/Zurich',
+  ]},
+  { label: 'Asia/Pacific', zones: [
+    'Asia/Tokyo', 'Asia/Shanghai', 'Asia/Singapore', 'Asia/Kolkata',
+    'Asia/Dubai', 'Australia/Sydney', 'Australia/Melbourne', 'Pacific/Auckland',
+  ]},
+]
+
 // ── Form ─────────────────────────────────────────────────────────────────────
 
 interface FormState {
   name: string
   type: TriggerType
+  // Cron
   cronExpression: string
   cronTimezone: string
+  scheduleMode: ScheduleMode
+  scheduleHour: number
+  scheduleMinute: number
+  scheduleDays: number[]
+  // Slack
   slackChannelFilter: string
+  // Webhook
   webhookSecret: string
 }
 
 function emptyForm(): FormState {
-  return { name: '', type: 'cron', cronExpression: '0 9 * * 1-5', cronTimezone: '', slackChannelFilter: '', webhookSecret: '' }
+  return {
+    name: '', type: 'cron',
+    cronExpression: '0 9 * * 1-5', cronTimezone: BROWSER_TZ,
+    scheduleMode: 'preset', scheduleHour: 9, scheduleMinute: 0, scheduleDays: [1, 2, 3, 4, 5],
+    slackChannelFilter: '', webhookSecret: '',
+  }
 }
 
 function formFromTrigger(t: Trigger): FormState {
@@ -76,7 +162,22 @@ function formFromTrigger(t: Trigger): FormState {
   if (t.type === 'cron') {
     const c = t.config as CronTriggerConfig
     base.cronExpression = c.expression
-    base.cronTimezone = c.timezone ?? ''
+    base.cronTimezone = c.timezone ?? BROWSER_TZ
+    // Try to parse into schedule fields
+    const parsed = parseCronSchedule(c.expression)
+    if (parsed) {
+      base.scheduleHour = parsed.hour
+      base.scheduleMinute = parsed.minute
+      base.scheduleDays = parsed.days
+      base.scheduleMode = parseCronToPreset(c.expression) ? 'preset' : 'preset'
+    }
+    // Check if it matches a preset
+    if (!parseCronToPreset(c.expression) && parsed) {
+      base.scheduleMode = 'preset' // still show visual picker
+    }
+    if (!parsed && !parseCronToPreset(c.expression)) {
+      base.scheduleMode = 'custom'
+    }
   } else if (t.type === 'slack') {
     base.slackChannelFilter = (t.config as SlackTriggerConfig).channelFilter ?? ''
   } else if (t.type === 'webhook') {
@@ -87,7 +188,12 @@ function formFromTrigger(t: Trigger): FormState {
 
 function formToConfig(form: FormState): TriggerConfig {
   switch (form.type) {
-    case 'cron': return { expression: form.cronExpression.trim(), timezone: form.cronTimezone.trim() || undefined } as CronTriggerConfig
+    case 'cron': {
+      const expression = form.scheduleMode === 'custom'
+        ? form.cronExpression.trim()
+        : buildCronFromSchedule(form.scheduleHour, form.scheduleMinute, form.scheduleDays)
+      return { expression, timezone: form.cronTimezone.trim() || undefined } as CronTriggerConfig
+    }
     case 'slack': return { channelFilter: form.slackChannelFilter.trim() || undefined } as SlackTriggerConfig
     case 'webhook': return { secret: form.webhookSecret.trim() || undefined } as WebhookTriggerConfig
   }
@@ -95,7 +201,9 @@ function formToConfig(form: FormState): TriggerConfig {
 
 function isFormValid(form: FormState): boolean {
   if (!form.name.trim()) return false
-  if (form.type === 'cron' && !form.cronExpression.trim()) return false
+  if (form.type === 'cron') {
+    if (form.scheduleMode === 'custom' && !form.cronExpression.trim()) return false
+  }
   return true
 }
 
@@ -141,15 +249,135 @@ function InlineForm({ initial, onSave, onCancel, saving, existingId }: InlineFor
       </div>
 
       {form.type === 'cron' && (
-        <div className="grid grid-cols-2 gap-3">
-          <div className="space-y-1">
-            <label className="block text-xs text-[var(--text-secondary)]">Cron Expression</label>
-            <Input value={form.cronExpression} onChange={e => setForm(f => ({ ...f, cronExpression: e.target.value }))} placeholder="0 9 * * 1-5" className="font-mono text-xs" />
-            <p className="text-[10px] text-[var(--text-secondary)] opacity-70">min hour day month weekday</p>
+        <div className="space-y-3">
+          {/* Mode toggle */}
+          <div className="flex gap-1 p-0.5 rounded-md bg-[var(--bg-primary)] border border-[var(--border)] w-fit">
+            <button type="button" onClick={() => setForm(f => ({ ...f, scheduleMode: 'preset' }))}
+              className={cn('text-xs py-1 px-3 rounded-md transition-colors font-medium',
+                form.scheduleMode === 'preset' ? 'bg-[var(--bg-secondary)] text-[var(--text-primary)] shadow-sm' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]')}>
+              Schedule
+            </button>
+            <button type="button" onClick={() => setForm(f => ({ ...f, scheduleMode: 'custom' }))}
+              className={cn('text-xs py-1 px-3 rounded-md transition-colors font-medium',
+                form.scheduleMode === 'custom' ? 'bg-[var(--bg-secondary)] text-[var(--text-primary)] shadow-sm' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]')}>
+              Custom Cron
+            </button>
           </div>
+
+          {form.scheduleMode === 'preset' ? (
+            <div className="space-y-3">
+              {/* Time picker */}
+              <div className="space-y-1.5">
+                <label className="block text-xs text-[var(--text-secondary)]">Run at</label>
+                <div className="flex items-center gap-2">
+                  <select value={form.scheduleHour} onChange={e => setForm(f => ({ ...f, scheduleHour: parseInt(e.target.value) }))}
+                    className="h-8 px-2 rounded-md border border-[var(--border)] bg-[var(--bg-primary)] text-[var(--text-primary)] text-xs font-mono">
+                    {Array.from({ length: 24 }, (_, i) => (
+                      <option key={i} value={i}>{String(i).padStart(2, '0')}</option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-[var(--text-secondary)] font-bold">:</span>
+                  <select value={form.scheduleMinute} onChange={e => setForm(f => ({ ...f, scheduleMinute: parseInt(e.target.value) }))}
+                    className="h-8 px-2 rounded-md border border-[var(--border)] bg-[var(--bg-primary)] text-[var(--text-primary)] text-xs font-mono">
+                    {[0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55].map(m => (
+                      <option key={m} value={m}>{String(m).padStart(2, '0')}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Day picker */}
+              <div className="space-y-1.5">
+                <label className="block text-xs text-[var(--text-secondary)]">On days</label>
+                <div className="flex gap-1">
+                  {WEEKDAYS.map((day, i) => {
+                    const cronVal = WEEKDAY_CRON[i]
+                    const active = form.scheduleDays.includes(cronVal)
+                    return (
+                      <button key={day} type="button"
+                        onClick={() => setForm(f => ({
+                          ...f,
+                          scheduleDays: active
+                            ? f.scheduleDays.filter(d => d !== cronVal)
+                            : [...f.scheduleDays, cronVal].sort((a, b) => a - b),
+                        }))}
+                        className={cn(
+                          'w-9 h-7 rounded text-xs font-medium transition-all border',
+                          active
+                            ? 'bg-[var(--accent)]/15 border-[var(--accent)]/40 text-[var(--accent)]'
+                            : 'bg-transparent border-[var(--border)] text-[var(--text-secondary)] hover:border-[var(--text-secondary)]'
+                        )}>
+                        {day}
+                      </button>
+                    )
+                  })}
+                  <button type="button"
+                    onClick={() => setForm(f => ({ ...f, scheduleDays: f.scheduleDays.length === 7 ? [] : [0, 1, 2, 3, 4, 5, 6] }))}
+                    className="ml-1 px-2 h-7 rounded text-[10px] text-[var(--text-secondary)] hover:text-[var(--text-primary)] border border-[var(--border)] hover:border-[var(--text-secondary)] transition-colors">
+                    {form.scheduleDays.length === 7 ? 'None' : 'All'}
+                  </button>
+                </div>
+                <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
+                  {form.scheduleDays.length === 0 || form.scheduleDays.length === 7
+                    ? 'Every day'
+                    : form.scheduleDays.length === 5 && [1,2,3,4,5].every(d => form.scheduleDays.includes(d))
+                    ? 'Weekdays'
+                    : `${form.scheduleDays.length} day${form.scheduleDays.length !== 1 ? 's' : ''}`}
+                  {' at '}
+                  {String(form.scheduleHour).padStart(2, '0')}:{String(form.scheduleMinute).padStart(2, '0')}
+                </p>
+              </div>
+
+              {/* Quick presets */}
+              <div className="space-y-1.5">
+                <label className="block text-xs text-[var(--text-secondary)]">Quick presets</label>
+                <div className="flex flex-wrap gap-1.5">
+                  {SCHEDULE_PRESETS.map(preset => {
+                    const parsed = parseCronSchedule(preset.cron)
+                    const currentCron = buildCronFromSchedule(form.scheduleHour, form.scheduleMinute, form.scheduleDays)
+                    const isActive = preset.cron === currentCron
+                    return (
+                      <button key={preset.cron} type="button"
+                        onClick={() => {
+                          const p = parseCronSchedule(preset.cron)
+                          if (p) setForm(f => ({ ...f, scheduleHour: p.hour, scheduleMinute: p.minute, scheduleDays: p.days }))
+                        }}
+                        className={cn(
+                          'px-2.5 py-1 rounded text-[10px] font-medium transition-all border',
+                          isActive
+                            ? 'bg-[var(--accent)]/15 border-[var(--accent)]/40 text-[var(--accent)]'
+                            : 'bg-transparent border-[var(--border)] text-[var(--text-secondary)] hover:border-[var(--text-secondary)]'
+                        )}>
+                        {preset.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-1">
+              <label className="block text-xs text-[var(--text-secondary)]">Cron Expression</label>
+              <Input value={form.cronExpression} onChange={e => setForm(f => ({ ...f, cronExpression: e.target.value }))} placeholder="0 9 * * 1-5" className="font-mono text-xs" />
+              <p className="text-[10px] text-[var(--text-secondary)] opacity-70">Format: minute hour day-of-month month day-of-week</p>
+            </div>
+          )}
+
+          {/* Timezone */}
           <div className="space-y-1">
-            <label className="block text-xs text-[var(--text-secondary)]">Timezone <span className="opacity-60">(optional)</span></label>
-            <Input value={form.cronTimezone} onChange={e => setForm(f => ({ ...f, cronTimezone: e.target.value }))} placeholder="America/New_York" className="text-xs" />
+            <label className="block text-xs text-[var(--text-secondary)]">Timezone</label>
+            <select value={form.cronTimezone} onChange={e => setForm(f => ({ ...f, cronTimezone: e.target.value }))}
+              className="w-full h-8 px-2 rounded-md border border-[var(--border)] bg-[var(--bg-primary)] text-[var(--text-primary)] text-xs">
+              <option value={BROWSER_TZ}>{BROWSER_TZ} (local)</option>
+              <option value="UTC">UTC</option>
+              {TIMEZONE_GROUPS.map(group => (
+                <optgroup key={group.label} label={group.label}>
+                  {group.zones.filter(z => z !== BROWSER_TZ).map(tz => (
+                    <option key={tz} value={tz}>{tz.replace(/_/g, ' ')}</option>
+                  ))}
+                </optgroup>
+              ))}
+            </select>
           </div>
         </div>
       )}
