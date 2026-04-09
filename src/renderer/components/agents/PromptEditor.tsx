@@ -1,8 +1,8 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import { oneDark } from '@codemirror/theme-one-dark'
 import { EditorView, placeholder as cmPlaceholder } from '@codemirror/view'
-import { Cloud, CloudDownload, ExternalLink, FolderOpen, Loader2, Sparkles } from 'lucide-react'
+import { Cloud, CloudDownload, ExternalLink, FolderOpen, Loader2, Sparkles, Maximize2, Minimize2 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { useUIStore } from '@renderer/store/ui'
 import { useSaveGist, useLoadGist } from '@renderer/hooks/useGist'
@@ -63,6 +63,19 @@ export function PromptEditor({
   const [showGistBrowser, setShowGistBrowser] = useState(false)
   const [gistError, setGistError] = useState<string | null>(null)
   const [isChatOpen, setIsChatOpen] = useState(false)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+
+  // Esc key to exit fullscreen
+  const handleEscKey = useCallback((e: KeyboardEvent) => {
+    if (e.key === 'Escape' && isFullscreen) setIsFullscreen(false)
+  }, [isFullscreen])
+
+  useEffect(() => {
+    if (isFullscreen) {
+      window.addEventListener('keydown', handleEscKey)
+      return () => window.removeEventListener('keydown', handleEscKey)
+    }
+  }, [isFullscreen, handleEscKey])
 
   const saveGist = useSaveGist()
   const loadGist = useLoadGist()
@@ -196,6 +209,16 @@ export function PromptEditor({
               Craft with AI
             </Button>
           )}
+
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setIsFullscreen(true)}
+            className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] gap-1.5 text-xs ml-auto"
+            title="Fullscreen editor"
+          >
+            <Maximize2 className="h-3.5 w-3.5" />
+          </Button>
         </div>
 
         {gistError && (
@@ -220,6 +243,44 @@ export function PromptEditor({
           }}
         />
       </div>
+
+      {/* Fullscreen editor overlay */}
+      {isFullscreen && (
+        <div className="fixed inset-0 z-50 flex flex-col" style={{ background: 'var(--bg-primary)' }}>
+          <div className="flex items-center justify-between px-4 py-2 border-b border-[var(--border)] flex-shrink-0">
+            <span className="text-sm font-medium text-[var(--text-primary)]">Prompt Editor</span>
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] text-[var(--text-secondary)]">Esc to exit</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setIsFullscreen(false)}
+                className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] gap-1.5 text-xs"
+              >
+                <Minimize2 className="h-3.5 w-3.5" />
+                Exit Fullscreen
+              </Button>
+            </div>
+          </div>
+          <div className="flex-1 overflow-hidden">
+            <CodeMirror
+              value={value}
+              height="calc(100vh - 41px)"
+              extensions={[
+                EditorView.lineWrapping,
+                cmPlaceholder(PROMPT_PLACEHOLDER),
+              ]}
+              theme={isDark ? oneDark : undefined}
+              onChange={onChange}
+              basicSetup={{
+                lineNumbers: true,
+                highlightActiveLine: true,
+                autocompletion: false,
+              }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Craft with AI modal overlay */}
       {isChatOpen && agentId && runner && (
