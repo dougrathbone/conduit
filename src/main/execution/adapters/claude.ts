@@ -9,6 +9,8 @@ export function buildClaudeArgs(mcpConfigPath: string): string[] {
     '--verbose',
     '--output-format',
     'stream-json',
+    '--model',
+    'claude-opus-4-6',
     '--dangerously-skip-permissions',
     '--mcp-config',
     mcpConfigPath,
