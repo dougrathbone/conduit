@@ -3,6 +3,7 @@ import * as path from 'path'
 import { listRepositories, getRepository, updateRepository } from '../main/db/queries/repositories'
 import { cloneRepo, fetchRepo, removeWorktree } from './gitOps'
 import { getGithubPat } from './store'
+import { DEV_CONTEXT } from './auth/config'
 import type { BroadcastFn } from './runner'
 import type { RepoSyncStatus } from '../shared/types'
 
@@ -35,7 +36,7 @@ export class RepoSyncService {
 
   /** Sync all repositories. */
   async syncAll(): Promise<void> {
-    const repos = listRepositories()
+    const repos = listRepositories(DEV_CONTEXT.userId, DEV_CONTEXT.userGroupIds)
     for (const repo of repos) {
       // Fire-and-forget each repo sync so one failure doesn't block others
       this.syncRepo(repo.id).catch((err) =>
@@ -124,7 +125,7 @@ export class RepoSyncService {
    * Scans each repo's worktrees-run/ directory and removes orphaned worktrees.
    */
   private cleanupStaleWorktrees(): void {
-    const repos = listRepositories()
+    const repos = listRepositories(DEV_CONTEXT.userId, DEV_CONTEXT.userGroupIds)
     for (const repo of repos) {
       if (!repo.clonePath) continue
       const worktreeRunDir = path.join(repo.clonePath, 'worktrees-run')

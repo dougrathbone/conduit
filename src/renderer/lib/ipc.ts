@@ -76,4 +76,18 @@ export const api = {
   ): (() => void) => {
     return getConduit().onPromptChatError(cb)
   },
+  get shares() {
+    return getConduit().shares
+  },
+  get users() {
+    return getConduit().users
+  },
+  get groups() {
+    return getConduit().groups
+  },
+  onShareChange: (
+    cb: (payload: { entityType: import('@shared/types').ShareableEntityType; entityId: string }) => void
+  ): (() => void) => {
+    return getConduit().onShareChange(cb)
+  },
 }

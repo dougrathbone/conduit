@@ -2,9 +2,10 @@ import React, { useState, useCallback } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import { json } from '@codemirror/lang-json'
 import { oneDark } from '@codemirror/theme-one-dark'
-import { Plus, Pencil, Trash2, Info, Loader2, X, Check, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react'
+import { Plus, Pencil, Trash2, Info, Loader2, X, Check, ChevronDown, ChevronRight, RefreshCw, Share2 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
+import { ShareDialog } from '@renderer/components/ShareDialog'
 import { useUIStore } from '@renderer/store/ui'
 import {
   useGlobalMcps,
@@ -14,6 +15,7 @@ import {
 } from '@renderer/hooks/useGlobalMcps'
 import { useMcpHealth } from '@renderer/hooks/useMcpHealth'
 import { useMcpTools } from '@renderer/hooks/useMcpTools'
+import { useAuth } from '@renderer/contexts/AuthContext'
 import { cn } from '@renderer/lib/utils'
 import { McpOAuthButton } from './McpOAuthButton'
 import type { GlobalMcpServer, McpServerEntry, McpOAuthConfig } from '@shared/types'
@@ -339,6 +341,8 @@ function InlineForm({ initial, onSave, onCancel, saving, isDark }: InlineFormPro
 interface ServerRowProps {
   server: GlobalMcpServer
   isDark: boolean
+  isOwner: boolean
+  onShare: () => void
 }
 
 function McpToolCount({ serverId, serverConfig }: { serverId: string; serverConfig: McpServerEntry }) {
@@ -360,7 +364,7 @@ function McpToolCount({ serverId, serverConfig }: { serverId: string; serverConf
   )
 }
 
-function ServerRow({ server, isDark }: ServerRowProps) {
+function ServerRow({ server, isDark, isOwner, onShare }: ServerRowProps) {
   const [editing, setEditing] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
 
@@ -471,6 +475,15 @@ function ServerRow({ server, isDark }: ServerRowProps) {
 
       {/* Actions */}
       <div className="flex items-center gap-1 flex-shrink-0">
+        {isOwner && (
+          <button
+            onClick={onShare}
+            className="p-1.5 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-primary)] hover:text-[var(--text-primary)] transition-colors"
+            title="Share"
+          >
+            <Share2 className="h-3.5 w-3.5" />
+          </button>
+        )}
         <button
           onClick={() => { setEditing(true); setConfirmDelete(false) }}
           className="p-1.5 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-primary)] hover:text-[var(--text-primary)] transition-colors"
@@ -522,9 +535,11 @@ export function GlobalMcpManager() {
     (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
 
   const { data: servers = [], isLoading } = useGlobalMcps()
+  const { user } = useAuth()
   const createMcp = useCreateGlobalMcp()
 
   const [showAddForm, setShowAddForm] = useState(false)
+  const [shareServerId, setShareServerId] = useState<string | null>(null)
 
   const handleCreate = (form: FormState, parsedConfig: McpServerEntry) => {
     createMcp.mutate(
@@ -539,6 +554,9 @@ export function GlobalMcpManager() {
       }
     )
   }
+
+  const myServers = servers.filter((s) => s.ownerId === user?.id)
+  const sharedServers = servers.filter((s) => s.ownerId !== user?.id)
 
   return (
     <div className="flex flex-col h-full" style={{ background: 'var(--bg-primary)' }}>
@@ -600,12 +618,38 @@ export function GlobalMcpManager() {
           </div>
         ) : (
           <div className="space-y-2">
-            {servers.map((server) => (
-              <ServerRow key={server.id} server={server} isDark={isDark} />
-            ))}
+            {myServers.length > 0 && (
+              <>
+                <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-secondary)] px-3 py-1.5">
+                  My Servers <span className="ml-1 opacity-60">{myServers.length}</span>
+                </div>
+                {myServers.map((server) => (
+                  <ServerRow key={server.id} server={server} isDark={isDark} isOwner onShare={() => setShareServerId(server.id)} />
+                ))}
+              </>
+            )}
+            {sharedServers.length > 0 && (
+              <>
+                <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-secondary)] px-3 py-1.5">
+                  Shared with Me <span className="ml-1 opacity-60">{sharedServers.length}</span>
+                </div>
+                {sharedServers.map((server) => (
+                  <ServerRow key={server.id} server={server} isDark={isDark} isOwner={false} onShare={() => {}} />
+                ))}
+              </>
+            )}
           </div>
         )}
       </div>
+
+      {shareServerId && (
+        <ShareDialog
+          entityType="globalMcpServer"
+          entityId={shareServerId}
+          isOpen={!!shareServerId}
+          onClose={() => setShareServerId(null)}
+        />
+      )}
     </div>
   )
 }

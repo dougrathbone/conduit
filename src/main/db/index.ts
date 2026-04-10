@@ -96,6 +96,51 @@ export function initDb(): void {
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      email TEXT NOT NULL,
+      name TEXT NOT NULL,
+      avatar_url TEXT,
+      last_login_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS groups (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      parent_group_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS user_groups (
+      user_id TEXT NOT NULL,
+      group_id TEXT NOT NULL,
+      PRIMARY KEY (user_id, group_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS sessions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      access_token TEXT NOT NULL,
+      refresh_token TEXT,
+      expires_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS shares (
+      id TEXT PRIMARY KEY,
+      entity_type TEXT NOT NULL,
+      entity_id TEXT NOT NULL,
+      target_type TEXT NOT NULL,
+      target_id TEXT,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS unique_share
+      ON shares(entity_type, entity_id, target_type, target_id);
   `)
 
   // Migrations: add columns added after initial schema
@@ -103,6 +148,13 @@ export function initDb(): void {
   try { db.exec('ALTER TABLE agents ADD COLUMN publish_target_ids TEXT') } catch { /* already exists */ }
   try { db.exec('ALTER TABLE agents ADD COLUMN repository_id TEXT') } catch { /* already exists */ }
   try { db.exec('ALTER TABLE runs ADD COLUMN trigger_context TEXT') } catch { /* already exists */ }
+
+  // Multi-user: add ownership columns
+  try { db.exec("ALTER TABLE agents ADD COLUMN owner_id TEXT DEFAULT 'dev-user'") } catch { /* already exists */ }
+  try { db.exec("ALTER TABLE publish_targets ADD COLUMN owner_id TEXT DEFAULT 'dev-user'") } catch { /* already exists */ }
+  try { db.exec("ALTER TABLE repositories ADD COLUMN owner_id TEXT DEFAULT 'dev-user'") } catch { /* already exists */ }
+  try { db.exec("ALTER TABLE global_mcp_servers ADD COLUMN owner_id TEXT DEFAULT 'dev-user'") } catch { /* already exists */ }
+  try { db.exec('ALTER TABLE runs ADD COLUMN started_by TEXT') } catch { /* already exists */ }
 
   drizzleDb = drizzle(db, { schema })
 }

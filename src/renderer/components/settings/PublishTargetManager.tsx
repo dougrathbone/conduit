@@ -1,7 +1,8 @@
 import React, { useState } from 'react'
-import { Plus, Pencil, Trash2, Info, Loader2, X, Check, Send, Mail, Globe } from 'lucide-react'
+import { Plus, Pencil, Trash2, Info, Loader2, X, Check, Send, Mail, Globe, Share2 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
+import { ShareDialog } from '@renderer/components/ShareDialog'
 import {
   usePublishTargets,
   useCreatePublishTarget,
@@ -9,6 +10,7 @@ import {
   useDeletePublishTarget,
   useTestPublishTarget,
 } from '@renderer/hooks/usePublishTargets'
+import { useAuth } from '@renderer/contexts/AuthContext'
 import { cn } from '@renderer/lib/utils'
 import type {
   PublishTarget,
@@ -437,7 +439,7 @@ function InlineForm({ initial, onSave, onCancel, saving }: InlineFormProps) {
 
 // ── Target row ───────────────────────────────────────────────────────────────
 
-function TargetRow({ target }: { target: PublishTarget }) {
+function TargetRow({ target, isOwner, onShare }: { target: PublishTarget; isOwner: boolean; onShare: () => void }) {
   const [editing, setEditing] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const updateTarget = useUpdatePublishTarget()
@@ -475,6 +477,11 @@ function TargetRow({ target }: { target: PublishTarget }) {
         <p className="text-xs text-[var(--text-secondary)] truncate">{targetSubtitle(target)}</p>
       </div>
       <div className="flex items-center gap-1 flex-shrink-0">
+        {isOwner && (
+          <button onClick={onShare} className="p-1.5 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-primary)] hover:text-[var(--text-primary)] transition-colors" title="Share">
+            <Share2 className="h-3.5 w-3.5" />
+          </button>
+        )}
         <button onClick={() => { setEditing(true); setConfirmDelete(false) }} className="p-1.5 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-primary)] hover:text-[var(--text-primary)] transition-colors" title="Edit">
           <Pencil className="h-3.5 w-3.5" />
         </button>
@@ -502,8 +509,10 @@ function TargetRow({ target }: { target: PublishTarget }) {
 
 export function PublishTargetManager() {
   const { data: targets = [], isLoading } = usePublishTargets()
+  const { user } = useAuth()
   const createTarget = useCreatePublishTarget()
   const [showAddForm, setShowAddForm] = useState(false)
+  const [shareTargetId, setShareTargetId] = useState<string | null>(null)
 
   const handleCreate = (form: FormState) => {
     createTarget.mutate(
@@ -511,6 +520,9 @@ export function PublishTargetManager() {
       { onSuccess: () => setShowAddForm(false) }
     )
   }
+
+  const myTargets = targets.filter((t) => t.ownerId === user?.id)
+  const sharedTargets = targets.filter((t) => t.ownerId !== user?.id)
 
   return (
     <div className="flex flex-col h-full" style={{ background: 'var(--bg-primary)' }}>
@@ -547,10 +559,34 @@ export function PublishTargetManager() {
           </div>
         ) : (
           <div className="space-y-2">
-            {targets.map(target => <TargetRow key={target.id} target={target} />)}
+            {myTargets.length > 0 && (
+              <>
+                <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-secondary)] px-3 py-1.5">
+                  My Targets <span className="ml-1 opacity-60">{myTargets.length}</span>
+                </div>
+                {myTargets.map(target => <TargetRow key={target.id} target={target} isOwner onShare={() => setShareTargetId(target.id)} />)}
+              </>
+            )}
+            {sharedTargets.length > 0 && (
+              <>
+                <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-secondary)] px-3 py-1.5">
+                  Shared with Me <span className="ml-1 opacity-60">{sharedTargets.length}</span>
+                </div>
+                {sharedTargets.map(target => <TargetRow key={target.id} target={target} isOwner={false} onShare={() => {}} />)}
+              </>
+            )}
           </div>
         )}
       </div>
+
+      {shareTargetId && (
+        <ShareDialog
+          entityType="publishTarget"
+          entityId={shareTargetId}
+          isOpen={!!shareTargetId}
+          onClose={() => setShareTargetId(null)}
+        />
+      )}
     </div>
   )
 }

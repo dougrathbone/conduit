@@ -14,6 +14,10 @@ import type {
   OAuthToken,
   RunnerType,
   SlackPublishConfig,
+  Share,
+  ShareableEntityType,
+  User,
+  Group,
 } from '@shared/types'
 
 /**
@@ -23,6 +27,20 @@ import type {
  */
 export function createWsConduitClient(wsUrl: string): ConduitAPI {
   const ws = new WebSocket(wsUrl)
+
+  // If WS is closed due to auth failure, redirect to login
+  ws.addEventListener('close', (event) => {
+    // 4401 is our custom close code for auth failure; also handle HTTP 401 during upgrade
+    // which manifests as a close without ever opening (code 1006)
+    if (event.code === 4401 || (event.code === 1006 && !event.wasClean)) {
+      // Check if we're actually unauthenticated by hitting /auth/me
+      fetch('/auth/me').then((res) => {
+        if (res.status === 401) {
+          window.location.href = '/auth/login'
+        }
+      }).catch(() => {})
+    }
+  })
   const pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   const outputListeners = new Set<(p: RunOutputPayload) => void>()
   const statusListeners = new Set<(p: RunStatusChangePayload) => void>()
@@ -32,6 +50,7 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
   const promptErrorListeners = new Set<(p: { sessionId: string; error: string }) => void>()
   const repoSyncStatusListeners = new Set<(p: RepoSyncStatusPayload) => void>()
   const triggerFiredListeners = new Set<(p: TriggerFiredPayload) => void>()
+  const shareChangeListeners = new Set<(p: { entityType: ShareableEntityType; entityId: string }) => void>()
   let idCounter = 0
 
   ws.onmessage = (event) => {
@@ -87,6 +106,10 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       } else if (msg.channel === 'trigger:fired') {
         triggerFiredListeners.forEach((cb) =>
           cb(msg.payload as TriggerFiredPayload)
+        )
+      } else if (msg.channel === 'share:changed') {
+        shareChangeListeners.forEach((cb) =>
+          cb(msg.payload as { entityType: ShareableEntityType; entityId: string })
         )
       }
     }
@@ -265,6 +288,30 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
     ): (() => void) => {
       promptErrorListeners.add(cb)
       return () => promptErrorListeners.delete(cb)
+    },
+
+    shares: {
+      list: (entityType: ShareableEntityType, entityId: string) =>
+        invoke<Share[]>('shares:list', entityType, entityId),
+      create: (data: { entityType: ShareableEntityType; entityId: string; targetType: 'user' | 'group' | 'everyone'; targetId?: string }) =>
+        invoke<Share>('shares:create', data),
+      delete: (shareId: string) => invoke<void>('shares:delete', shareId),
+    },
+
+    users: {
+      list: () => invoke<User[]>('users:list'),
+      search: (query: string) => invoke<User[]>('users:search', query),
+    },
+
+    groups: {
+      list: () => invoke<Group[]>('groups:list'),
+    },
+
+    onShareChange: (
+      cb: (payload: { entityType: ShareableEntityType; entityId: string }) => void
+    ): (() => void) => {
+      shareChangeListeners.add(cb)
+      return () => shareChangeListeners.delete(cb)
     },
   }
 }

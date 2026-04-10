@@ -5,6 +5,8 @@ import { MainPanel } from './components/layout/MainPanel'
 import { GlobalMcpManager } from './components/settings/GlobalMcpManager'
 import { PublishTargetManager } from './components/settings/PublishTargetManager'
 import { RepositoryManager } from './components/settings/RepositoryManager'
+import { LoginPage } from './components/LoginPage'
+import { useAuth } from './contexts/AuthContext'
 import { useUIStore } from './store/ui'
 import { useCreateAgent } from './hooks/useAgents'
 import { cn } from './lib/utils'
@@ -61,6 +63,7 @@ function EmptyState() {
 }
 
 export default function App() {
+  const { isAuthenticated } = useAuth()
   const { selectedAgentId, selectAgent, showGlobalMcpManager, showPublishTargets, showRepositories } = useUIStore()
   const createAgent = useCreateAgent()
 
@@ -100,6 +103,10 @@ export default function App() {
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [handleNewAgent])
+
+  if (!isAuthenticated) {
+    return <LoginPage />
+  }
 
   return (
     <div className="flex h-screen w-screen overflow-hidden" style={{ background: 'var(--bg-primary)' }}>

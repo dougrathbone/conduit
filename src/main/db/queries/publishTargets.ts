@@ -1,6 +1,8 @@
 import { eq } from 'drizzle-orm'
 import { drizzleDb } from '../index'
 import { publishTargets } from '../schema'
+import { getVisibleEntityIds } from './access'
+import { deleteSharesForEntity } from './shares'
 import type { PublishTarget, SlackPublishConfig } from '../../../shared/types'
 
 function rowToPublishTarget(row: typeof publishTargets.$inferSelect): PublishTarget {
@@ -10,14 +12,17 @@ function rowToPublishTarget(row: typeof publishTargets.$inferSelect): PublishTar
     type: row.type as PublishTarget['type'],
     config: JSON.parse(row.config) as SlackPublishConfig,
     enabled: row.enabled === 1,
+    ownerId: row.ownerId ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
 }
 
-export function listPublishTargets(): PublishTarget[] {
+export function listPublishTargets(userId: string, userGroupIds: string[]): PublishTarget[] {
+  const visibleIds = getVisibleEntityIds('publishTarget', userId, userGroupIds)
+  if (visibleIds.length === 0) return []
   const rows = drizzleDb.select().from(publishTargets).all()
-  return rows.map(rowToPublishTarget)
+  return rows.filter(r => visibleIds.includes(r.id)).map(rowToPublishTarget)
 }
 
 export function getPublishTarget(id: string): PublishTarget | null {
@@ -27,7 +32,8 @@ export function getPublishTarget(id: string): PublishTarget | null {
 }
 
 export function createPublishTarget(
-  data: Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>
+  data: Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>,
+  ownerId: string
 ): PublishTarget {
   const now = Date.now()
   const id = crypto.randomUUID()
@@ -38,6 +44,7 @@ export function createPublishTarget(
     type: data.type,
     config: JSON.stringify(data.config),
     enabled: data.enabled ? 1 : 0,
+    ownerId,
     createdAt: now,
     updatedAt: now,
   }).run()
@@ -70,5 +77,6 @@ export function updatePublishTarget(
 }
 
 export function deletePublishTarget(id: string): void {
+  deleteSharesForEntity('publishTarget', id)
   drizzleDb.delete(publishTargets).where(eq(publishTargets.id, id)).run()
 }

@@ -15,6 +15,7 @@ function rowToExecutionRun(row: typeof runs.$inferSelect): ExecutionRun {
     logPath: row.logPath,
     exitCode: row.exitCode ?? undefined,
     triggerContext: row.triggerContext ? JSON.parse(row.triggerContext) as TriggerContext : undefined,
+    startedBy: row.startedBy ?? undefined,
   }
 }
 
@@ -50,6 +51,7 @@ export function createRun(
     logPath: data.logPath,
     exitCode: data.exitCode ?? null,
     triggerContext: data.triggerContext ? JSON.stringify(data.triggerContext) : null,
+    startedBy: data.startedBy ?? null,
   }).run()
 
   const created = getRun(id)
