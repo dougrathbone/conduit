@@ -4,6 +4,7 @@ import { cn } from '@renderer/lib/utils'
 import { useAgents } from '@renderer/hooks/useAgents'
 import { useRuns } from '@renderer/hooks/useRuns'
 import { useUIStore } from '@renderer/store/ui'
+import { useAuth } from '@renderer/contexts/AuthContext'
 import { StatusDot } from '@renderer/components/ui/badge'
 import { api } from '@renderer/lib/ipc'
 import { useQueryClient } from '@tanstack/react-query'
@@ -84,6 +85,7 @@ function AgentItem({ agent, isSelected, onClick }: AgentItemProps) {
 export function AgentList() {
   const { data: agents, isLoading, error } = useAgents()
   const { selectedAgentId, selectAgent } = useUIStore()
+  const { user } = useAuth()
   const queryClient = useQueryClient()
 
   // Invalidate run queries when any run status changes so dots update in real-time
@@ -121,17 +123,41 @@ export function AgentList() {
     )
   }
 
+  const myAgents = agents.filter((a) => a.ownerId === user?.id)
+  const sharedAgents = agents.filter((a) => a.ownerId !== user?.id)
+
   return (
     <div className="flex flex-col gap-0.5 px-2">
-      {agents.map((agent) => (
-        <AgentItem
-          key={agent.id}
-          agent={agent}
-          isSelected={agent.id === selectedAgentId}
-          onClick={() => selectAgent(agent.id)}
-        />
-
-      ))}
+      {myAgents.length > 0 && (
+        <>
+          <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-secondary)] px-3 py-1.5">
+            My Agents <span className="ml-1 opacity-60">{myAgents.length}</span>
+          </div>
+          {myAgents.map((agent) => (
+            <AgentItem
+              key={agent.id}
+              agent={agent}
+              isSelected={agent.id === selectedAgentId}
+              onClick={() => selectAgent(agent.id)}
+            />
+          ))}
+        </>
+      )}
+      {sharedAgents.length > 0 && (
+        <>
+          <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-secondary)] px-3 py-1.5">
+            Shared with Me <span className="ml-1 opacity-60">{sharedAgents.length}</span>
+          </div>
+          {sharedAgents.map((agent) => (
+            <AgentItem
+              key={agent.id}
+              agent={agent}
+              isSelected={agent.id === selectedAgentId}
+              onClick={() => selectAgent(agent.id)}
+            />
+          ))}
+        </>
+      )}
     </div>
   )
 }

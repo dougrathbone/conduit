@@ -1,6 +1,8 @@
 import { eq } from 'drizzle-orm'
 import { drizzleDb } from '../index'
 import { globalMcpServers } from '../schema'
+import { getVisibleEntityIds } from './access'
+import { deleteSharesForEntity } from './shares'
 import type { GlobalMcpServer, McpServerEntry } from '../../../shared/types'
 
 function rowToGlobalMcpServer(row: typeof globalMcpServers.$inferSelect): GlobalMcpServer {
@@ -10,14 +12,17 @@ function rowToGlobalMcpServer(row: typeof globalMcpServers.$inferSelect): Global
     serverKey: row.serverKey,
     serverConfig: JSON.parse(row.serverConfig) as McpServerEntry,
     enabled: row.enabled === 1,
+    ownerId: row.ownerId ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
 }
 
-export function listGlobalMcps(): GlobalMcpServer[] {
+export function listGlobalMcps(userId: string, userGroupIds: string[]): GlobalMcpServer[] {
+  const visibleIds = getVisibleEntityIds('globalMcpServer', userId, userGroupIds)
+  if (visibleIds.length === 0) return []
   const rows = drizzleDb.select().from(globalMcpServers).all()
-  return rows.map(rowToGlobalMcpServer)
+  return rows.filter(r => visibleIds.includes(r.id)).map(rowToGlobalMcpServer)
 }
 
 export function listEnabledGlobalMcps(): GlobalMcpServer[] {
@@ -26,7 +31,8 @@ export function listEnabledGlobalMcps(): GlobalMcpServer[] {
 }
 
 export function createGlobalMcp(
-  data: Omit<GlobalMcpServer, 'id' | 'createdAt' | 'updatedAt'>
+  data: Omit<GlobalMcpServer, 'id' | 'createdAt' | 'updatedAt'>,
+  ownerId: string
 ): GlobalMcpServer {
   const now = Date.now()
   const id = crypto.randomUUID()
@@ -37,6 +43,7 @@ export function createGlobalMcp(
     serverKey: data.serverKey,
     serverConfig: JSON.stringify(data.serverConfig),
     enabled: data.enabled ? 1 : 0,
+    ownerId,
     createdAt: now,
     updatedAt: now,
   }).run()
@@ -69,5 +76,6 @@ export function updateGlobalMcp(
 }
 
 export function deleteGlobalMcp(id: string): void {
+  deleteSharesForEntity('globalMcpServer', id)
   drizzleDb.delete(globalMcpServers).where(eq(globalMcpServers.id, id)).run()
 }

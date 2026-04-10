@@ -2,6 +2,7 @@ import React from 'react'
 import { Plus, Sun, Moon, Monitor, Server, Send, FolderGit2 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { AgentList } from '@renderer/components/agents/AgentList'
+import { UserMenu } from '@renderer/components/UserMenu'
 import { useUIStore } from '@renderer/store/ui'
 import { useCreateAgent } from '@renderer/hooks/useAgents'
 import { useGlobalMcps } from '@renderer/hooks/useGlobalMcps'
@@ -53,13 +54,16 @@ export function Sidebar() {
         <span className="text-xl font-bold tracking-wide text-[var(--accent)]" style={{ fontFamily: 'monospace' }}>
           &gt;_conduit
         </span>
-        <button
-          onClick={cycleTheme}
-          className="rounded-md p-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)] hover:text-[var(--text-primary)] transition-colors"
-          title={`Theme: ${theme}`}
-        >
-          <ThemeIcon className="h-4 w-4" />
-        </button>
+        <div className="flex items-center gap-1">
+          <UserMenu />
+          <button
+            onClick={cycleTheme}
+            className="rounded-md p-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)] hover:text-[var(--text-primary)] transition-colors"
+            title={`Theme: ${theme}`}
+          >
+            <ThemeIcon className="h-4 w-4" />
+          </button>
+        </div>
       </div>
 
       {/* New Agent button */}

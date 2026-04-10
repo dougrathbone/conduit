@@ -4,6 +4,8 @@ import { eq } from 'drizzle-orm'
 import { drizzleDb } from '../index'
 import { repositories, agents } from '../schema'
 import { REPOS_DIR } from '../../utils/paths'
+import { getVisibleEntityIds } from './access'
+import { deleteSharesForEntity } from './shares'
 import type { Repository } from '../../../shared/types'
 
 function rowToRepository(row: typeof repositories.$inferSelect): Repository {
@@ -17,14 +19,17 @@ function rowToRepository(row: typeof repositories.$inferSelect): Repository {
     syncError: row.syncError ?? undefined,
     lastSyncedAt: row.lastSyncedAt ?? undefined,
     clonePath: row.clonePath ?? undefined,
+    ownerId: row.ownerId ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
 }
 
-export function listRepositories(): Repository[] {
+export function listRepositories(userId: string, userGroupIds: string[]): Repository[] {
+  const visibleIds = getVisibleEntityIds('repository', userId, userGroupIds)
+  if (visibleIds.length === 0) return []
   const rows = drizzleDb.select().from(repositories).all()
-  return rows.map(rowToRepository)
+  return rows.filter(r => visibleIds.includes(r.id)).map(rowToRepository)
 }
 
 export function getRepository(id: string): Repository | null {
@@ -34,7 +39,8 @@ export function getRepository(id: string): Repository | null {
 }
 
 export function createRepository(
-  data: Omit<Repository, 'id' | 'createdAt' | 'updatedAt' | 'syncStatus' | 'clonePath'>
+  data: Omit<Repository, 'id' | 'createdAt' | 'updatedAt' | 'syncStatus' | 'clonePath'>,
+  ownerId: string
 ): Repository {
   const now = Date.now()
   const id = crypto.randomUUID()
@@ -48,6 +54,7 @@ export function createRepository(
     authMethod: data.authMethod ?? 'none',
     syncStatus: 'pending',
     clonePath,
+    ownerId,
     createdAt: now,
     updatedAt: now,
   }).run()
@@ -96,6 +103,7 @@ export function deleteRepository(id: string): void {
   const repo = getRepository(id)
   const clonePath = repo?.clonePath
 
+  deleteSharesForEntity('repository', id)
   drizzleDb.delete(repositories).where(eq(repositories.id, id)).run()
 
   // Clean up on-disk clone

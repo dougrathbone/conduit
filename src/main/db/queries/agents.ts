@@ -1,6 +1,8 @@
 import { eq } from 'drizzle-orm'
 import { drizzleDb } from '../index'
 import { agents } from '../schema'
+import { getVisibleEntityIds } from './access'
+import { deleteSharesForEntity } from './shares'
 import type { AgentConfig, McpServersConfig } from '../../../shared/types'
 
 function rowToAgentConfig(row: typeof agents.$inferSelect): AgentConfig {
@@ -15,14 +17,17 @@ function rowToAgentConfig(row: typeof agents.$inferSelect): AgentConfig {
     workingDir: row.workingDir ?? undefined,
     publishTargetIds: row.publishTargetIds ? JSON.parse(row.publishTargetIds) as string[] : undefined,
     repositoryId: row.repositoryId ?? undefined,
+    ownerId: row.ownerId ?? undefined,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   }
 }
 
-export function listAgents(): AgentConfig[] {
+export function listAgents(userId: string, userGroupIds: string[]): AgentConfig[] {
+  const visibleIds = getVisibleEntityIds('agent', userId, userGroupIds)
+  if (visibleIds.length === 0) return []
   const rows = drizzleDb.select().from(agents).all()
-  return rows.map(rowToAgentConfig)
+  return rows.filter(r => visibleIds.includes(r.id)).map(rowToAgentConfig)
 }
 
 export function getAgent(id: string): AgentConfig | null {
@@ -32,7 +37,8 @@ export function getAgent(id: string): AgentConfig | null {
 }
 
 export function createAgent(
-  data: Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>
+  data: Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>,
+  ownerId: string
 ): AgentConfig {
   const now = Date.now()
   const id = crypto.randomUUID()
@@ -48,6 +54,7 @@ export function createAgent(
     workingDir: data.workingDir ?? null,
     publishTargetIds: data.publishTargetIds ? JSON.stringify(data.publishTargetIds) : null,
     repositoryId: data.repositoryId ?? null,
+    ownerId,
     createdAt: now,
     updatedAt: now,
   }).run()
@@ -85,5 +92,6 @@ export function updateAgent(
 }
 
 export function deleteAgent(id: string): void {
+  deleteSharesForEntity('agent', id)
   drizzleDb.delete(agents).where(eq(agents.id, id)).run()
 }

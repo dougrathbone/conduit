@@ -57,7 +57,8 @@ function cleanupRun(
 export async function startRunServer(
   agentId: string,
   broadcast: BroadcastFn,
-  triggerContext?: TriggerContext
+  triggerContext?: TriggerContext,
+  startedBy?: string
 ): Promise<ExecutionRun> {
   // 1. Load agent
   const agent = getAgent(agentId)
@@ -103,6 +104,7 @@ export async function startRunServer(
     endedAt: undefined,
     durationMs: undefined,
     triggerContext: triggerContext ?? undefined,
+    startedBy: startedBy ?? undefined,
   })
 
   const runId = runRecord.id

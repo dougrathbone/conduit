@@ -1,15 +1,17 @@
 import React, { useEffect, useState, useCallback, useRef, useImperativeHandle, forwardRef } from 'react'
-import { Loader2, Send } from 'lucide-react'
+import { Loader2, Send, Share2 } from 'lucide-react'
 import { Input } from '@renderer/components/ui/input'
 import { Button } from '@renderer/components/ui/button'
 import { PromptEditor } from './PromptEditor'
 import { EnvVarEditor } from './EnvVarEditor'
 import { McpEditor } from './McpEditor'
 import { TriggerEditor } from './TriggerEditor'
+import { ShareDialog } from '@renderer/components/ShareDialog'
 import { useAgent, useUpdateAgent } from '@renderer/hooks/useAgents'
 import { usePublishTargets } from '@renderer/hooks/usePublishTargets'
 import { useRepositories, useRepoSyncEvents } from '@renderer/hooks/useRepositories'
 import { useUIStore } from '@renderer/store/ui'
+import { useAuth } from '@renderer/contexts/AuthContext'
 import { cn } from '@renderer/lib/utils'
 import type { AgentConfig, RunnerType } from '@shared/types'
 
@@ -99,6 +101,9 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
   const { data: allRepos = [] } = useRepositories()
   useRepoSyncEvents()
   const { setShowPublishTargets, setShowRepositories } = useUIStore()
+  const { user } = useAuth()
+  const [showShareDialog, setShowShareDialog] = useState(false)
+  const isOwner = agent?.ownerId === user?.id
 
   const [draft, setDraft] = useState<Partial<AgentConfig>>({})
   const [saveState, setSaveState] = useState<SaveState>('idle')
@@ -202,11 +207,24 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
   return (
     <div className="flex flex-col h-full overflow-y-auto">
       <div className="flex-1 px-6 py-5 space-y-6 max-w-2xl">
-        {/* Name */}
+        {/* Name + Share */}
         <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-[var(--text-secondary)]">
-            Name
-          </label>
+          <div className="flex items-center justify-between">
+            <label className="block text-xs font-medium text-[var(--text-secondary)]">
+              Name
+            </label>
+            {isOwner && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setShowShareDialog(true)}
+                className="gap-1.5 text-xs h-7 px-2"
+              >
+                <Share2 className="h-3.5 w-3.5" />
+                Share
+              </Button>
+            )}
+          </div>
           <Input
             value={draft.name ?? ''}
             onChange={(e) => handleChange('name', e.target.value)}
@@ -401,6 +419,15 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
         {/* Triggers */}
         <TriggerEditor agentId={agentId} />
       </div>
+
+      {showShareDialog && agent && (
+        <ShareDialog
+          entityType="agent"
+          entityId={agent.id}
+          isOpen={showShareDialog}
+          onClose={() => setShowShareDialog(false)}
+        />
+      )}
     </div>
   )
 })

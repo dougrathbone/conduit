@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react'
-import { Plus, Pencil, Trash2, Info, Loader2, X, Check, RefreshCw, FolderGit2, ExternalLink } from 'lucide-react'
+import { Plus, Pencil, Trash2, Info, Loader2, X, Check, RefreshCw, FolderGit2, ExternalLink, Share2 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
+import { ShareDialog } from '@renderer/components/ShareDialog'
 import { api } from '@renderer/lib/ipc'
 import {
   useRepositories,
@@ -12,6 +13,7 @@ import {
   useTestRepoConnection,
   useRepoSyncEvents,
 } from '@renderer/hooks/useRepositories'
+import { useAuth } from '@renderer/contexts/AuthContext'
 import { cn } from '@renderer/lib/utils'
 import type { Repository, RepoSyncStatus } from '@shared/types'
 
@@ -284,9 +286,11 @@ function InlineForm({ initial, onSave, onCancel, saving }: InlineFormProps) {
 
 interface RepoRowProps {
   repo: Repository
+  isOwner: boolean
+  onShare: () => void
 }
 
-function RepoRow({ repo }: RepoRowProps) {
+function RepoRow({ repo, isOwner, onShare }: RepoRowProps) {
   const [editing, setEditing] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
 
@@ -365,6 +369,15 @@ function RepoRow({ repo }: RepoRowProps) {
 
       {/* Actions */}
       <div className="flex items-center gap-1 flex-shrink-0">
+        {isOwner && (
+          <button
+            onClick={onShare}
+            className="p-1.5 rounded-md text-[var(--text-secondary)] hover:bg-[var(--bg-primary)] hover:text-[var(--text-primary)] transition-colors"
+            title="Share"
+          >
+            <Share2 className="h-3.5 w-3.5" />
+          </button>
+        )}
         <button
           onClick={() => triggerSync.mutate(repo.id)}
           disabled={isBusy || triggerSync.isPending}
@@ -419,10 +432,12 @@ function RepoRow({ repo }: RepoRowProps) {
 
 export function RepositoryManager() {
   const { data: repos = [], isLoading } = useRepositories()
+  const { user } = useAuth()
   const createRepo = useCreateRepository()
   useRepoSyncEvents()
 
   const [showAddForm, setShowAddForm] = useState(false)
+  const [shareRepoId, setShareRepoId] = useState<string | null>(null)
 
   const handleCreate = (form: FormState) => {
     createRepo.mutate(
@@ -435,6 +450,9 @@ export function RepositoryManager() {
       { onSuccess: () => setShowAddForm(false) }
     )
   }
+
+  const myRepos = repos.filter((r) => r.ownerId === user?.id)
+  const sharedRepos = repos.filter((r) => r.ownerId !== user?.id)
 
   return (
     <div className="flex flex-col h-full" style={{ background: 'var(--bg-primary)' }}>
@@ -500,12 +518,38 @@ export function RepositoryManager() {
           </div>
         ) : (
           <div className="space-y-2">
-            {repos.map((repo) => (
-              <RepoRow key={repo.id} repo={repo} />
-            ))}
+            {myRepos.length > 0 && (
+              <>
+                <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-secondary)] px-3 py-1.5">
+                  My Repositories <span className="ml-1 opacity-60">{myRepos.length}</span>
+                </div>
+                {myRepos.map((repo) => (
+                  <RepoRow key={repo.id} repo={repo} isOwner onShare={() => setShareRepoId(repo.id)} />
+                ))}
+              </>
+            )}
+            {sharedRepos.length > 0 && (
+              <>
+                <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-secondary)] px-3 py-1.5">
+                  Shared with Me <span className="ml-1 opacity-60">{sharedRepos.length}</span>
+                </div>
+                {sharedRepos.map((repo) => (
+                  <RepoRow key={repo.id} repo={repo} isOwner={false} onShare={() => {}} />
+                ))}
+              </>
+            )}
           </div>
         )}
       </div>
+
+      {shareRepoId && (
+        <ShareDialog
+          entityType="repository"
+          entityId={shareRepoId}
+          isOpen={!!shareRepoId}
+          onClose={() => setShareRepoId(null)}
+        />
+      )}
     </div>
   )
 }

@@ -1,4 +1,53 @@
-import { sqliteTable, text, integer } from 'drizzle-orm/sqlite-core'
+import { sqliteTable, text, integer, primaryKey, uniqueIndex } from 'drizzle-orm/sqlite-core'
+
+// ── Auth & Users ───────────────────────────────────────────────────────────
+
+export const users = sqliteTable('users', {
+  id: text('id').primaryKey(),
+  email: text('email').notNull(),
+  name: text('name').notNull(),
+  avatarUrl: text('avatar_url'),
+  lastLoginAt: integer('last_login_at').notNull(),
+  createdAt: integer('created_at').notNull(),
+})
+
+export const groups = sqliteTable('groups', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  parentGroupId: text('parent_group_id'),
+  createdAt: integer('created_at').notNull(),
+  updatedAt: integer('updated_at').notNull(),
+})
+
+export const userGroups = sqliteTable('user_groups', {
+  userId: text('user_id').notNull(),
+  groupId: text('group_id').notNull(),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.userId, table.groupId] }),
+}))
+
+export const sessions = sqliteTable('sessions', {
+  id: text('id').primaryKey(),
+  userId: text('user_id').notNull(),
+  accessToken: text('access_token').notNull(),
+  refreshToken: text('refresh_token'),
+  expiresAt: integer('expires_at').notNull(),
+  createdAt: integer('created_at').notNull(),
+})
+
+export const shares = sqliteTable('shares', {
+  id: text('id').primaryKey(),
+  entityType: text('entity_type').notNull(),
+  entityId: text('entity_id').notNull(),
+  targetType: text('target_type').notNull(),
+  targetId: text('target_id'),
+  createdBy: text('created_by').notNull(),
+  createdAt: integer('created_at').notNull(),
+}, (table) => ({
+  uniqueShare: uniqueIndex('unique_share').on(table.entityType, table.entityId, table.targetType, table.targetId),
+}))
+
+// ── Existing Tables ────────────────────────────────────────────────────────
 
 export const oauthTokens = sqliteTable('oauth_tokens', {
   serverUrl: text('server_url').primaryKey(),
@@ -20,6 +69,7 @@ export const agents = sqliteTable('agents', {
   workingDir: text('working_dir'),
   publishTargetIds: text('publish_target_ids'),
   repositoryId: text('repository_id'),
+  ownerId: text('owner_id'),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 })
@@ -30,6 +80,7 @@ export const globalMcpServers = sqliteTable('global_mcp_servers', {
   serverKey: text('server_key').notNull(),
   serverConfig: text('server_config').notNull(),
   enabled: integer('enabled').notNull().default(1),
+  ownerId: text('owner_id'),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 })
@@ -40,6 +91,7 @@ export const publishTargets = sqliteTable('publish_targets', {
   type: text('type').notNull().default('slack'),
   config: text('config').notNull().default('{}'),
   enabled: integer('enabled').notNull().default(1),
+  ownerId: text('owner_id'),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 })
@@ -54,6 +106,7 @@ export const repositories = sqliteTable('repositories', {
   syncError: text('sync_error'),
   lastSyncedAt: integer('last_synced_at'),
   clonePath: text('clone_path'),
+  ownerId: text('owner_id'),
   createdAt: integer('created_at').notNull(),
   updatedAt: integer('updated_at').notNull(),
 })
@@ -85,4 +138,5 @@ export const runs = sqliteTable('runs', {
   logPath: text('log_path').notNull(),
   exitCode: integer('exit_code'),
   triggerContext: text('trigger_context'),
+  startedBy: text('started_by'),
 })

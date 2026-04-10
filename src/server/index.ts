@@ -1,4 +1,5 @@
 import express from 'express'
+import cookieParser from 'cookie-parser'
 import { createServer } from 'http'
 import { WebSocketServer, WebSocket } from 'ws'
 import * as path from 'path'
@@ -46,6 +47,15 @@ import { Octokit } from '@octokit/rest'
 import { createSession, sendMessageServer, closeSession } from './promptChatServer'
 import { loadIpRestrictionsConfig, isIpAllowed, extractClientIp } from './ipRestrictions'
 import { createIpRestrictionMiddleware } from './middleware/ipRestriction'
+import { isAuthEnabled, DEV_CONTEXT } from './auth/config'
+import { sessionMiddleware } from './auth/middleware'
+import { authRouter as authRoutes } from './auth/routes'
+import { ensureDevUser, getDevContext } from './auth/devBypass'
+import { canAccessEntity, isEntityOwner } from '../main/db/queries/access'
+import { getShare, listShares, createShare, deleteShare } from '../main/db/queries/shares'
+import { listUsers, searchUsers } from '../main/db/queries/users'
+import { listGroups, getUserGroupIds } from '../main/db/queries/groups'
+import { getSession as getDbSession, deleteExpiredSessions } from '../main/db/queries/sessions'
 import type {
   AgentConfig,
   GlobalMcpServer,
@@ -54,6 +64,8 @@ import type {
   RunnerType,
   SlackPublishConfig,
   Trigger,
+  RequestContext,
+  ShareableEntityType,
 } from '../shared/types'
 
 const PORT = process.env.PORT || 7456
@@ -83,6 +95,13 @@ if (ipConfig.enabled) {
 }
 
 app.use(createIpRestrictionMiddleware(ipConfig))
+app.use(cookieParser())
+
+// Auth routes (login, callback, logout, me) — no session required
+app.use('/auth', authRoutes)
+
+// Session middleware — validates session cookie, attaches RequestContext to req
+app.use(sessionMiddleware)
 
 app.use(express.static(RENDERER_DIR))
 // SPA fallback — all non-API routes serve index.html
@@ -114,46 +133,60 @@ app.use('/api/triggers', express.json({ limit: '1mb' }), createTriggerRoutes(tri
 
 // ─── Channel handlers ─────────────────────────────────────────────────────────
 
-type HandlerFn = (args: unknown[], ws: WebSocket) => Promise<unknown>
+type HandlerFn = (args: unknown[], ws: WebSocket, ctx: RequestContext) => Promise<unknown>
 
 const handlers: Record<string, HandlerFn> = {
   // Agents
-  'agents:list': () => Promise.resolve(listAgents()),
+  'agents:list': (_args, _ws, ctx) => Promise.resolve(listAgents(ctx.userId, ctx.userGroupIds)),
   'agents:get': ([id]) => Promise.resolve(getAgent(id as string)),
-  'agents:create': ([data]) =>
-    Promise.resolve(createAgent(data as Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>)),
-  'agents:update': ([id, data]) =>
-    Promise.resolve(
+  'agents:create': ([data], _ws, ctx) =>
+    Promise.resolve(createAgent(data as Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>, ctx.userId)),
+  'agents:update': ([id, data], _ws, ctx) => {
+    if (!canAccessEntity('agent', id as string, ctx.userId, ctx.userGroupIds)) {
+      throw new Error('Access denied')
+    }
+    return Promise.resolve(
       updateAgent(
         id as string,
         data as Partial<Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>>
       )
-    ),
-  'agents:delete': ([id]) => {
+    )
+  },
+  'agents:delete': ([id], _ws, ctx) => {
+    if (!isEntityOwner('agent', id as string, ctx.userId)) {
+      throw new Error('Only the owner can delete this agent')
+    }
     deleteAgent(id as string)
     return Promise.resolve()
   },
 
   // Runs
   'runs:list': ([agentId]) => Promise.resolve(listRuns(agentId as string)),
-  'runs:start': ([agentId]) => startRunServer(agentId as string, broadcast),
+  'runs:start': ([agentId], _ws, ctx) => startRunServer(agentId as string, broadcast, undefined, ctx.userId),
   'runs:stop': ([runId]) => stopRun(runId as string),
   'runs:getLog': ([runId]) => Promise.resolve(readLogFile(runId as string)),
 
   // Global MCPs
-  'globalMcps:list': () => Promise.resolve(listGlobalMcps()),
-  'globalMcps:create': ([data]) =>
+  'globalMcps:list': (_args, _ws, ctx) => Promise.resolve(listGlobalMcps(ctx.userId, ctx.userGroupIds)),
+  'globalMcps:create': ([data], _ws, ctx) =>
     Promise.resolve(
-      createGlobalMcp(data as Omit<GlobalMcpServer, 'id' | 'createdAt' | 'updatedAt'>)
+      createGlobalMcp(data as Omit<GlobalMcpServer, 'id' | 'createdAt' | 'updatedAt'>, ctx.userId)
     ),
-  'globalMcps:update': ([id, data]) =>
-    Promise.resolve(
+  'globalMcps:update': ([id, data], _ws, ctx) => {
+    if (!canAccessEntity('globalMcpServer', id as string, ctx.userId, ctx.userGroupIds)) {
+      throw new Error('Access denied')
+    }
+    return Promise.resolve(
       updateGlobalMcp(
         id as string,
         data as Partial<Omit<GlobalMcpServer, 'id' | 'createdAt' | 'updatedAt'>>
       )
-    ),
-  'globalMcps:delete': ([id]) => {
+    )
+  },
+  'globalMcps:delete': ([id], _ws, ctx) => {
+    if (!isEntityOwner('globalMcpServer', id as string, ctx.userId)) {
+      throw new Error('Only the owner can delete this MCP server')
+    }
     deleteGlobalMcp(id as string)
     return Promise.resolve()
   },
@@ -197,11 +230,12 @@ const handlers: Record<string, HandlerFn> = {
   },
 
   // Repositories
-  'repos:list': () => Promise.resolve(listRepositories()),
+  'repos:list': (_args, _ws, ctx) => Promise.resolve(listRepositories(ctx.userId, ctx.userGroupIds)),
   'repos:get': ([id]) => Promise.resolve(getRepository(id as string)),
-  'repos:create': async ([data]) => {
+  'repos:create': async ([data], _ws, ctx) => {
     const repo = createRepository(
-      data as Omit<Repository, 'id' | 'createdAt' | 'updatedAt' | 'syncStatus' | 'clonePath'>
+      data as Omit<Repository, 'id' | 'createdAt' | 'updatedAt' | 'syncStatus' | 'clonePath'>,
+      ctx.userId
     )
     // Trigger initial clone asynchronously
     repoSyncService.triggerSync(repo.id).catch((err) =>
@@ -209,14 +243,21 @@ const handlers: Record<string, HandlerFn> = {
     )
     return repo
   },
-  'repos:update': ([id, data]) =>
-    Promise.resolve(
+  'repos:update': ([id, data], _ws, ctx) => {
+    if (!canAccessEntity('repository', id as string, ctx.userId, ctx.userGroupIds)) {
+      throw new Error('Access denied')
+    }
+    return Promise.resolve(
       updateRepository(
         id as string,
         data as Partial<Omit<Repository, 'id' | 'createdAt' | 'updatedAt'>>
       )
-    ),
-  'repos:delete': ([id]) => {
+    )
+  },
+  'repos:delete': ([id], _ws, ctx) => {
+    if (!isEntityOwner('repository', id as string, ctx.userId)) {
+      throw new Error('Only the owner can delete this repository')
+    }
     deleteRepository(id as string)
     return Promise.resolve()
   },
@@ -237,20 +278,27 @@ const handlers: Record<string, HandlerFn> = {
   },
 
   // Publish Targets
-  'publishTargets:list': () => Promise.resolve(listPublishTargets()),
+  'publishTargets:list': (_args, _ws, ctx) => Promise.resolve(listPublishTargets(ctx.userId, ctx.userGroupIds)),
   'publishTargets:get': ([id]) => Promise.resolve(getPublishTarget(id as string)),
-  'publishTargets:create': ([data]) =>
+  'publishTargets:create': ([data], _ws, ctx) =>
     Promise.resolve(
-      createPublishTarget(data as Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>)
+      createPublishTarget(data as Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>, ctx.userId)
     ),
-  'publishTargets:update': ([id, data]) =>
-    Promise.resolve(
+  'publishTargets:update': ([id, data], _ws, ctx) => {
+    if (!canAccessEntity('publishTarget', id as string, ctx.userId, ctx.userGroupIds)) {
+      throw new Error('Access denied')
+    }
+    return Promise.resolve(
       updatePublishTarget(
         id as string,
         data as Partial<Omit<PublishTarget, 'id' | 'createdAt' | 'updatedAt'>>
       )
-    ),
-  'publishTargets:delete': ([id]) => {
+    )
+  },
+  'publishTargets:delete': ([id], _ws, ctx) => {
+    if (!isEntityOwner('publishTarget', id as string, ctx.userId)) {
+      throw new Error('Only the owner can delete this publish target')
+    }
     deletePublishTarget(id as string)
     return Promise.resolve()
   },
@@ -258,10 +306,19 @@ const handlers: Record<string, HandlerFn> = {
     testPublishTarget(type as import('../shared/types').PublishTargetType, config as import('../shared/types').PublishConfig),
 
   // Triggers
-  'triggers:list': ([agentId]) => Promise.resolve(listTriggers(agentId as string)),
+  'triggers:list': ([agentId], _ws, ctx) => {
+    if (!canAccessEntity('agent', agentId as string, ctx.userId, ctx.userGroupIds)) {
+      throw new Error('Access denied')
+    }
+    return Promise.resolve(listTriggers(agentId as string))
+  },
   'triggers:get': ([id]) => Promise.resolve(getTrigger(id as string)),
-  'triggers:create': ([data]) => {
-    const trigger = createTrigger(data as Omit<Trigger, 'id' | 'createdAt' | 'updatedAt'>)
+  'triggers:create': ([data], _ws, ctx) => {
+    const triggerData = data as Omit<Trigger, 'id' | 'createdAt' | 'updatedAt'>
+    if (!canAccessEntity('agent', triggerData.agentId, ctx.userId, ctx.userGroupIds)) {
+      throw new Error('Access denied')
+    }
+    const trigger = createTrigger(triggerData)
     triggerService.registerTrigger(trigger)
     return Promise.resolve(trigger)
   },
@@ -374,12 +431,58 @@ const handlers: Record<string, HandlerFn> = {
     closeSession(sessionId as string)
     return Promise.resolve()
   },
+
+  // Shares
+  'shares:list': ([entityType, entityId], _ws, ctx) => {
+    if (!canAccessEntity(entityType as ShareableEntityType, entityId as string, ctx.userId, ctx.userGroupIds)) {
+      throw new Error('Access denied')
+    }
+    return Promise.resolve(listShares(entityType as ShareableEntityType, entityId as string))
+  },
+  'shares:create': ([data], _ws, ctx) => {
+    const { entityType, entityId, targetType, targetId } = data as {
+      entityType: ShareableEntityType; entityId: string;
+      targetType: 'user' | 'group' | 'everyone'; targetId?: string
+    }
+    if (!isEntityOwner(entityType, entityId, ctx.userId)) {
+      throw new Error('Only the owner can share this entity')
+    }
+    const share = createShare({ entityType, entityId, targetType, targetId, createdBy: ctx.userId })
+    broadcast('share:changed', { entityType, entityId })
+    return Promise.resolve(share)
+  },
+  'shares:delete': ([shareId], _ws, ctx) => {
+    const share = getShare(shareId as string)
+    if (!share) throw new Error('Share not found')
+    if (!isEntityOwner(share.entityType, share.entityId, ctx.userId)) {
+      throw new Error('Only the owner can modify shares')
+    }
+    deleteShare(shareId as string)
+    broadcast('share:changed', { entityType: share.entityType, entityId: share.entityId })
+    return Promise.resolve()
+  },
+
+  // Users
+  'users:list': () => Promise.resolve(listUsers()),
+  'users:search': ([query]) => Promise.resolve(searchUsers(query as string)),
+
+  // Groups
+  'groups:list': () => Promise.resolve(listGroups()),
 }
 
 // ─── WebSocket ────────────────────────────────────────────────────────────────
 
-wss.on('connection', (ws) => {
+// Store auth context per WebSocket connection
+const wsContextMap = new WeakMap<WebSocket, RequestContext>()
+
+wss.on('connection', (ws, req) => {
   clients.add(ws)
+
+  // Attach auth context from the upgrade request
+  const ctx = (req as any).__conduitContext as RequestContext | undefined
+  if (ctx) {
+    wsContextMap.set(ws, ctx)
+  }
 
   ws.on('message', async (raw) => {
     let msg: { type: string; id: string; channel: string; args?: unknown[] }
@@ -403,8 +506,11 @@ wss.on('connection', (ws) => {
       return
     }
 
+    // Get context — fall back to dev context if not set (shouldn't happen, but safe)
+    const context = wsContextMap.get(ws) ?? DEV_CONTEXT
+
     try {
-      const result = await handler(msg.args ?? [], ws)
+      const result = await handler(msg.args ?? [], ws, context)
       ws.send(JSON.stringify({ type: 'response', id: msg.id, result }))
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
@@ -427,6 +533,39 @@ httpServer.on('upgrade', (req, socket, head) => {
       socket.destroy()
       return
     }
+
+    // Authenticate the WebSocket upgrade
+    let ctx: RequestContext
+    if (!isAuthEnabled()) {
+      ctx = getDevContext()
+    } else {
+      // Parse session cookie from upgrade request headers
+      const cookieHeader = req.headers.cookie || ''
+      const cookies = Object.fromEntries(
+        cookieHeader.split(';').map(c => {
+          const [k, ...v] = c.trim().split('=')
+          return [k, v.join('=')]
+        })
+      )
+      const sessionId = cookies['conduit_session']
+      if (!sessionId) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
+        socket.destroy()
+        return
+      }
+      const session = getDbSession(sessionId)
+      if (!session || session.expiresAt < Date.now()) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
+        socket.destroy()
+        return
+      }
+      const userGroupIds = getUserGroupIds(session.userId)
+      ctx = { userId: session.userId, userGroupIds }
+    }
+
+    // Attach context to the request for the connection handler
+    ;(req as any).__conduitContext = ctx
+
     wss.handleUpgrade(req, socket as import('net').Socket, head, (ws) => {
       wss.emit('connection', ws, req)
     })
@@ -439,6 +578,20 @@ httpServer.on('upgrade', (req, socket, head) => {
 
 // Initialise the SQLite database (creates tables if they don't exist)
 initDb()
+
+// Ensure dev user exists for FK integrity
+if (!isAuthEnabled()) {
+  ensureDevUser()
+  console.log('[server] Auth disabled — running in dev bypass mode')
+} else {
+  // Initialize OIDC client asynchronously
+  import('./auth/okta').then(({ initOidcClient }) =>
+    initOidcClient().catch((err: unknown) =>
+      console.error('[server] Failed to initialize OIDC client:', err)
+    )
+  )
+  console.log('[server] Auth enabled — Okta OIDC configured')
+}
 
 // Mark any runs that were left in "running" state as failed (server restart)
 const orphaned = getOrphanedRuns()
@@ -455,6 +608,16 @@ repoSyncService.start()
 
 // Start the trigger service (registers cron jobs from DB)
 triggerService.start()
+
+// Periodic session cleanup (every hour)
+if (isAuthEnabled()) {
+  setInterval(() => {
+    const count = deleteExpiredSessions()
+    if (count > 0) {
+      console.log(`[server] Cleaned up ${count} expired session(s)`)
+    }
+  }, 60 * 60 * 1000)
+}
 
 httpServer.listen(PORT, () => {
   console.log(`Conduit server running at http://localhost:${PORT}`)

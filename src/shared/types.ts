@@ -1,5 +1,48 @@
 export type RunnerType = 'claude' | 'amp' | 'cursor'
 
+// ── Auth & Users ───────────────────────────────────────────────────────────
+
+export interface User {
+  id: string
+  email: string
+  name: string
+  avatarUrl?: string
+  lastLoginAt: number
+  createdAt: number
+}
+
+export interface Group {
+  id: string
+  name: string
+  parentGroupId?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export type ShareableEntityType = 'agent' | 'publishTarget' | 'repository' | 'globalMcpServer'
+
+export interface Share {
+  id: string
+  entityType: ShareableEntityType
+  entityId: string
+  targetType: 'user' | 'group' | 'everyone'
+  targetId: string | null
+  createdBy: string
+  createdAt: number
+}
+
+export interface RequestContext {
+  userId: string
+  userGroupIds: string[]
+}
+
+export interface AuthState {
+  user: User | null
+  groups: Group[]
+  isAuthenticated: boolean
+  isDevMode: boolean
+}
+
 export interface GistFile {
   filename: string
   language: string | null
@@ -80,6 +123,7 @@ export interface AgentConfig {
   publishTargetIds?: string[]
   /** ID of a managed repository to use as the workspace */
   repositoryId?: string
+  ownerId?: string
   createdAt: number
   updatedAt: number
 }
@@ -95,6 +139,7 @@ export interface ExecutionRun {
   logPath: string
   exitCode?: number
   triggerContext?: TriggerContext
+  startedBy?: string
 }
 
 export interface LogEntry {
@@ -138,6 +183,7 @@ export interface GlobalMcpServer {
   serverKey: string
   serverConfig: McpServerEntry
   enabled: boolean
+  ownerId?: string
   createdAt: number
   updatedAt: number
 }
@@ -156,6 +202,7 @@ export interface Repository {
   syncError?: string
   lastSyncedAt?: number
   clonePath?: string
+  ownerId?: string
   createdAt: number
   updatedAt: number
 }
@@ -220,6 +267,7 @@ export interface PublishTarget {
   type: PublishTargetType
   config: PublishConfig
   enabled: boolean
+  ownerId?: string
   createdAt: number
   updatedAt: number
 }
@@ -355,6 +403,19 @@ export interface ConduitAPI {
   onPromptChatToken: (cb: (payload: { sessionId: string; token: string }) => void) => () => void
   onPromptChatDone: (cb: (payload: { sessionId: string; extractedPrompt?: string }) => void) => () => void
   onPromptChatError: (cb: (payload: { sessionId: string; error: string }) => void) => () => void
+  shares: {
+    list: (entityType: ShareableEntityType, entityId: string) => Promise<Share[]>
+    create: (data: { entityType: ShareableEntityType; entityId: string; targetType: 'user' | 'group' | 'everyone'; targetId?: string }) => Promise<Share>
+    delete: (shareId: string) => Promise<void>
+  }
+  users: {
+    list: () => Promise<User[]>
+    search: (query: string) => Promise<User[]>
+  }
+  groups: {
+    list: () => Promise<Group[]>
+  }
+  onShareChange: (cb: (payload: { entityType: ShareableEntityType; entityId: string }) => void) => () => void
 }
 
 declare global {
