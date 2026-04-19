@@ -146,7 +146,7 @@ export function AgentList() {
       {sharedAgents.length > 0 && (
         <>
           <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-secondary)] px-3 py-1.5">
-            Shared with Me <span className="ml-1 opacity-60">{sharedAgents.length}</span>
+            Shared Agents <span className="ml-1 opacity-60">{sharedAgents.length}</span>
           </div>
           {sharedAgents.map((agent) => (
             <AgentItem

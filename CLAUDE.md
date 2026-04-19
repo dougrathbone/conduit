@@ -41,6 +41,63 @@ npm start         # Run production server
 - Server → Client: `{ type: 'response', id, result }` or `{ type: 'error', id, error }`
 - Server → All: `{ type: 'event', channel, payload }` (broadcasts)
 
+## Authentication & Multi-User
+
+Conduit supports multi-user authentication via Okta OIDC. When Okta is not configured, it runs in **dev bypass mode** — identical to the original single-user behavior with zero configuration.
+
+**Dev mode** (default): No login required. A synthetic `dev-user` owns all entities. Set no env vars.
+
+**Production mode**: Set these environment variables to enable Okta OIDC:
+
+| Variable | Description |
+|----------|-------------|
+| `CONDUIT_OKTA_ISSUER` | Okta issuer URL (e.g., `https://company.okta.com/oauth2/default`) |
+| `CONDUIT_OKTA_CLIENT_ID` | OIDC application client ID |
+| `CONDUIT_OKTA_CLIENT_SECRET` | OIDC application client secret |
+| `CONDUIT_OKTA_REDIRECT_URI` | Callback URL (default: `http://localhost:7456/auth/callback`) |
+| `CONDUIT_SESSION_SECRET` | Secret for signing session cookies |
+| `CONDUIT_SESSION_TTL_MS` | Session lifetime in ms (default: 86400000 / 24h) |
+
+**Auth flow**: OIDC Authorization Code + PKCE. Sessions stored in SQLite. Groups synced from Okta ID token `groups` claim on each login.
+
+**Auth routes** (HTTP, not WebSocket):
+- `GET /auth/login` — redirects to Okta
+- `GET /auth/callback` — exchanges code, creates session
+- `POST /auth/logout` — destroys session
+- `GET /auth/me` — returns current user + groups
+
+**Auth files**:
+- `src/server/auth/config.ts` — env var reading, `isAuthEnabled()`
+- `src/server/auth/okta.ts` — OIDC client (openid-client v6)
+- `src/server/auth/middleware.ts` — session validation middleware
+- `src/server/auth/devBypass.ts` — dev mode synthetic user
+- `src/server/auth/routes.ts` — Express auth router
+
+## Ownership & Sharing
+
+Every entity (agents, publish targets, repositories, global MCP servers) has an `ownerId` column linking to a user. Triggers inherit visibility from their parent agent.
+
+**Ownership rules:**
+- Entities are owned by whoever creates them (`ownerId` set on creation)
+- Only the owner can delete an entity or modify its shares
+- Shared users can view, edit, and run — but not delete or reshare
+
+**Sharing model**: Polymorphic `shares` table maps `(entityType, entityId)` → `(user | group | everyone)`.
+
+**Visibility rule** — a user sees an entity if any of:
+1. They own it
+2. It's shared directly with them
+3. It's shared with a group they belong to
+4. It's shared with everyone
+
+**Sharing files**:
+- `src/main/db/queries/access.ts` — visibility queries (`getVisibleEntityIds`, `canAccessEntity`, `isEntityOwner`)
+- `src/main/db/queries/shares.ts` — share CRUD
+- `src/renderer/components/ShareDialog.tsx` — sharing UI modal
+- `src/renderer/hooks/useShares.ts` — TanStack Query hooks for shares
+
+**Frontend**: The sidebar splits entities into "My Agents" / "Shared Agents" sections. The share button and delete button only appear for owners.
+
 ## Data Storage
 
 All data lives under `~/.conduit/` (or `$CONDUIT_DATA_DIR`):
