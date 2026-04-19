@@ -10,6 +10,7 @@ import { RunDetail } from '@renderer/components/runs/RunDetail'
 import { TerminalPane } from '@renderer/components/layout/TerminalPane'
 import { useAgent, useDeleteAgent } from '@renderer/hooks/useAgents'
 import { useRuns } from '@renderer/hooks/useRuns'
+import { useAuth } from '@renderer/contexts/AuthContext'
 import { useUIStore } from '@renderer/store/ui'
 import { cn } from '@renderer/lib/utils'
 import { api } from '@renderer/lib/ipc'
@@ -25,7 +26,9 @@ export function MainPanel({ agentId }: MainPanelProps) {
   const { data: agent } = useAgent(agentId)
   const { data: runs } = useRuns(agentId)
   const deleteAgent = useDeleteAgent()
+  const { user } = useAuth()
   const { activeRunId, setActiveRun, selectAgent } = useUIStore()
+  const isOwner = agent?.ownerId === user?.id
   const queryClient = useQueryClient()
 
   const [tab, setTab] = useState<Tab>('configure')
@@ -119,15 +122,17 @@ export function MainPanel({ agentId }: MainPanelProps) {
               setTab('runs')
             }}
           />
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleDeleteAgent}
-            className="text-[var(--text-secondary)] hover:text-red-400 px-1.5"
-            title="Delete agent"
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
+          {isOwner && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={handleDeleteAgent}
+              className="text-[var(--text-secondary)] hover:text-red-400 px-1.5"
+              title="Delete agent"
+            >
+              <Trash2 className="h-4 w-4" />
+            </Button>
+          )}
         </div>
       </div>
 
