@@ -22,3 +22,9 @@ release/
 
 # TypeScript build info
 *.tsbuildinfo
+
+# Git worktrees
+.worktrees/
+
+# Superpowers brainstorm sessions
+.superpowers/
