@@ -9,7 +9,6 @@ import { discoverOAuthEndpoints, ensureRegisteredClient } from './discovery'
 import { generatePkce, buildAuthorizationUrl, exchangeCode } from './flow'
 import { putPending, takePending } from './state'
 import { auditMcpOAuth } from './audit'
-import { captureTokenDiagnostics } from './debug'
 import { isUrlMcpServer } from '../../shared/mcp'
 
 const GLOBAL_OWNER = '__global__'
@@ -187,7 +186,6 @@ export async function handleCallback(query: Record<string, string | undefined>):
       serverUrl: pending.serverUrl, tokenOwner: pending.tokenOwner,
       connectedByUserId: pending.connectedByUserId, clientId: pending.clientId,
     })
-    await captureTokenDiagnostics(pending.serverUrl, token).catch(() => {}) // TEMP DEBUG — remove
     return { ok: true, serverUrl: pending.serverUrl }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)

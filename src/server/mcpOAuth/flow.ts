@@ -32,6 +32,21 @@ export function buildAuthorizationUrl(a: {
   return url.toString()
 }
 
+/**
+ * Canonicalise the OAuth bearer scheme to "Bearer".
+ *
+ * OAuth2 `token_type` is case-insensitive (RFC 6749/6750) and providers return it
+ * inconsistently — Linear returns lowercase `"bearer"`. But some MCP resource
+ * servers match the Authorization scheme strictly and only accept capitalised
+ * `Bearer`; Linear's `/mcp` rejects `Authorization: bearer <token>` as "Missing or
+ * invalid access token" (it doesn't recognise the scheme, so it treats the token
+ * as absent) while accepting `Bearer <token>`. Canonicalising here fixes the
+ * post-connect 401 without depending on each provider's casing.
+ */
+export function normalizeTokenScheme(tokenType: string): string {
+  return tokenType.toLowerCase() === 'bearer' ? 'Bearer' : tokenType
+}
+
 function tokenResponseToOAuthToken(serverUrl: string, data: Record<string, unknown>): OAuthToken {
   if (typeof data.access_token !== 'string') {
     throw new Error('Token response did not contain access_token')
@@ -41,7 +56,7 @@ function tokenResponseToOAuthToken(serverUrl: string, data: Record<string, unkno
     accessToken: data.access_token,
     refreshToken: typeof data.refresh_token === 'string' ? data.refresh_token : undefined,
     expiresAt: typeof data.expires_in === 'number' ? Date.now() + data.expires_in * 1000 : undefined,
-    tokenType: typeof data.token_type === 'string' ? data.token_type : 'Bearer',
+    tokenType: normalizeTokenScheme(typeof data.token_type === 'string' ? data.token_type : 'Bearer'),
     scope: typeof data.scope === 'string' ? data.scope : undefined,
   }
 }

@@ -5,7 +5,7 @@ import type { McpServersConfig, McpServerEntry, OAuthToken } from '../../shared/
 import { listEnabledGlobalMcps } from '../db/queries/globalMcps'
 import { getToken, saveToken } from '../db/queries/oauthTokens'
 import { getClient } from '../db/queries/mcpOAuthClients'
-import { refreshAccessToken } from '../../server/mcpOAuth/flow'
+import { refreshAccessToken, normalizeTokenScheme } from '../../server/mcpOAuth/flow'
 import { auditMcpOAuth } from '../../server/mcpOAuth/audit'
 import { isUrlMcpServer } from '../../shared/mcp'
 
@@ -78,7 +78,7 @@ export async function injectOAuthTokens(
       if (token) {
         updated[key] = {
           ...entry,
-          headers: { ...entry.headers, Authorization: `${token.tokenType} ${token.accessToken}` },
+          headers: { ...entry.headers, Authorization: `${normalizeTokenScheme(token.tokenType)} ${token.accessToken}` },
         }
         continue
       }

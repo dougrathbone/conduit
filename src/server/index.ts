@@ -329,8 +329,9 @@ const handlers: Record<string, HandlerFn> = {
         const headers: Record<string, string> = { Accept: '*/*' }
         try {
           const { resolveGlobalMcpToken } = await import('../main/utils/mcp')
+          const { normalizeTokenScheme } = await import('./mcpOAuth/flow')
           const token = await resolveGlobalMcpToken(config.url)
-          if (token) headers.Authorization = `${token.tokenType} ${token.accessToken}`
+          if (token) headers.Authorization = `${normalizeTokenScheme(token.tokenType)} ${token.accessToken}`
         } catch {
           // No token resolvable — fall through to an unauthenticated probe.
         }

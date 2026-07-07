@@ -1,9 +1,29 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import * as crypto from 'crypto'
-import { generatePkce, buildAuthorizationUrl, exchangeCode, refreshAccessToken } from './flow'
+import { generatePkce, buildAuthorizationUrl, exchangeCode, refreshAccessToken, normalizeTokenScheme } from './flow'
 
 describe('flow', () => {
   afterEach(() => vi.unstubAllGlobals())
+
+  it('normalizeTokenScheme canonicalises the bearer scheme (Linear returns lowercase)', () => {
+    expect(normalizeTokenScheme('bearer')).toBe('Bearer')
+    expect(normalizeTokenScheme('Bearer')).toBe('Bearer')
+    expect(normalizeTokenScheme('BEARER')).toBe('Bearer')
+    // Non-bearer schemes are left untouched.
+    expect(normalizeTokenScheme('mac')).toBe('mac')
+  })
+
+  it('exchangeCode normalizes a lowercase token_type to Bearer', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ access_token: 'AT', token_type: 'bearer' }),
+    }) as any))
+    const tok = await exchangeCode({
+      serverUrl: 'https://mcp.linear.app/mcp', tokenEndpoint: 'https://as/token', clientId: 'c1',
+      code: 'x', redirectUri: 'http://localhost:7456/mcp/oauth/callback', verifier: 'v',
+    })
+    expect(tok.tokenType).toBe('Bearer')
+  })
 
   it('generatePkce produces a valid S256 challenge', () => {
     const { verifier, challenge } = generatePkce()

@@ -10,6 +10,7 @@ vi.mock('../db/queries/mcpOAuthClients', () => ({
 }))
 vi.mock('../../server/mcpOAuth/flow', () => ({
   refreshAccessToken: vi.fn(async (a: any) => ({ serverUrl: a.serverUrl, accessToken: 'FRESH', refreshToken: a.refreshToken, tokenType: 'Bearer', expiresAt: Date.now() + 3600_000 })),
+  normalizeTokenScheme: (t: string) => (t.toLowerCase() === 'bearer' ? 'Bearer' : t),
 }))
 vi.mock('../db/queries/globalMcps', () => ({ listEnabledGlobalMcps: vi.fn(async () => []) }))
 
