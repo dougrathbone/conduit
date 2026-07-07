@@ -1,6 +1,7 @@
 // src/server/mcpOAuth/discovery.ts
 import type { McpOAuthConfig } from '../../shared/types'
 import { getClient, saveClient, type McpOAuthClient } from '../../main/db/queries/mcpOAuthClients'
+import { auditMcpOAuth } from './audit'
 
 export interface OAuthServerMetadata {
   authorization_endpoint: string
@@ -275,6 +276,7 @@ export async function ensureRegisteredClient(
 ): Promise<McpOAuthClient> {
   const cached = await getClient(serverUrl)
   if (cached && cachedClientIsUsable(cached, oauthConfig, redirectUri)) {
+    auditMcpOAuth('client_reused', { serverUrl, clientId: cached.clientId, redirectUri })
     // Self-heal the resource in place (no re-registration, so no DCR rate-limit
     // hit): fill it when missing, AND correct it when it's the bare serverUrl
     // fallback left by rows created before canonical PRM discovery existed — that
@@ -329,5 +331,6 @@ export async function ensureRegisteredClient(
     registrationData,
   }
   await saveClient(client)
+  auditMcpOAuth('client_registered', { serverUrl, clientId, redirectUri, viaDcr: !oauthConfig?.clientId })
   return client
 }

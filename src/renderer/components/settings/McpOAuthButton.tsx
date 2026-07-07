@@ -102,11 +102,22 @@ export function McpOAuthButton({ serverId, isGlobal, serverUrl, serverName }: Mc
           </button>
         </>
       ) : hasStaleToken ? (
-        <Button size="sm" variant="outline" onClick={handleAuthenticate}
-          className="gap-1.5 text-amber-500 border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-400"
-          title={`${serverName} is not authenticated (server returned 401) — re-authenticate`}>
-          <AlertTriangle className="h-3.5 w-3.5" />Re-authenticate
-        </Button>
+        <>
+          <Button size="sm" variant="outline" onClick={handleAuthenticate}
+            className="gap-1.5 text-amber-500 border-amber-500/30 hover:bg-amber-500/10 hover:text-amber-400"
+            title={`${serverName} is not authenticated (server returned 401) — re-authenticate`}>
+            <AlertTriangle className="h-3.5 w-3.5" />Re-authenticate
+          </Button>
+          <button
+            onClick={handleRevoke}
+            disabled={revoke.isPending}
+            title={`Disconnect ${serverName} — clears the stored token and cached OAuth client so the next connect registers fresh`}
+            className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs text-[var(--text-secondary)] hover:text-red-400 hover:bg-red-400/10 transition-colors"
+          >
+            {revoke.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <LogOut className="h-3 w-3" />}
+            Disconnect
+          </button>
+        </>
       ) : (
         <Button size="sm" variant="outline" onClick={handleAuthenticate} className="gap-1.5"
           title={`Authenticate ${serverName} via OAuth`}>

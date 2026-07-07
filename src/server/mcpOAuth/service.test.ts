@@ -17,18 +17,21 @@ vi.mock('./discovery', () => ({
   ensureRegisteredClient: vi.fn(async (url: string) => ({ serverUrl: url, clientId: 'cid', authorizationEndpoint: 'https://as/a', tokenEndpoint: 'https://as/t', resource: 'https://mcp.linear.app/mcp' })),
 }))
 vi.mock('../../main/db/queries/oauthTokens', () => ({
+  getToken: vi.fn(async () => null),
   getTokenStatus: vi.fn(async () => ({ connected: true, scope: 'global', connectedByUserId: 'u1', connectedByName: 'Ada' })),
   saveToken: vi.fn(async () => {}),
   deleteToken: vi.fn(async () => {}),
   getConnectedByUserId: vi.fn(async () => 'u1'),
 }))
+vi.mock('../../main/db/queries/mcpOAuthClients', () => ({ deleteClient: vi.fn(async () => {}) }))
 vi.mock('./flow', async (orig) => ({ ...(await orig() as any), exchangeCode: vi.fn(async () => ({ serverUrl: 'https://mcp.linear.app', accessToken: 'AT', tokenType: 'Bearer' })) }))
 // Pending state is Postgres-backed; stub it so unit tests don't need a DB.
 vi.mock('./state', () => ({ putPending: vi.fn(async () => {}), takePending: vi.fn(async () => null) }))
 
 import { startAuth, getStatus, resolveServerTarget, revoke, getRedirectUri } from './service'
 import { canAccessEntity, isEntityOwner } from '../../main/db/queries/access'
-import { getConnectedByUserId } from '../../main/db/queries/oauthTokens'
+import { getConnectedByUserId, getToken } from '../../main/db/queries/oauthTokens'
+import { deleteClient } from '../../main/db/queries/mcpOAuthClients'
 
 describe('service', () => {
   beforeEach(() => { process.env.CONDUIT_BASE_URL = 'http://localhost:7456' })
@@ -83,6 +86,24 @@ describe('service', () => {
   it('startAuth rejects when canAccessEntity returns false', async () => {
     vi.mocked(canAccessEntity).mockResolvedValueOnce(false)
     await expect(startAuth('g1', true, 'u1')).rejects.toThrow('Access denied')
+  })
+
+  it('startAuth clears the cached DCR client when there is no existing token (fresh reconnect)', async () => {
+    vi.mocked(getToken).mockResolvedValueOnce(null)
+    await startAuth('g1', true, 'u1')
+    expect(vi.mocked(deleteClient)).toHaveBeenCalledWith('https://mcp.linear.app')
+  })
+
+  it('startAuth does NOT clear the client when a live token exists (avoids orphaning refresh)', async () => {
+    vi.mocked(getToken).mockResolvedValueOnce({ serverUrl: 'https://mcp.linear.app', accessToken: 'AT', tokenType: 'Bearer' } as any)
+    await startAuth('g1', true, 'u1')
+    expect(vi.mocked(deleteClient)).not.toHaveBeenCalled()
+  })
+
+  it('revoke clears the cached DCR client as well as the token', async () => {
+    vi.mocked(isEntityOwner).mockResolvedValueOnce(true)
+    await revoke('g1', true, 'u1')
+    expect(vi.mocked(deleteClient)).toHaveBeenCalledWith('https://mcp.linear.app')
   })
 
   it('revoke of a global server rejects when user is neither owner nor connector', async () => {

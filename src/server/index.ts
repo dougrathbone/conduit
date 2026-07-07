@@ -64,6 +64,9 @@ import { sessionMiddleware } from './auth/middleware'
 import { authRouter as authRoutes } from './auth/routes'
 import { ensureDevUser, getDevContext } from './auth/devBypass'
 import { canAccessEntity, isEntityOwner } from '../main/db/queries/access'
+import { deleteClient as deleteMcpOAuthClient } from '../main/db/queries/mcpOAuthClients'
+import { deleteToken as deleteMcpOAuthToken } from '../main/db/queries/oauthTokens'
+import { auditMcpOAuth } from './mcpOAuth/audit'
 import { getShare, listShares, createShare, deleteShare } from '../main/db/queries/shares'
 import { listUsers, searchUsers } from '../main/db/queries/users'
 import { listGroups, getUserGroupIds } from '../main/db/queries/groups'
@@ -300,6 +303,17 @@ const handlers: Record<string, HandlerFn> = {
     }
     const deleted = await deleteGlobalMcp(id as string)
     if (deleted === 0) throw new ClientError('MCP server not found')
+    // Also clear any cached OAuth client + shared token for this server URL, so
+    // recreating the server (the user's "delete to recreate" flow) registers a
+    // fresh DCR client against the current redirect URI instead of reusing a
+    // possibly-stale one keyed by the same URL.
+    const cfg = existing.serverConfig
+    if (isUrlMcpServer(cfg) && cfg.url) {
+      await deleteMcpOAuthClient(cfg.url)
+      await deleteMcpOAuthToken(cfg.url, '__global__')
+      auditMcpOAuth('client_cleared_on_delete', { userId: ctx.userId, id, serverUrl: cfg.url })
+    }
+    auditMcpOAuth('global_mcp_deleted', { userId: ctx.userId, id, name: existing.name })
     return Promise.resolve()
   },
 

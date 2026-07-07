@@ -6,6 +6,7 @@ import { listEnabledGlobalMcps } from '../db/queries/globalMcps'
 import { getToken, saveToken } from '../db/queries/oauthTokens'
 import { getClient } from '../db/queries/mcpOAuthClients'
 import { refreshAccessToken } from '../../server/mcpOAuth/flow'
+import { auditMcpOAuth } from '../../server/mcpOAuth/audit'
 import { isUrlMcpServer } from '../../shared/mcp'
 
 const GLOBAL_OWNER = '__global__'
@@ -45,8 +46,11 @@ async function resolveValidToken(url: string, owner: string): Promise<OAuthToken
       resource: client.resource,
     })
     await saveToken(refreshed, owner, null)
+    auditMcpOAuth('token_refreshed', { serverUrl: url, owner, clientId: client.clientId })
     return refreshed
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    auditMcpOAuth('token_refresh_failed', { serverUrl: url, owner, clientId: client.clientId, error: msg })
     console.warn(`[conduit] refresh failed for ${url} (${owner}):`, err)
     return null
   }

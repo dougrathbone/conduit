@@ -634,6 +634,12 @@ export function GlobalMcpManager() {
     )
   }
 
+  // Legacy single-user-mode globals (null owner, or the synthetic dev user) are
+  // org-wide and owned by nobody real — any authenticated user may manage/delete
+  // them (mirrors the server's globalMcps:delete rule). Treat them as owner-managed
+  // in the UI so they surface a delete button instead of being stuck under
+  // "Shared with Me" with no way to remove them.
+  const isLegacyGlobal = (s: { ownerId?: string | null }) => s.ownerId == null || s.ownerId === 'dev-user'
   const myServers = servers.filter((s) => s.ownerId === user?.id)
   const sharedServers = servers.filter((s) => s.ownerId !== user?.id)
 
@@ -714,7 +720,7 @@ export function GlobalMcpManager() {
                   Shared with Me <span className="ml-1 opacity-60">{sharedServers.length}</span>
                 </div>
                 {sharedServers.map((server) => (
-                  <ServerRow key={server.id} server={server} isDark={isDark} isOwner={false} onShare={() => {}} />
+                  <ServerRow key={server.id} server={server} isDark={isDark} isOwner={isLegacyGlobal(server)} onShare={() => setShareServerId(server.id)} />
                 ))}
               </>
             )}

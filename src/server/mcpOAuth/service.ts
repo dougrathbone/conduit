@@ -3,10 +3,12 @@ import type { McpOAuthConfig, McpOAuthProbeResult, McpOAuthStatus, McpServerEntr
 import { getGlobalMcp } from '../../main/db/queries/globalMcps'
 import { getAgent } from '../../main/db/queries/agents'
 import { canAccessEntity, isEntityOwner } from '../../main/db/queries/access'
-import { getTokenStatus, saveToken, deleteToken, getConnectedByUserId } from '../../main/db/queries/oauthTokens'
+import { getToken, getTokenStatus, saveToken, deleteToken, getConnectedByUserId } from '../../main/db/queries/oauthTokens'
+import { deleteClient } from '../../main/db/queries/mcpOAuthClients'
 import { discoverOAuthEndpoints, ensureRegisteredClient } from './discovery'
 import { generatePkce, buildAuthorizationUrl, exchangeCode } from './flow'
 import { putPending, takePending } from './state'
+import { auditMcpOAuth } from './audit'
 import { isUrlMcpServer } from '../../shared/mcp'
 
 const GLOBAL_OWNER = '__global__'
@@ -66,6 +68,13 @@ export async function startAuth(serverId: string, isGlobal: boolean, userId: str
   const t = await resolveServerTarget(serverId, isGlobal, userId)
   await assertAccess(t, userId, userGroupIds)
   const redirectUri = getRedirectUri(redirectOrigin)
+  // A (re)connect with no existing token is a clean start: drop any cached DCR
+  // client so we register fresh against the current redirect URI. This is safe —
+  // there's no working token whose refresh could be orphaned — and it self-heals a
+  // client left registered against a stale origin (provider "Mismatching redirect
+  // URI"). Clients backing a live token are left intact and reset only via revoke.
+  const existingToken = await getToken(t.serverUrl, t.tokenOwner)
+  if (!existingToken) await deleteClient(t.serverUrl)
   const client = await ensureRegisteredClient(t.serverUrl, t.oauthConfig, redirectUri)
   const { verifier, challenge } = generatePkce()
   const state = crypto.randomBytes(16).toString('hex')
@@ -90,6 +99,10 @@ export async function startAuth(serverId: string, isGlobal: boolean, userId: str
     challenge,
     resource: client.resource,
   })
+  auditMcpOAuth('auth_start', {
+    userId, serverId, isGlobal, serverUrl: t.serverUrl, scope: t.scope,
+    clientId: client.clientId, redirectUri, freshClient: !existingToken,
+  })
   return { authUrl }
 }
 
@@ -109,6 +122,10 @@ export async function revoke(serverId: string, isGlobal: boolean, userId: string
     if (!owns && connectedBy !== userId) throw new Error('Only the owner or the connecting user can revoke this token')
   }
   await deleteToken(t.serverUrl, t.tokenOwner)
+  // Also drop the cached DCR client so a subsequent reconnect registers fresh
+  // against the current redirect URI, rather than reusing a possibly-stale client.
+  await deleteClient(t.serverUrl)
+  auditMcpOAuth('revoke', { userId, serverId, serverUrl: t.serverUrl, tokenOwner: t.tokenOwner, scope: t.scope })
 }
 
 export async function probeOAuthSupport(config: McpServerEntry): Promise<McpOAuthProbeResult> {
@@ -141,9 +158,18 @@ export async function handleCallback(query: Record<string, string | undefined>):
   const { code, state, error, error_description } = query
   if (!state) return { ok: false, error: 'Missing state' }
   const pending = await takePending(state)
-  if (!pending) return { ok: false, error: 'Invalid or expired state' }
-  if (error) return { ok: false, serverUrl: pending.serverUrl, error: error_description ?? error }
-  if (!code) return { ok: false, serverUrl: pending.serverUrl, error: 'No authorization code' }
+  if (!pending) {
+    auditMcpOAuth('callback_invalid_state', {})
+    return { ok: false, error: 'Invalid or expired state' }
+  }
+  if (error) {
+    auditMcpOAuth('callback_provider_error', { serverUrl: pending.serverUrl, error: error_description ?? error })
+    return { ok: false, serverUrl: pending.serverUrl, error: error_description ?? error }
+  }
+  if (!code) {
+    auditMcpOAuth('callback_no_code', { serverUrl: pending.serverUrl })
+    return { ok: false, serverUrl: pending.serverUrl, error: 'No authorization code' }
+  }
   try {
     const token = await exchangeCode({
       serverUrl: pending.serverUrl,
@@ -156,8 +182,14 @@ export async function handleCallback(query: Record<string, string | undefined>):
       resource: pending.resource,
     })
     await saveToken(token, pending.tokenOwner, pending.connectedByUserId)
+    auditMcpOAuth('callback_ok', {
+      serverUrl: pending.serverUrl, tokenOwner: pending.tokenOwner,
+      connectedByUserId: pending.connectedByUserId, clientId: pending.clientId,
+    })
     return { ok: true, serverUrl: pending.serverUrl }
   } catch (err) {
-    return { ok: false, serverUrl: pending.serverUrl, error: err instanceof Error ? err.message : String(err) }
+    const msg = err instanceof Error ? err.message : String(err)
+    auditMcpOAuth('callback_exchange_failed', { serverUrl: pending.serverUrl, clientId: pending.clientId, error: msg })
+    return { ok: false, serverUrl: pending.serverUrl, error: msg }
   }
 }
