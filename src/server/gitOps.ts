@@ -87,15 +87,40 @@ export async function fetchRepo(clonePath: string, url: string, pat?: string): P
   await runGit(['fetch', '--prune', 'origin'], { cwd: clonePath })
 }
 
+/** True when a git error indicates the filesystem is out of space (ENOSPC). */
+export function isDiskFullError(message: string): boolean {
+  return /no space left on device|\bENOSPC\b/i.test(message)
+}
+
 /**
  * Create a git worktree from a bare clone for an isolated run workspace.
+ *
+ * If `git worktree add` fails part-way — classically because it ran out of disk
+ * while checking out a large working tree — it leaves BOTH a partial checkout
+ * and a registered worktree entry behind. Left in place those leak disk and
+ * accumulate across failed runs, accelerating exhaustion until every run fails.
+ * So on any failure we tear the partial worktree down before rethrowing, and we
+ * translate an out-of-space failure into an actionable message (the raw git
+ * error is a multi-kilobyte "Updating files:" progress dump).
  */
 export async function createWorktree(
   clonePath: string,
   worktreePath: string,
   branch: string
 ): Promise<void> {
-  await runGit(['worktree', 'add', worktreePath, branch], { cwd: clonePath })
+  try {
+    await runGit(['worktree', 'add', worktreePath, branch], { cwd: clonePath })
+  } catch (err) {
+    await removeWorktree(clonePath, worktreePath).catch(() => {})
+    const message = err instanceof Error ? err.message : String(err)
+    if (isDiskFullError(message)) {
+      throw new Error(
+        'Not enough disk space to create a worktree for this repository. ' +
+        'Free space on the Conduit server or increase its data volume, then retry.'
+      )
+    }
+    throw err instanceof Error ? err : new Error(message)
+  }
 }
 
 /**
