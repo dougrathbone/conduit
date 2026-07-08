@@ -54,4 +54,13 @@ describe('oauthTokens', () => {
     expect(lastConflictUpdateSet).not.toBeNull()
     expect(lastConflictUpdateSet).not.toHaveProperty('connectedByUserId')
   })
+
+  it('normalizes a lowercase "bearer" token_type to "Bearer" on read (fixes tools/list 401)', async () => {
+    // Row persisted with a lowercase scheme (as Linear returns) — the fake matcher
+    // keys on serverUrl='__a', tokenOwner='__b'.
+    rows.push({ serverUrl: '__a', tokenOwner: '__b', accessToken: 'enc:AT', refreshToken: null, expiresAt: 1, tokenType: 'bearer', scope: null, connectedByUserId: null })
+    const t = await getToken('https://m', 'owner')
+    expect(t?.tokenType).toBe('Bearer')
+    expect(t?.accessToken).toBe('AT')
+  })
 })

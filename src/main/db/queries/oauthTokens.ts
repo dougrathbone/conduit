@@ -2,6 +2,7 @@ import { and, eq } from 'drizzle-orm'
 import { getDb } from '../index'
 import { oauthTokens } from '../schema'
 import { encryptSecret, decryptSecret } from '../../../server/crypto'
+import { normalizeTokenScheme } from '../../../server/mcpOAuth/flow'
 import { getUser } from './users'
 import type { OAuthToken, McpOAuthStatus } from '../../../shared/types'
 
@@ -11,7 +12,12 @@ function rowToOAuthToken(row: typeof oauthTokens.$inferSelect): OAuthToken {
     accessToken: decryptSecret(row.accessToken),
     refreshToken: row.refreshToken ? decryptSecret(row.refreshToken) : undefined,
     expiresAt: row.expiresAt ?? undefined,
-    tokenType: row.tokenType,
+    // Canonicalise the scheme on read so every consumer (runtime injection, health
+    // check, tools/list) sends "Bearer" — rows persisted before scheme
+    // normalization (or by providers returning lowercase "bearer", e.g. Linear)
+    // otherwise 401 on strict resource servers. Single source of truth, so no
+    // injection site can regress by forgetting to normalize.
+    tokenType: normalizeTokenScheme(row.tokenType),
     scope: row.scope ?? undefined,
   }
 }
