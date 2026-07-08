@@ -88,13 +88,13 @@ describe('service', () => {
     await expect(startAuth('g1', true, 'u1')).rejects.toThrow('Access denied')
   })
 
-  it('startAuth clears the cached DCR client when there is no existing token (fresh reconnect)', async () => {
+  it('startAuth never clears the cached DCR client — even with no token (reuse so a provider whose DCR is unavailable can still reconnect)', async () => {
     vi.mocked(getToken).mockResolvedValueOnce(null)
     await startAuth('g1', true, 'u1')
-    expect(vi.mocked(deleteClient)).toHaveBeenCalledWith('https://mcp.linear.app')
+    expect(vi.mocked(deleteClient)).not.toHaveBeenCalled()
   })
 
-  it('startAuth does NOT clear the client when a live token exists (avoids orphaning refresh)', async () => {
+  it('startAuth does not clear the client when a live token exists either', async () => {
     vi.mocked(getToken).mockResolvedValueOnce({ serverUrl: 'https://mcp.linear.app', accessToken: 'AT', tokenType: 'Bearer' } as any)
     await startAuth('g1', true, 'u1')
     expect(vi.mocked(deleteClient)).not.toHaveBeenCalled()

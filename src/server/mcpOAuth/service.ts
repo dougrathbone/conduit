@@ -68,13 +68,14 @@ export async function startAuth(serverId: string, isGlobal: boolean, userId: str
   const t = await resolveServerTarget(serverId, isGlobal, userId)
   await assertAccess(t, userId, userGroupIds)
   const redirectUri = getRedirectUri(redirectOrigin)
-  // A (re)connect with no existing token is a clean start: drop any cached DCR
-  // client so we register fresh against the current redirect URI. This is safe —
-  // there's no working token whose refresh could be orphaned — and it self-heals a
-  // client left registered against a stale origin (provider "Mismatching redirect
-  // URI"). Clients backing a live token are left intact and reset only via revoke.
+  // Reuse the cached DCR client whenever we have one — do NOT drop it just because
+  // there's no token. Deleting a working client forces a fresh registration, which
+  // is unrecoverable for a provider whose DCR later becomes unavailable (Figma now
+  // returns 403 to server-side registration): the previously-working client is lost
+  // and can't be re-created. ensureRegisteredClient re-registers only when the
+  // client is genuinely stale (redirect URI changed); a full reset is still
+  // available explicitly via revoke / delete.
   const existingToken = await getToken(t.serverUrl, t.tokenOwner)
-  if (!existingToken) await deleteClient(t.serverUrl)
   const client = await ensureRegisteredClient(t.serverUrl, t.oauthConfig, redirectUri)
   const { verifier, challenge } = generatePkce()
   const state = crypto.randomBytes(16).toString('hex')
@@ -101,7 +102,7 @@ export async function startAuth(serverId: string, isGlobal: boolean, userId: str
   })
   auditMcpOAuth('auth_start', {
     userId, serverId, isGlobal, serverUrl: t.serverUrl, scope: t.scope,
-    clientId: client.clientId, redirectUri, freshClient: !existingToken,
+    clientId: client.clientId, redirectUri, hadToken: !!existingToken,
   })
   return { authUrl }
 }
