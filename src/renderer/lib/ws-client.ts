@@ -32,8 +32,21 @@ import type {
 export function createWsConduitClient(wsUrl: string): ConduitAPI {
   const ws = new WebSocket(wsUrl)
 
+  const pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
+  // Once the socket has closed it never reopens (there is no reconnect loop), so
+  // any queued or future invoke must fail fast instead of parking forever on an
+  // 'open' event that will never fire — otherwise UI queries spin indefinitely.
+  let socketClosed = false
+
   // If WS is closed due to auth failure, redirect to login
   ws.addEventListener('close', (event) => {
+    socketClosed = true
+    // Reject every in-flight request so their queries settle (error state)
+    // rather than hanging; the connection is dead and won't answer them.
+    const err = new Error('WebSocket connection closed')
+    for (const p of pending.values()) p.reject(err)
+    pending.clear()
+
     // 4401 is our custom close code for auth failure; also handle HTTP 401 during upgrade
     // which manifests as a close without ever opening (code 1006)
     if (event.code === 4401 || (event.code === 1006 && !event.wasClean)) {
@@ -45,7 +58,6 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       }).catch(() => {})
     }
   })
-  const pending = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>()
   const outputListeners = new Set<(p: RunOutputPayload) => void>()
   const statusListeners = new Set<(p: RunStatusChangePayload) => void>()
   const oauthCompleteListeners = new Set<(p: { serverUrl: string; success: boolean; error?: string }) => void>()
@@ -121,6 +133,13 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
 
   function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
     return new Promise<T>((resolve, reject) => {
+      // The socket is dead and won't reopen — reject now instead of queueing a
+      // send that never happens (which would leave the caller's query spinning).
+      if (socketClosed || ws.readyState === WebSocket.CLOSING || ws.readyState === WebSocket.CLOSED) {
+        reject(new Error('WebSocket connection closed'))
+        return
+      }
+
       const id = String(idCounter++)
       pending.set(id, {
         resolve: (v) => resolve(v as T),
