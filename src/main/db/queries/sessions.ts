@@ -25,25 +25,14 @@ export async function createSession(data: {
   return rows[0]
 }
 
+// Raw read of a session row by id. This is intentionally policy-free: expiry
+// enforcement AND refresh live in resolveSession (src/server/auth/session.ts),
+// the single source of truth all consumers go through. Keeping this raw means
+// the row (and its refresh token) is still available to renew an expired
+// session, instead of being purged before it can be refreshed.
 export async function getSession(id: string) {
   const rows = await getDb().select().from(sessions).where(eq(sessions.id, id))
-  const session = rows[0]
-  if (!session) return null
-  // Expiry is enforced here, at the single source of truth, so every consumer
-  // (REST middleware, WebSocket upgrade, and /auth/me) treats an expired
-  // session as unauthenticated. Purge the stale row so it never lingers, but
-  // treat that cleanup as best-effort: returning null for an expired session
-  // must not depend on the delete succeeding (a failed write must not throw and
-  // hang the caller — the hourly sweep will reclaim the row regardless).
-  if (session.expiresAt < Date.now()) {
-    try {
-      await deleteSession(session.id)
-    } catch {
-      // ignore — the session is still treated as expired below
-    }
-    return null
-  }
-  return session
+  return rows[0] ?? null
 }
 
 export async function deleteSession(id: string): Promise<void> {

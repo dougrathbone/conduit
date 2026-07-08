@@ -6,7 +6,8 @@ import { getUser } from '../../main/db/queries/users'
 import { upsertUser } from '../../main/db/queries/users'
 import { getUserGroupIds, listGroups, upsertGroup, syncUserGroups } from '../../main/db/queries/groups'
 import { getAuthorizationUrl, exchangeCode } from './okta'
-import { createSession, getSession, deleteSession } from '../../main/db/queries/sessions'
+import { createSession, deleteSession } from '../../main/db/queries/sessions'
+import { resolveSession } from './session'
 
 // In-memory PKCE verifier storage keyed by state
 const pendingAuthRequests = new Map<string, string>()
@@ -234,9 +235,11 @@ router.get('/me', async (req: Request, res: Response) => {
     return
   }
 
-  const session = await getSession(sessionId)
+  // resolveSession refreshes the session when it is near/at expiry, so an active
+  // client polling /auth/me keeps its session alive; null means truly expired.
+  const session = await resolveSession(sessionId)
   if (!session) {
-    res.status(401).json({ error: 'Not authenticated' })
+    res.status(401).json({ error: 'Session expired' })
     return
   }
 

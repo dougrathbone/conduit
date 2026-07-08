@@ -49,6 +49,42 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, [state.user])
 
+  // Proactively detect a session that dies while the app is open, so the user is
+  // sent to login without having to manually refresh. Re-check on tab focus /
+  // visibility (catches the common "came back to the tab" case) plus a periodic
+  // poll as a backstop. Only meaningful when auth is enabled — in dev-bypass mode
+  // /auth/me is always authenticated, so there is nothing to detect.
+  useEffect(() => {
+    if (!state.isAuthenticated || state.isDevMode) return
+
+    let redirecting = false
+    const checkAuth = async () => {
+      if (redirecting) return
+      try {
+        const res = await fetch('/auth/me')
+        if (res.status === 401 && !redirecting) {
+          redirecting = true
+          window.location.assign('/auth/login')
+        }
+      } catch {
+        // transient network error — leave it for the next tick
+      }
+    }
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') checkAuth()
+    }
+    window.addEventListener('focus', checkAuth)
+    document.addEventListener('visibilitychange', onVisibility)
+    const interval = window.setInterval(checkAuth, 60_000)
+
+    return () => {
+      window.removeEventListener('focus', checkAuth)
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.clearInterval(interval)
+    }
+  }, [state.isAuthenticated, state.isDevMode])
+
   const logout = async () => {
     await fetch('/auth/logout', { method: 'POST' })
     window.location.reload()

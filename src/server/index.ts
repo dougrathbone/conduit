@@ -71,7 +71,8 @@ import { getShare, listShares, createShare, deleteShare } from '../main/db/queri
 import { listUsers, searchUsers } from '../main/db/queries/users'
 import { listGroups, getUserGroupIds } from '../main/db/queries/groups'
 import { getCredentialStatus, setCredential } from '../main/db/queries/agentCredentials'
-import { getSession as getDbSession, deleteExpiredSessions } from '../main/db/queries/sessions'
+import { deleteExpiredSessions } from '../main/db/queries/sessions'
+import { resolveSession } from './auth/session'
 import { deleteExpiredPendingAuth } from '../main/db/queries/mcpOAuthPending'
 import { ensureLocalSecretKey } from './localSecret'
 import type { ReporterUser } from '../shared/observability'
@@ -697,6 +698,12 @@ const handlers: Record<string, HandlerFn> = {
 
 // Store auth context per WebSocket connection
 const wsContextMap = new WeakMap<WebSocket, RequestContext>()
+// Track the session id + last-validated time per authenticated socket so a live
+// connection can be re-checked (and its token refreshed) while it stays open,
+// instead of trusting the context captured once at upgrade time forever.
+const wsSessionMap = new WeakMap<WebSocket, { sessionId: string; lastValidated: number }>()
+// Re-validate a live connection's session at most this often (throttled per socket).
+const WS_REVALIDATE_INTERVAL_MS = 30_000
 
 wss.on('connection', (ws, req) => {
   clients.add(ws)
@@ -705,6 +712,10 @@ wss.on('connection', (ws, req) => {
   const ctx = (req as any).__conduitContext as RequestContext | undefined
   if (ctx) {
     wsContextMap.set(ws, ctx)
+  }
+  const sessionId = (req as any).__conduitSessionId as string | undefined
+  if (sessionId) {
+    wsSessionMap.set(ws, { sessionId, lastValidated: Date.now() })
   }
 
   ws.on('message', async (raw) => {
@@ -716,6 +727,25 @@ wss.on('connection', (ws, req) => {
     }
 
     if (msg.type !== 'invoke') return
+
+    // Re-validate the session on live connections (auth mode only), throttled so
+    // we don't hit the DB on every message. resolveSession refreshes the Okta
+    // token when it is near expiry — keeping an active session alive — and
+    // returns null only when the session is truly dead. In that case we tell the
+    // client and close with 4401, which the browser client maps to a redirect to
+    // the login page (no manual refresh needed).
+    if (isAuthEnabled()) {
+      const meta = wsSessionMap.get(ws)
+      if (meta && Date.now() - meta.lastValidated > WS_REVALIDATE_INTERVAL_MS) {
+        const session = await resolveSession(meta.sessionId)
+        if (!session) {
+          ws.send(JSON.stringify({ type: 'error', id: msg.id, error: 'Session expired' }))
+          ws.close(4401, 'session expired')
+          return
+        }
+        meta.lastValidated = Date.now()
+      }
+    }
 
     const handler = handlers[msg.channel]
     if (!handler) {
@@ -783,14 +813,17 @@ httpServer.on('upgrade', async (req, socket, head) => {
         socket.destroy()
         return
       }
-      const session = await getDbSession(sessionId)
-      if (!session || session.expiresAt < Date.now()) {
+      const session = await resolveSession(sessionId)
+      if (!session) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n')
         socket.destroy()
         return
       }
       const userGroupIds = await getUserGroupIds(session.userId)
       ctx = { userId: session.userId, userGroupIds }
+      // Remember the session id so the live connection can be re-validated
+      // (and its token refreshed) as it stays open — see the message handler.
+      ;(req as any).__conduitSessionId = sessionId
     }
 
     // Attach context to the request for the connection handler

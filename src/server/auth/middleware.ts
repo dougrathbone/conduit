@@ -2,7 +2,7 @@ import type { Request, Response, NextFunction } from 'express'
 import type { RequestContext } from '../../shared/types'
 import { isAuthEnabled } from './config'
 import { getDevContext } from './devBypass'
-import { getSession, deleteSession } from '../../main/db/queries/sessions'
+import { resolveSession } from './session'
 import { getUserGroupIds } from '../../main/db/queries/groups'
 
 declare global {
@@ -27,14 +27,10 @@ export async function sessionMiddleware(req: Request, res: Response, next: NextF
   }
 
   try {
-    const session = await getSession(sessionId)
+    // resolveSession enforces expiry and refreshes via the Okta refresh token
+    // when possible; a null result means the session is truly dead.
+    const session = await resolveSession(sessionId)
     if (!session) {
-      res.status(401).json({ error: 'Not authenticated' })
-      return
-    }
-
-    if (session.expiresAt < Date.now()) {
-      await deleteSession(session.id)
       res.status(401).json({ error: 'Session expired' })
       return
     }
