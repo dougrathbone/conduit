@@ -24,6 +24,19 @@ export interface AgentCredentialStatus {
   cursor: boolean
 }
 
+/**
+ * Result of a data-directory sweep — how many stale run artifacts were removed.
+ * Returned by both the periodic sweeper (logged) and the manual Settings trigger.
+ */
+export interface SweepResult {
+  /** Orphaned git worktrees removed from repos/<id>/worktrees-run/. */
+  worktreesRemoved: number
+  /** Orphaned ephemeral run workspaces removed from the temp dir. */
+  workspacesRemoved: number
+  /** Leftover per-run MCP config files removed from the temp dir. */
+  mcpConfigsRemoved: number
+}
+
 // ── Auth & Users ───────────────────────────────────────────────────────────
 
 export interface User {
@@ -469,6 +482,10 @@ export interface ConduitAPI {
     getStatus: () => Promise<AgentCredentialStatus>
     /** Store (or, with an empty string, clear) the acting user's credential for a runner. */
     set: (runner: RunnerType, value: string) => Promise<void>
+  }
+  maintenance: {
+    /** Run the data-directory sweeper once, now, and report what was removed. */
+    sweep: () => Promise<SweepResult>
   }
   repos: {
     list: () => Promise<Repository[]>

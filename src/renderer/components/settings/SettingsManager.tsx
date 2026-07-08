@@ -1,9 +1,10 @@
 import React, { useState } from 'react'
-import { Info, Check, Loader2, KeyRound } from 'lucide-react'
+import { Info, Check, Loader2, KeyRound, HardDrive, Trash2 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
 import { useAgentCredentialStatus, useSetAgentCredential } from '@renderer/hooks/useAgentCredentials'
-import type { RunnerType } from '@shared/types'
+import { useDataDirSweep } from '@renderer/hooks/useDataDirSweep'
+import type { RunnerType, SweepResult } from '@shared/types'
 
 interface RunnerMeta {
   runner: RunnerType
@@ -93,6 +94,53 @@ function CredentialRow({ meta, configured }: { meta: RunnerMeta; configured: boo
   )
 }
 
+function sweepSummary(r: SweepResult): string {
+  const parts: string[] = []
+  if (r.worktreesRemoved) parts.push(`${r.worktreesRemoved} worktree${r.worktreesRemoved === 1 ? '' : 's'}`)
+  if (r.workspacesRemoved) parts.push(`${r.workspacesRemoved} workspace${r.workspacesRemoved === 1 ? '' : 's'}`)
+  if (r.mcpConfigsRemoved) parts.push(`${r.mcpConfigsRemoved} MCP config${r.mcpConfigsRemoved === 1 ? '' : 's'}`)
+  return parts.length ? `Removed ${parts.join(', ')}.` : 'Nothing to clean up — already tidy.'
+}
+
+function StorageMaintenanceCard() {
+  const sweep = useDataDirSweep()
+
+  return (
+    <div className="rounded-lg border border-[var(--border)] px-4 py-3.5" style={{ background: 'var(--bg-secondary)' }}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <HardDrive className="h-4 w-4 flex-shrink-0 text-[var(--text-secondary)]" />
+          <div className="min-w-0">
+            <div className="text-sm font-medium text-[var(--text-primary)]">Data directory</div>
+            <p className="text-xs text-[var(--text-secondary)] mt-0.5">
+              Reclaim disk from finished runs — orphaned git worktrees, temp workspaces, and per-run
+              MCP configs. This happens automatically after each run and on a timer; run it now to
+              clean up immediately. Runs currently executing are never touched.
+            </p>
+          </div>
+        </div>
+        <Button
+          size="sm"
+          onClick={() => sweep.mutate()}
+          disabled={sweep.isPending}
+          className="gap-1.5 flex-shrink-0"
+        >
+          {sweep.isPending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+          Clean up now
+        </Button>
+      </div>
+      {sweep.data && !sweep.isPending && (
+        <p className="text-xs text-green-500 mt-3">{sweepSummary(sweep.data)}</p>
+      )}
+      {sweep.isError && (
+        <p className="text-xs text-red-400 mt-3">
+          Cleanup failed: {sweep.error instanceof Error ? sweep.error.message : String(sweep.error)}
+        </p>
+      )}
+    </div>
+  )
+}
+
 export function SettingsManager() {
   const { data: status } = useAgentCredentialStatus()
 
@@ -103,7 +151,7 @@ export function SettingsManager() {
         <div>
           <h1 className="text-sm font-semibold text-[var(--text-primary)]">Settings</h1>
           <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-            Authentication for the coding-agent CLIs
+            Agent authentication and storage maintenance
           </p>
         </div>
       </div>
@@ -123,6 +171,9 @@ export function SettingsManager() {
         {RUNNERS.map((meta) => (
           <CredentialRow key={meta.runner} meta={meta} configured={!!status?.[meta.runner]} />
         ))}
+
+        <h2 className="text-xs font-medium text-[var(--text-secondary)] pt-3">Storage maintenance</h2>
+        <StorageMaintenanceCard />
       </div>
     </div>
   )

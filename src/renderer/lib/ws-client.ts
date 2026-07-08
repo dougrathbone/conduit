@@ -242,6 +242,10 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       set: (runner: RunnerType, value: string) => invoke<void>('agentCreds:set', runner, value),
     },
 
+    maintenance: {
+      sweep: () => invoke<import('@shared/types').SweepResult>('maintenance:sweep'),
+    },
+
     onRepoSyncStatus: (cb: (payload: RepoSyncStatusPayload) => void): (() => void) => {
       repoSyncStatusListeners.add(cb)
       return () => repoSyncStatusListeners.delete(cb)

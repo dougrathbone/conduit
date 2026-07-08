@@ -235,8 +235,22 @@ builds without it skip upload entirely and emit no public maps:
 All data lives under `~/.conduit/` (or `$CONDUIT_DATA_DIR`):
 - `conduit.db` — SQLite database
 - `logs/` — NDJSON run logs (`{runId}.jsonl`)
-- `repos/` — Bare git clones for managed repositories
+- `repos/` — Bare git clones for managed repositories; each run gets an isolated worktree under `repos/<id>/worktrees-run/<uuid>`
 - `prefs.json` — Key-value preferences (GitHub PAT stored as base64)
+
+Repo-less runs instead use an ephemeral workspace `os.tmpdir()/conduit-<runId>-<rand>` plus a per-run MCP config `os.tmpdir()/conduit-mcp-<runId>.json`.
+
+### Data-directory sweeper
+
+`src/server/dataDirSweeper.ts` reclaims disk from finished/stopped/crashed runs — a run's git worktree (a full checkout, gigabytes for a large monorepo) plus, for repo-less runs, its temp workspace and MCP config. Run logs are **not** touched (they're the run history).
+
+**Runs on four triggers**, all funnelling through `sweepOnce()` (which coalesces concurrent callers so they never pile up):
+- **Startup** — one immediate sweep (this replaced `RepoSyncService.cleanupStaleWorktrees`; the repo-sync service now only keeps clones in sync).
+- **Periodic** — every `CONDUIT_SWEEP_INTERVAL_MS` (default 600000 / 10 min) via the `DataDirSweeper` service, started/stopped in `src/server/index.ts`.
+- **Post-run** — after every run finalizes, via `setRunFinalizedHook` in `src/server/runner.ts` (a hook, not an import, to avoid a `runner` ↔ `dataDirSweeper` cycle).
+- **Manual** — WS channel `maintenance:sweep` → `ConduitAPI.maintenance.sweep()`, surfaced as the **"Clean up now"** button in the Settings screen (`SettingsManager.tsx`); returns a `SweepResult` (per-category removal counts).
+
+**Safety invariant — never delete a live run's artifacts.** Two independent guards, both must pass: (1) the artifact isn't in the runner's active set (`getActiveWorkspacePaths()` / `getActiveRunIds()` — worktrees are pod-local, so each pod sweeps its own), and (2) it's older than `CONDUIT_SWEEP_GRACE_MS` (default 300000 / 5 min), which spares the brief worktree-created-but-not-yet-registered startup window. Discovery is filesystem-scan based (owner-agnostic). The decision core `selectStale()` and the temp-name classifier `classifyTmpEntry()` are pure and unit-tested (`dataDirSweeper.test.ts`); the per-run 30s `cleanupRun` in `runner.ts` stays as the fast path, with the sweeper as the safety net.
 
 ## TypeScript Configs
 

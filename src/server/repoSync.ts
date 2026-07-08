@@ -1,7 +1,6 @@
 import * as fs from 'fs'
-import * as path from 'path'
 import { listRepositories, getRepository, updateRepository } from '../main/db/queries/repositories'
-import { cloneRepo, fetchRepo, removeWorktree } from './gitOps'
+import { cloneRepo, fetchRepo } from './gitOps'
 import { resolveRepoToken } from './githubApp'
 import { DEV_CONTEXT } from './auth/config'
 import { reporter } from './observability'
@@ -21,9 +20,8 @@ export class RepoSyncService {
   }
 
   start(intervalMs: number = 5 * 60 * 1000): void {
-    this.cleanupStaleWorktrees().catch((err) =>
-      console.error('[repoSync] Failed to clean up stale worktrees:', err)
-    )
+    // Stale-worktree cleanup is owned by DataDirSweeper (startup + periodic +
+    // post-run + manual); RepoSyncService only keeps the bare clones in sync.
     this.syncAll().catch((err) => console.error('[repoSync] Initial sync failed:', err))
     this.intervalId = setInterval(() => {
       this.syncAll().catch((err) => console.error('[repoSync] Periodic sync failed:', err))
@@ -119,32 +117,5 @@ export class RepoSyncService {
       syncError: repo.syncError,
       lastSyncedAt: repo.lastSyncedAt,
     })
-  }
-
-  /**
-   * Clean up stale worktrees left over from crashed runs.
-   * Scans each repo's worktrees-run/ directory and removes orphaned worktrees.
-   */
-  private async cleanupStaleWorktrees(): Promise<void> {
-    const repos = await listRepositories(DEV_CONTEXT.userId, DEV_CONTEXT.userGroupIds)
-    for (const repo of repos) {
-      if (!repo.clonePath) continue
-      const worktreeRunDir = path.join(repo.clonePath, 'worktrees-run')
-      if (!fs.existsSync(worktreeRunDir)) continue
-
-      try {
-        const entries = fs.readdirSync(worktreeRunDir, { withFileTypes: true })
-        for (const entry of entries) {
-          if (!entry.isDirectory()) continue
-          const worktreePath = path.join(worktreeRunDir, entry.name)
-          console.log(`[repoSync] Cleaning up stale worktree: ${worktreePath}`)
-          removeWorktree(repo.clonePath, worktreePath).catch((err) =>
-            console.error(`[repoSync] Failed to clean up worktree ${worktreePath}:`, err)
-          )
-        }
-      } catch {
-        // Ignore errors reading the directory
-      }
-    }
   }
 }

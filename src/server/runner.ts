@@ -57,10 +57,43 @@ async function buildRunnerEnv(
 interface ActiveRun {
   child: ChildProcess
   finalize: (status: 'completed' | 'failed' | 'stopped', exitCode?: number | null) => void
+  /** The run's workspace dir (git worktree or ephemeral tmp dir). Used by the
+   *  data-dir sweeper to avoid deleting a running run's workspace. */
+  workspacePath: string
 }
 
 // Active child processes keyed by runId
 const activeProcesses = new Map<string, ActiveRun>()
+
+/** Workspace dirs of runs currently executing on this pod. The data-dir sweeper
+ *  treats these as protected — never sweeps a live run's worktree/workspace. */
+export function getActiveWorkspacePaths(): Set<string> {
+  return new Set(
+    [...activeProcesses.values()].map((r) => r.workspacePath).filter((p): p is string => !!p)
+  )
+}
+
+/** RunIds currently executing on this pod (used to protect per-run tmp files
+ *  like MCP config, whose names embed the runId). */
+export function getActiveRunIds(): Set<string> {
+  return new Set(activeProcesses.keys())
+}
+
+// Hook invoked after each run reaches a terminal state and has been removed from
+// the active set. The server wires this to the data-dir sweeper so disk is
+// reclaimed promptly after every job finishes. Declared here (rather than
+// importing the sweeper) to avoid a runner ↔ dataDirSweeper circular import.
+let runFinalizedHook: (() => void) | null = null
+export function setRunFinalizedHook(cb: (() => void) | null): void {
+  runFinalizedHook = cb
+}
+function notifyRunFinalized(): void {
+  try {
+    runFinalizedHook?.()
+  } catch (err) {
+    console.error('[server/runner] run-finalized hook threw:', err)
+  }
+}
 
 /** Delay before removing a run's workspace, so executables it spawned can exit
  *  and release file handles before we delete the directory. */
@@ -316,6 +349,9 @@ export async function startRunServer(
         return publishRunResult(agentId, finalRun)
       })
       .catch((err) => console.error(`[server/runner] Finalize failed for run ${runId}:`, err))
+
+    // Reclaim disk promptly after every job finishes (see setRunFinalizedHook).
+    notifyRunFinalized()
   }
 
   // Surface a broken push credential into the run log so it's attributable at a
@@ -401,7 +437,7 @@ export async function startRunServer(
     throw err
   }
 
-  activeProcesses.set(runId, { child, finalize: finalizeRun })
+  activeProcesses.set(runId, { child, finalize: finalizeRun, workspacePath })
 
   // Handle spawn errors (binary not in PATH, etc.)
   child.on('error', (err) => {

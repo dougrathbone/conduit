@@ -12,7 +12,7 @@ import * as os from 'os'
 import { initDb } from '../main/db/index'
 import { listAgents, getAgent, createAgent, updateAgent, deleteAgent } from '../main/db/queries/agents'
 import { listRuns, updateRun, getOrphanedRuns } from '../main/db/queries/runs'
-import { startRunServer, stopRun } from './runner'
+import { startRunServer, stopRun, setRunFinalizedHook } from './runner'
 import {
   listGlobalMcps,
   getGlobalMcp,
@@ -35,6 +35,7 @@ import {
   deleteRepository,
 } from '../main/db/queries/repositories'
 import { RepoSyncService } from './repoSync'
+import { DataDirSweeper, sweepOnce } from './dataDirSweeper'
 import { encryptSecret } from './crypto'
 import { mintInstallationToken, resolveRepoToken } from './githubApp'
 import { isUrlMcpServer } from '../shared/mcp'
@@ -623,6 +624,11 @@ const handlers: Record<string, HandlerFn> = {
   'agentCreds:set': ([runner, value], _ws, ctx) =>
     setCredential(ctx.userId, runner as RunnerType, (value as string) ?? '').then(() => undefined),
 
+  // Data-directory maintenance — run the sweeper on demand from Settings. Safe
+  // for any authenticated user: it only removes artifacts of runs that are not
+  // currently executing on this pod.
+  'maintenance:sweep': () => sweepOnce(),
+
   'shell:openExternal': ([url]) => Promise.resolve({ url }),
 
   // Prompt Chat
@@ -842,6 +848,10 @@ httpServer.on('upgrade', async (req, socket, head) => {
 // Repository sync service — module-scoped so request handlers can reach it.
 const repoSyncService = new RepoSyncService(broadcast)
 
+// Data-directory sweeper — periodically reclaims disk from finished/stopped runs
+// (orphaned worktrees, temp workspaces, MCP configs) and owns startup cleanup.
+const dataDirSweeper = new DataDirSweeper()
+
 async function start(): Promise<void> {
   // Initialise the Postgres database (creates tables if they don't exist)
   await initDb()
@@ -871,6 +881,16 @@ async function start(): Promise<void> {
 
   // Start the repository sync service (clones new repos, fetches existing ones)
   repoSyncService.start()
+
+  // Start the data-directory sweeper (immediate cleanup + periodic sweep), and
+  // also sweep after every run finishes so disk is reclaimed promptly. Sweeps
+  // coalesce, so the per-finish trigger can't pile up.
+  dataDirSweeper.start()
+  setRunFinalizedHook(() => {
+    sweepOnce().catch((err) =>
+      reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'postRun' } })
+    )
+  })
 
   // Start the trigger service (registers cron jobs from DB)
   await triggerService.start()
@@ -925,6 +945,7 @@ async function start(): Promise<void> {
     for (const ws of clients) ws.close(1001, 'Server shutting down')
     triggerService.stop()
     repoSyncService.stop()
+    dataDirSweeper.stop()
     // Flush buffered error events so shutdown-time reports are delivered.
     await reporter.flush(2000).catch(() => {})
     // Give in-flight requests up to 10s to finish, then exit.
