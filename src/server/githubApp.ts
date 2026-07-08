@@ -104,3 +104,30 @@ export async function resolveRepoToken(
       return undefined
   }
 }
+
+export interface PushCredential {
+  /** The resolved git token, or undefined for ssh/none (or on failure). */
+  token?: string
+  /** Set when token resolution threw — the reason `git push` will fail. */
+  error?: Error
+}
+
+/**
+ * Resolve a repository's git push token WITHOUT throwing.
+ *
+ * A run should still start when a credential can't be minted — the agent can do
+ * useful read-only work — but the failure must NOT be swallowed silently. A
+ * missing token makes the agent's later `git push` fail with an opaque
+ * credential error ("could not read Username", "terminal prompts disabled") and
+ * no breadcrumb pointing at Conduit's token resolution. The caller is expected
+ * to surface `error` into the run log and the error reporter.
+ */
+export async function resolvePushCredential(
+  repo: Pick<Repository, 'id' | 'url' | 'authMethod'>
+): Promise<PushCredential> {
+  try {
+    return { token: await resolveRepoToken(repo) }
+  } catch (err) {
+    return { error: err instanceof Error ? err : new Error(String(err)) }
+  }
+}

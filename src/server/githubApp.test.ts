@@ -17,7 +17,7 @@ vi.mock('./crypto', () => ({
   decryptSecret: vi.fn(() => 'DECRYPTED-PEM'),
 }))
 
-import { parseGithubOwnerRepo, mintInstallationToken, resolveRepoToken } from './githubApp'
+import { parseGithubOwnerRepo, mintInstallationToken, resolveRepoToken, resolvePushCredential } from './githubApp'
 import { getRepositoryCredentials } from '../main/db/queries/repositories'
 import { decryptSecret } from './crypto'
 
@@ -131,5 +131,32 @@ describe('resolveRepoToken', () => {
     await expect(
       resolveRepoToken({ id: 'r1', url: 'https://github.com/a/b', authMethod: 'githubapp' })
     ).rejects.toThrow(/missing/i)
+  })
+})
+
+describe('resolvePushCredential', () => {
+  const realFetch = global.fetch
+  const origPat = process.env.GITHUB_PAT
+  beforeEach(() => vi.mocked(getRepositoryCredentials).mockReset())
+  afterEach(() => {
+    global.fetch = realFetch
+    if (origPat === undefined) delete process.env.GITHUB_PAT
+    else process.env.GITHUB_PAT = origPat
+  })
+
+  it('returns the token and no error on success', async () => {
+    process.env.GITHUB_PAT = 'ghp_test'
+    const result = await resolvePushCredential({ id: 'r1', url: 'https://github.com/a/b', authMethod: 'pat' })
+    expect(result).toEqual({ token: 'ghp_test' })
+    expect(result.error).toBeUndefined()
+  })
+
+  it('captures the error instead of throwing when the mint fails', async () => {
+    // githubapp auth with no stored credentials makes resolveRepoToken throw.
+    vi.mocked(getRepositoryCredentials).mockResolvedValue({ githubAppId: undefined, githubPrivateKeyEnc: undefined })
+    const result = await resolvePushCredential({ id: 'r1', url: 'https://github.com/a/b', authMethod: 'githubapp' })
+    expect(result.token).toBeUndefined()
+    expect(result.error).toBeInstanceOf(Error)
+    expect(result.error?.message).toMatch(/missing/i)
   })
 })

@@ -12,7 +12,7 @@ import { writeMcpConfig, deleteMcpConfig } from '../main/utils/mcp'
 import { DEV_USER_ID } from './auth/config'
 import { LOGS_DIR } from '../main/utils/paths'
 import { createWorktree, removeWorktree, configureWorktreeGit } from './gitOps'
-import { resolveRepoToken } from './githubApp'
+import { resolvePushCredential } from './githubApp'
 import { buildClaudeArgs, parseClaudeOutput } from '../main/execution/adapters/claude'
 import { buildAmpArgs, parseAmpOutput } from '../main/execution/adapters/amp'
 import { buildCursorArgs, CURSOR_NOTICE } from '../main/execution/adapters/cursor'
@@ -137,6 +137,9 @@ export async function startRunServer(
   let workspacePath: string
   let isEphemeral: boolean
   let worktreeClonePath: string | undefined
+  // Set when push-credential resolution failed; surfaced into the run log once
+  // the log stream is open (see below), so a broken git token is never invisible.
+  let pushCredentialError: string | undefined
 
   if (agent.repositoryId) {
     const repo = await getRepository(agent.repositoryId)
@@ -154,7 +157,17 @@ export async function startRunServer(
     // Configure committer identity + push credentials so the agent can commit and
     // push (and open PRs). Uses the repo's "commit as" settings, falling back to a
     // Conduit identity, and a freshly-resolved token so origin authenticates.
-    const pushToken = await resolveRepoToken(repo).catch(() => undefined)
+    const { token: pushToken, error: pushTokenError } = await resolvePushCredential(repo)
+    if (pushTokenError) {
+      // Never swallow this: a failed mint means the agent's `git push` will fail
+      // later with an opaque credential error. Record why, in both Sentry and the
+      // run log (the run-log line is emitted below, once the log stream is open).
+      pushCredentialError = pushTokenError.message
+      reporter.captureException(pushTokenError, {
+        tags: { component: 'runner', op: 'resolvePushCredential', repoId: repo.id },
+      })
+      console.error(`[server/runner] Could not resolve push credentials for repo ${repo.id}:`, pushTokenError)
+    }
     await configureWorktreeGit(worktreeDir, {
       url: repo.url,
       token: pushToken,
@@ -303,6 +316,16 @@ export async function startRunServer(
         return publishRunResult(agentId, finalRun)
       })
       .catch((err) => console.error(`[server/runner] Finalize failed for run ${runId}:`, err))
+  }
+
+  // Surface a broken push credential into the run log so it's attributable at a
+  // glance, rather than only showing up later as an opaque `git push` failure.
+  if (pushCredentialError) {
+    emitSystemMessage(
+      `⚠️  Could not obtain GitHub push credentials for this repository: ${pushCredentialError}\n` +
+      `   The agent can read the code, but "git push" (and opening PRs) will fail. ` +
+      `Check the repository's authentication settings.`
+    )
   }
 
   // 6. Spawn process based on runner type
