@@ -26,4 +26,18 @@ describe('classifyUrlHealth', () => {
     expect(result.status).toBe('healthy')
     expect(result.message).toContain('500')
   })
+
+  it('405 -> healthy without a "Method Not Allowed" message (streamable-HTTP MCP declines the probe method)', () => {
+    const result = classifyUrlHealth(405, 'Method Not Allowed')
+    expect(result.status).toBe('healthy')
+    expect(result.message).not.toContain('Method Not Allowed')
+    expect(result.message).toBe('Reachable')
+  })
+
+  it('406 -> healthy without a "Not Acceptable" message', () => {
+    const result = classifyUrlHealth(406, 'Not Acceptable')
+    expect(result.status).toBe('healthy')
+    expect(result.message).not.toContain('Not Acceptable')
+    expect(result.message).toBe('Reachable')
+  })
 })

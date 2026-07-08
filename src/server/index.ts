@@ -322,11 +322,16 @@ const handlers: Record<string, HandlerFn> = {
 
     if (isUrlMcpServer(config) && config.url) {
       try {
-        // Reflect real auth state: send the stored global OAuth token (refreshed
-        // if expired) so an authenticated server reads as healthy, and one that
-        // still 401s (no/invalid token) reads as needing authentication — rather
-        // than every OAuth server showing 401 to an unauthenticated probe.
-        const headers: Record<string, string> = { Accept: '*/*' }
+        // Probe with a real MCP `initialize` handshake, not a bare GET. Streamable-
+        // HTTP MCP servers (Linear/Sentry/Figma/…) reject a bare GET or `Accept: */*`
+        // with 405 Method Not Allowed / 406 Not Acceptable — so once a valid token
+        // gets past the 401, the probe would surface a misleading "Method Not
+        // Allowed". A POST initialize with the streamable-HTTP Accept header is what
+        // an actual MCP client sends: 200 when authenticated + usable, 401 when not.
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+        }
         try {
           const { resolveGlobalMcpToken } = await import('../main/utils/mcp')
           const { normalizeTokenScheme } = await import('./mcpOAuth/flow')
@@ -338,9 +343,19 @@ const handlers: Record<string, HandlerFn> = {
         const controller = new AbortController()
         const timeout = setTimeout(() => controller.abort(), 4000)
         const res = await fetch(config.url, {
-          method: 'GET',
+          method: 'POST',
           signal: controller.signal,
           headers,
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'initialize',
+            params: {
+              protocolVersion: '2025-06-18',
+              capabilities: {},
+              clientInfo: { name: 'conduit-healthcheck', version: '1' },
+            },
+          }),
         })
         clearTimeout(timeout)
         return classifyUrlHealth(res.status, res.statusText)
