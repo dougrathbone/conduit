@@ -8,6 +8,7 @@ import { getUserGroupIds, listGroups, upsertGroup, syncUserGroups } from '../../
 import { getAuthorizationUrl, exchangeCode } from './okta'
 import { createSession, deleteSession } from '../../main/db/queries/sessions'
 import { resolveSession } from './session'
+import { setSessionCookie, clearSessionCookie, SESSION_COOKIE_NAME } from './cookie'
 
 // In-memory PKCE verifier storage keyed by state
 const pendingAuthRequests = new Map<string, string>()
@@ -188,13 +189,7 @@ router.get('/callback', async (req: Request, res: Response) => {
     })
 
     // Set cookie
-    const isLocalhost = req.hostname === 'localhost' || req.hostname === '127.0.0.1'
-    res.cookie('conduit_session', session.id, {
-      httpOnly: true,
-      sameSite: 'lax',
-      maxAge: sessionTtlMs,
-      secure: !isLocalhost,
-    })
+    setSessionCookie(req, res, session.id)
 
     res.redirect('/')
   } catch (err) {
@@ -210,11 +205,11 @@ router.get('/callback', async (req: Request, res: Response) => {
 })
 
 router.post('/logout', async (req: Request, res: Response) => {
-  const sessionId: string | undefined = req.cookies?.conduit_session
+  const sessionId: string | undefined = req.cookies?.[SESSION_COOKIE_NAME]
   if (sessionId) {
     await deleteSession(sessionId)
   }
-  res.clearCookie('conduit_session')
+  clearSessionCookie(res)
   res.status(200).json({ ok: true })
 })
 
@@ -229,7 +224,7 @@ router.get('/me', async (req: Request, res: Response) => {
     return
   }
 
-  const sessionId: string | undefined = req.cookies?.conduit_session
+  const sessionId: string | undefined = req.cookies?.[SESSION_COOKIE_NAME]
   if (!sessionId) {
     res.status(401).json({ error: 'Not authenticated' })
     return
@@ -242,6 +237,9 @@ router.get('/me', async (req: Request, res: Response) => {
     res.status(401).json({ error: 'Session expired' })
     return
   }
+  // Slide the cookie forward on every check (the frontend polls this), so an
+  // active session's cookie never lapses at a fixed time after login.
+  setSessionCookie(req, res, sessionId)
 
   const user = await getUser(session.userId)
   if (!user) {

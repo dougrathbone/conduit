@@ -3,6 +3,7 @@ import type { RequestContext } from '../../shared/types'
 import { isAuthEnabled } from './config'
 import { getDevContext } from './devBypass'
 import { resolveSession } from './session'
+import { setSessionCookie, SESSION_COOKIE_NAME } from './cookie'
 import { getUserGroupIds } from '../../main/db/queries/groups'
 
 declare global {
@@ -20,7 +21,7 @@ export async function sessionMiddleware(req: Request, res: Response, next: NextF
     return
   }
 
-  const sessionId: string | undefined = req.cookies?.conduit_session
+  const sessionId: string | undefined = req.cookies?.[SESSION_COOKIE_NAME]
   if (!sessionId) {
     res.status(401).json({ error: 'Not authenticated' })
     return
@@ -40,6 +41,8 @@ export async function sessionMiddleware(req: Request, res: Response, next: NextF
       userId: session.userId,
       userGroupIds,
     }
+    // Slide the cookie forward on activity (rolling session window).
+    setSessionCookie(req, res, sessionId)
 
     next()
   } catch (err) {
