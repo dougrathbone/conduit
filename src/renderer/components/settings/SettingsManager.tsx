@@ -4,6 +4,8 @@ import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
 import { useAgentCredentialStatus, useSetAgentCredential } from '@renderer/hooks/useAgentCredentials'
 import { useDataDirSweep } from '@renderer/hooks/useDataDirSweep'
+import { useStorageUsage } from '@renderer/hooks/useStorageUsage'
+import { formatBytes } from '@renderer/lib/utils'
 import type { RunnerType, SweepResult } from '@shared/types'
 
 interface RunnerMeta {
@@ -102,17 +104,57 @@ function sweepSummary(r: SweepResult): string {
   return parts.length ? `Removed ${parts.join(', ')}.` : 'Nothing to clean up — already tidy.'
 }
 
+function StorageUsageSummary() {
+  const usage = useStorageUsage()
+
+  if (usage.isLoading) {
+    return (
+      <div className="flex items-center gap-1.5 text-sm text-[var(--text-secondary)] mt-1">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Calculating storage usage…
+      </div>
+    )
+  }
+
+  if (usage.isError || !usage.data) {
+    return (
+      <div className="text-xs text-[var(--text-secondary)] mt-1">
+        Couldn't measure storage usage.
+      </div>
+    )
+  }
+
+  const { totalBytes, reclaimableBytes } = usage.data
+  return (
+    <div className="mt-1">
+      <div className="flex items-center gap-1.5">
+        <span className="text-sm font-semibold text-[var(--text-primary)]">
+          {formatBytes(totalBytes)}
+        </span>
+        <span className="text-sm text-[var(--text-secondary)]">in use</span>
+        {usage.isFetching && <Loader2 className="h-3 w-3 animate-spin text-[var(--text-secondary)]" />}
+      </div>
+      {reclaimableBytes > 0 && (
+        <div className="text-xs text-[var(--text-secondary)] mt-0.5">
+          {formatBytes(reclaimableBytes)} reclaimable from finished runs
+        </div>
+      )}
+    </div>
+  )
+}
+
 function StorageMaintenanceCard() {
   const sweep = useDataDirSweep()
 
   return (
     <div className="rounded-lg border border-[var(--border)] px-4 py-3.5" style={{ background: 'var(--bg-secondary)' }}>
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <HardDrive className="h-4 w-4 flex-shrink-0 text-[var(--text-secondary)]" />
+        <div className="flex items-start gap-2.5 min-w-0">
+          <HardDrive className="h-4 w-4 flex-shrink-0 text-[var(--text-secondary)] mt-0.5" />
           <div className="min-w-0">
             <div className="text-sm font-medium text-[var(--text-primary)]">Data directory</div>
-            <p className="text-xs text-[var(--text-secondary)] mt-0.5">
+            <StorageUsageSummary />
+            <p className="text-xs text-[var(--text-secondary)] mt-2">
               Reclaim disk from finished runs — orphaned git worktrees, temp workspaces, and per-run
               MCP configs. This happens automatically after each run and on a timer; run it now to
               clean up immediately. Runs currently executing are never touched.

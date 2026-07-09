@@ -28,6 +28,8 @@ function resolveDataDir(): string {
 
 const dataDir = resolveDataDir()
 
+/** Root of all Conduit on-disk state (`~/.conduit` or `$CONDUIT_DATA_DIR`). */
+export const DATA_DIR: string = dataDir
 export const DB_PATH: string = path.join(dataDir, 'conduit.db')
 export const LOGS_DIR: string = path.join(dataDir, 'logs')
 export const REPOS_DIR: string = path.join(dataDir, 'repos')

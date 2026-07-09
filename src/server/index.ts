@@ -35,7 +35,7 @@ import {
   deleteRepository,
 } from '../main/db/queries/repositories'
 import { RepoSyncService } from './repoSync'
-import { DataDirSweeper, sweepOnce } from './dataDirSweeper'
+import { DataDirSweeper, sweepOnce, getStorageUsage } from './dataDirSweeper'
 import { encryptSecret } from './crypto'
 import { mintInstallationToken, resolveRepoToken } from './githubApp'
 import { isUrlMcpServer } from '../shared/mcp'
@@ -628,6 +628,7 @@ const handlers: Record<string, HandlerFn> = {
   // for any authenticated user: it only removes artifacts of runs that are not
   // currently executing on this pod.
   'maintenance:sweep': () => sweepOnce(),
+  'maintenance:storageUsage': () => getStorageUsage(),
 
   'shell:openExternal': ([url]) => Promise.resolve({ url }),
 

@@ -16,6 +16,27 @@ export function formatDuration(ms?: number): string {
   return `${seconds}s`
 }
 
+const BYTE_UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'] as const
+
+/**
+ * Human-readable byte size using binary (1024) steps. Whole bytes show no
+ * decimal; larger units show one decimal place with a trailing `.0` trimmed
+ * (e.g. `1024 → "1 KB"`, `1536 → "1.5 KB"`). Negative/non-finite input is
+ * treated as zero.
+ */
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  let value = bytes
+  let unit = 0
+  while (value >= 1024 && unit < BYTE_UNITS.length - 1) {
+    value /= 1024
+    unit++
+  }
+  // Bytes are always whole; larger units get one decimal, minus a trailing .0.
+  const rendered = unit === 0 ? String(Math.round(value)) : value.toFixed(1).replace(/\.0$/, '')
+  return `${rendered} ${BYTE_UNITS[unit]}`
+}
+
 export function formatRelativeTime(timestamp: number): string {
   const now = Date.now()
   const diffMs = now - timestamp

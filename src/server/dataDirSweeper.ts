@@ -1,12 +1,14 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { REPOS_DIR } from '../main/utils/paths'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
+import { REPOS_DIR, DATA_DIR } from '../main/utils/paths'
 import { removeWorktree } from './gitOps'
 import { deleteWorkspace } from '../main/execution/workspace'
 import { getActiveWorkspacePaths, getActiveRunIds } from './runner'
 import { reporter } from './observability'
-import type { SweepResult } from '../shared/types'
+import type { SweepResult, StorageUsage } from '../shared/types'
 
 /**
  * Periodic + on-demand cleaner for the data directory.
@@ -81,6 +83,74 @@ export function classifyTmpEntry(name: string): { kind: TmpEntryKind; runId?: st
   return { kind: 'other' }
 }
 
+/**
+ * Total size in bytes of everything under `root`, walked recursively. Async
+ * (uses `fs.promises`) so a multi-gigabyte monorepo checkout never blocks the
+ * event loop. Symlinks are not followed — this avoids double-counting and
+ * symlink loops. Unreadable entries and a missing root are swallowed (counted
+ * as 0) so a size estimate can never throw.
+ */
+export async function dirSizeBytes(root: string): Promise<number> {
+  let entries: fs.Dirent[]
+  try {
+    entries = await fs.promises.readdir(root, { withFileTypes: true })
+  } catch {
+    return 0 // missing/unreadable dir → contributes nothing
+  }
+  let total = 0
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue
+    const p = path.join(root, entry.name)
+    if (entry.isDirectory()) {
+      total += await dirSizeBytes(p)
+    } else if (entry.isFile()) {
+      try {
+        total += (await fs.promises.lstat(p)).size
+      } catch {
+        // unreadable/removed mid-walk → skip
+      }
+    }
+  }
+  return total
+}
+
+/** Size of a single file in bytes; 0 if it's gone/unreadable. */
+async function fileSizeBytes(p: string): Promise<number> {
+  try {
+    return (await fs.promises.lstat(p)).size
+  } catch {
+    return 0
+  }
+}
+
+const execFileAsync = promisify(execFile)
+
+/**
+ * Disk usage of a directory tree in bytes. Prefers the native `du -sk`, which
+ * runs in a child process (off the Node event loop) and is orders of magnitude
+ * faster than a JS walk on a large checkout — a data dir can hold hundreds of
+ * thousands of files across many worktrees. Falls back to the in-process
+ * {@link dirSizeBytes} walker when `du` is unavailable (e.g. Windows), times out,
+ * or errors. Never throws — a size estimate must never crash the sweeper.
+ *
+ * Note: `du` reports block-allocated disk usage (rounded up per file), which is
+ * the honest "space on disk" figure; the JS fallback reports the logical byte
+ * sum. Both are fine for a human-facing usage display.
+ */
+export async function measureDirBytes(dir: string): Promise<number> {
+  try {
+    const { stdout } = await execFileAsync('du', ['-sk', dir], {
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024,
+    })
+    const kb = parseInt(stdout.trim().split(/\s+/)[0], 10)
+    if (Number.isFinite(kb)) return kb * 1024
+  } catch {
+    // `du` missing/failed/timed out → fall back to the in-process walker.
+  }
+  return dirSizeBytes(dir)
+}
+
 function safeMtimeMs(p: string): number {
   try {
     return fs.statSync(p).mtimeMs
@@ -95,6 +165,91 @@ function listDir(dir: string): fs.Dirent[] {
   } catch {
     return []
   }
+}
+
+/** A discovered candidate paired with the filesystem path it lives at. */
+export interface SweepCandidate extends SweepEntry {
+  path: string
+}
+
+/** A worktree candidate also carries its clone path, needed to remove it. */
+export interface WorktreeCandidate extends SweepCandidate {
+  clonePath: string
+}
+
+/** The three artifact categories the sweeper considers, freshly discovered. */
+export interface SweepCandidates {
+  worktrees: WorktreeCandidate[]
+  workspaces: SweepCandidate[]
+  mcpConfigs: SweepCandidate[]
+}
+
+/** Overrides for the directories/active-sets scanned — injected in tests. */
+export interface SweepScanOptions {
+  reposDir?: string
+  tmpDir?: string
+  activePaths?: Set<string>
+  activeRunIds?: Set<string>
+}
+
+/**
+ * Discover every removable run artifact under the repos + temp directories,
+ * tagging each with its mtime and whether it belongs to a live run. This is the
+ * single source of truth for "what the sweeper considers": both `runSweep`
+ * (which removes the stale subset) and `estimateStorageUsage` (which sizes it)
+ * consume it, so the reclaimable estimate can never disagree with what a sweep
+ * actually frees.
+ */
+export function collectSweepCandidates(opts: SweepScanOptions = {}): SweepCandidates {
+  const reposDir = opts.reposDir ?? REPOS_DIR
+  const tmpDir = opts.tmpDir ?? os.tmpdir()
+  const activePaths = opts.activePaths ?? getActiveWorkspacePaths()
+  const activeRunIds = opts.activeRunIds ?? getActiveRunIds()
+
+  // 1. Git worktrees: reposDir/<repoId>/worktrees-run/<uuid>
+  const worktrees: WorktreeCandidate[] = []
+  for (const repoEntry of listDir(reposDir)) {
+    if (!repoEntry.isDirectory()) continue
+    const clonePath = path.join(reposDir, repoEntry.name)
+    const worktreesDir = path.join(clonePath, 'worktrees-run')
+    for (const e of listDir(worktreesDir)) {
+      if (!e.isDirectory()) continue
+      const p = path.join(worktreesDir, e.name)
+      worktrees.push({
+        key: p,
+        path: p,
+        clonePath,
+        mtimeMs: safeMtimeMs(p),
+        protectedByActive: activePaths.has(p),
+      })
+    }
+  }
+
+  // 2 & 3. Temp-dir artifacts: ephemeral workspaces + per-run MCP configs.
+  const workspaces: SweepCandidate[] = []
+  const mcpConfigs: SweepCandidate[] = []
+  for (const entry of listDir(tmpDir)) {
+    const cls = classifyTmpEntry(entry.name)
+    if (cls.kind === 'other') continue
+    const p = path.join(tmpDir, entry.name)
+    if (cls.kind === 'mcpConfig' && entry.isFile()) {
+      mcpConfigs.push({
+        key: p,
+        path: p,
+        mtimeMs: safeMtimeMs(p),
+        protectedByActive: activeRunIds.has(cls.runId!),
+      })
+    } else if (cls.kind === 'workspace' && entry.isDirectory()) {
+      workspaces.push({
+        key: p,
+        path: p,
+        mtimeMs: safeMtimeMs(p),
+        protectedByActive: activePaths.has(p),
+      })
+    }
+  }
+
+  return { worktrees, workspaces, mcpConfigs }
 }
 
 let inFlightSweep: Promise<SweepResult> | null = null
@@ -118,61 +273,25 @@ export function sweepOnce(now: number = Date.now()): Promise<SweepResult> {
  * can't abort the sweep.
  */
 async function runSweep(now: number): Promise<SweepResult> {
-  const activePaths = getActiveWorkspacePaths()
-  const activeRunIds = getActiveRunIds()
+  const { worktrees, workspaces, mcpConfigs } = collectSweepCandidates()
   const result: SweepResult = { worktreesRemoved: 0, workspacesRemoved: 0, mcpConfigsRemoved: 0 }
 
-  // 1. Git worktrees: REPOS_DIR/<repoId>/worktrees-run/<uuid>
-  for (const repoEntry of listDir(REPOS_DIR)) {
-    if (!repoEntry.isDirectory()) continue
-    const clonePath = path.join(REPOS_DIR, repoEntry.name)
-    const worktreesDir = path.join(clonePath, 'worktrees-run')
-    const candidates: (SweepEntry & { path: string })[] = listDir(worktreesDir)
-      .filter((e) => e.isDirectory())
-      .map((e) => {
-        const p = path.join(worktreesDir, e.name)
-        return { key: p, path: p, mtimeMs: safeMtimeMs(p), protectedByActive: activePaths.has(p) }
-      })
-    for (const stale of selectStale(candidates, { now, graceMs: SWEEP_GRACE_MS })) {
-      try {
-        await removeWorktree(clonePath, stale.path)
-        if (!fs.existsSync(stale.path)) result.worktreesRemoved++
-      } catch (err) {
-        reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'worktree' } })
-      }
+  // 1. Git worktrees: reposDir/<repoId>/worktrees-run/<uuid>
+  for (const stale of selectStale(worktrees, { now, graceMs: SWEEP_GRACE_MS })) {
+    try {
+      await removeWorktree(stale.clonePath, stale.path)
+      if (!fs.existsSync(stale.path)) result.worktreesRemoved++
+    } catch (err) {
+      reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'worktree' } })
     }
   }
 
   // 2 & 3. Temp-dir artifacts: ephemeral workspaces + per-run MCP configs.
-  const tmp = os.tmpdir()
-  const workspaceCandidates: (SweepEntry & { path: string })[] = []
-  const mcpCandidates: (SweepEntry & { path: string })[] = []
-  for (const entry of listDir(tmp)) {
-    const cls = classifyTmpEntry(entry.name)
-    if (cls.kind === 'other') continue
-    const p = path.join(tmp, entry.name)
-    if (cls.kind === 'mcpConfig' && entry.isFile()) {
-      mcpCandidates.push({
-        key: p,
-        path: p,
-        mtimeMs: safeMtimeMs(p),
-        protectedByActive: activeRunIds.has(cls.runId!),
-      })
-    } else if (cls.kind === 'workspace' && entry.isDirectory()) {
-      workspaceCandidates.push({
-        key: p,
-        path: p,
-        mtimeMs: safeMtimeMs(p),
-        protectedByActive: activePaths.has(p),
-      })
-    }
-  }
-
-  for (const stale of selectStale(workspaceCandidates, { now, graceMs: SWEEP_GRACE_MS })) {
+  for (const stale of selectStale(workspaces, { now, graceMs: SWEEP_GRACE_MS })) {
     deleteWorkspace(stale.path) // swallows its own errors
     if (!fs.existsSync(stale.path)) result.workspacesRemoved++
   }
-  for (const stale of selectStale(mcpCandidates, { now, graceMs: SWEEP_GRACE_MS })) {
+  for (const stale of selectStale(mcpConfigs, { now, graceMs: SWEEP_GRACE_MS })) {
     try {
       fs.rmSync(stale.path, { force: true })
       result.mcpConfigsRemoved++
@@ -188,7 +307,101 @@ async function runSweep(now: number): Promise<SweepResult> {
         `${result.workspacesRemoved} workspace(s), ${result.mcpConfigsRemoved} MCP config(s).`
     )
   }
+  // A sweep changes on-disk sizes; drop the cached usage so the next read (and
+  // the Settings query the client refetches after a manual sweep) is accurate.
+  invalidateStorageUsageCache()
   return result
+}
+
+/** Overrides for `estimateStorageUsage` — injected in tests. */
+export interface StorageScanOptions extends SweepScanOptions {
+  now?: number
+  dataDir?: string
+  /** Directory sizer (default: `du`-backed {@link measureDirBytes}). */
+  measureDir?: (p: string) => Promise<number>
+  /** File sizer (default: {@link fileSizeBytes}). */
+  measureFile?: (p: string) => Promise<number>
+}
+
+/**
+ * Estimate how much disk Conduit is using, for the Settings storage display.
+ *
+ * `totalBytes` sizes the whole data directory (db, logs, and repos — including
+ * every worktree) plus the Conduit temp artifacts, which live *outside* the data
+ * dir in the OS temp dir. `reclaimableBytes` sizes only the artifacts a sweep-now
+ * would actually remove — the same `selectStale` subset `runSweep` deletes — so
+ * it is always a subset of the total and always matches the "Clean up now"
+ * button. Never throws: the sizers swallow per-entry errors.
+ *
+ * This is the raw computation (a ~15s `du` over a large data dir); callers on
+ * the request path should go through the cached {@link getStorageUsage}.
+ */
+export async function estimateStorageUsage(opts: StorageScanOptions = {}): Promise<StorageUsage> {
+  const now = opts.now ?? Date.now()
+  const dataDir = opts.dataDir ?? DATA_DIR
+  const measureDir = opts.measureDir ?? measureDirBytes
+  const measureFile = opts.measureFile ?? fileSizeBytes
+  const { worktrees, workspaces, mcpConfigs } = collectSweepCandidates(opts)
+
+  // Total: the full data directory + the temp artifacts (which sit outside it).
+  let totalBytes = await measureDir(dataDir)
+  for (const w of workspaces) totalBytes += await measureDir(w.path)
+  for (const m of mcpConfigs) totalBytes += await measureFile(m.path)
+
+  // Reclaimable: exactly the stale set a sweep-now would free.
+  const graceMs = SWEEP_GRACE_MS
+  let reclaimableBytes = 0
+  for (const wt of selectStale(worktrees, { now, graceMs })) reclaimableBytes += await measureDir(wt.path)
+  for (const ws of selectStale(workspaces, { now, graceMs })) reclaimableBytes += await measureDir(ws.path)
+  for (const mc of selectStale(mcpConfigs, { now, graceMs })) reclaimableBytes += await measureFile(mc.path)
+
+  return { totalBytes, reclaimableBytes }
+}
+
+/**
+ * Cached, coalesced accessor for {@link estimateStorageUsage}. The underlying
+ * walk is a multi-second `du` over the entire data directory, far too slow to
+ * run on every Settings open, so the result is cached for {@link STORAGE_CACHE_TTL_MS}
+ * and concurrent callers share a single in-flight computation. A sweep calls
+ * {@link invalidateStorageUsageCache} so the next read reflects the freed space.
+ *
+ * `compute` is injectable for tests; production uses the real estimate.
+ */
+export const STORAGE_CACHE_TTL_MS = 60_000
+
+let usageCache: StorageUsage | null = null
+let usageCacheAt = 0
+let usageInFlight: Promise<StorageUsage> | null = null
+
+export function getStorageUsage(
+  now: number = Date.now(),
+  compute: () => Promise<StorageUsage> = () => estimateStorageUsage()
+): Promise<StorageUsage> {
+  if (usageCache && now - usageCacheAt < STORAGE_CACHE_TTL_MS) return Promise.resolve(usageCache)
+  if (usageInFlight) return usageInFlight
+  usageInFlight = compute()
+    .then((value) => {
+      usageCache = value
+      usageCacheAt = now
+      return value
+    })
+    .finally(() => {
+      usageInFlight = null
+    })
+  return usageInFlight
+}
+
+/** Drop the cached usage so the next {@link getStorageUsage} recomputes. */
+export function invalidateStorageUsageCache(): void {
+  usageCache = null
+  usageCacheAt = 0
+}
+
+/** Warm the cache in the background (fire-and-forget) — errors are swallowed. */
+export function warmStorageUsage(): void {
+  getStorageUsage().catch((err) =>
+    reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'warmUsage' } })
+  )
 }
 
 /**
@@ -199,9 +412,14 @@ export class DataDirSweeper {
   private intervalId: NodeJS.Timeout | null = null
 
   start(intervalMs: number = SWEEP_INTERVAL_MS): void {
-    sweepOnce().catch((err) =>
-      reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'startup' } })
-    )
+    // Run the initial sweep, then warm the storage-usage cache once it has
+    // finished (the sweep invalidates the cache at its end, so warming after it
+    // avoids a race and makes the first Settings view instant).
+    sweepOnce()
+      .catch((err) =>
+        reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'startup' } })
+      )
+      .finally(() => warmStorageUsage())
     this.intervalId = setInterval(() => {
       sweepOnce().catch((err) =>
         reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'periodic' } })

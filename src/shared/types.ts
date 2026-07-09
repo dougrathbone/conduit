@@ -37,6 +37,18 @@ export interface SweepResult {
   mcpConfigsRemoved: number
 }
 
+/**
+ * How much disk Conduit is using, shown alongside the Settings cleanup button.
+ * `reclaimableBytes` is a subset of `totalBytes` — the exact bytes a sweep-now
+ * would free (finished runs' worktrees + temp workspaces + MCP configs).
+ */
+export interface StorageUsage {
+  /** Total bytes Conduit occupies: the data directory plus its temp artifacts. */
+  totalBytes: number
+  /** Bytes a sweep-now would reclaim — artifacts of runs not currently executing. */
+  reclaimableBytes: number
+}
+
 // ── Auth & Users ───────────────────────────────────────────────────────────
 
 export interface User {
@@ -486,6 +498,8 @@ export interface ConduitAPI {
   maintenance: {
     /** Run the data-directory sweeper once, now, and report what was removed. */
     sweep: () => Promise<SweepResult>
+    /** Measure current data-directory disk usage (total + reclaimable). */
+    storageUsage: () => Promise<StorageUsage>
   }
   repos: {
     list: () => Promise<Repository[]>
