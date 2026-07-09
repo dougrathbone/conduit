@@ -112,6 +112,17 @@ export const agentCredentials = pgTable('agent_credentials', {
   pk: primaryKey({ columns: [table.userId, table.runner] }),
 }))
 
+// Per-user, per-runner background-task timeout in seconds (0 = run indefinitely).
+// Injected as the runner's wait-ceiling env var at launch. One row per (user, runner).
+export const runnerSettings = pgTable('runner_settings', {
+  userId: text('user_id').notNull(),
+  runner: text('runner').notNull(),
+  bgTaskTimeoutSeconds: bigint('bg_task_timeout_seconds', { mode: 'number' }).notNull().default(0),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+}, (table) => ({
+  pk: primaryKey({ columns: [table.userId, table.runner] }),
+}))
+
 export const agents = pgTable('agents', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
@@ -124,6 +135,7 @@ export const agents = pgTable('agents', {
   publishTargetIds: text('publish_target_ids'),
   repositoryId: text('repository_id'),
   effort: text('effort'),
+  bgTaskTimeoutSeconds: bigint('bg_task_timeout_seconds', { mode: 'number' }),
   enableRepoMcps: boolean('enable_repo_mcps').notNull().default(false),
   ownerId: text('owner_id'),
   createdAt: bigint('created_at', { mode: 'number' }).notNull(),

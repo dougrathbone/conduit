@@ -72,6 +72,7 @@ import { getShare, listShares, createShare, deleteShare } from '../main/db/queri
 import { listUsers, searchUsers } from '../main/db/queries/users'
 import { listGroups, getUserGroupIds } from '../main/db/queries/groups'
 import { getCredentialStatus, setCredential } from '../main/db/queries/agentCredentials'
+import { getRunnerTimeouts, setRunnerTimeout } from '../main/db/queries/runnerSettings'
 import { deleteExpiredSessions } from '../main/db/queries/sessions'
 import { resolveSession } from './auth/session'
 import { deleteExpiredPendingAuth } from '../main/db/queries/mcpOAuthPending'
@@ -623,6 +624,11 @@ const handlers: Record<string, HandlerFn> = {
   'agentCreds:getStatus': (_args, _ws, ctx) => getCredentialStatus(ctx.userId),
   'agentCreds:set': ([runner, value], _ws, ctx) =>
     setCredential(ctx.userId, runner as RunnerType, (value as string) ?? '').then(() => undefined),
+
+  // Per-user, per-runner background-task timeout (seconds; 0 = run indefinitely).
+  'runnerSettings:getTimeouts': (_args, _ws, ctx) => getRunnerTimeouts(ctx.userId),
+  'runnerSettings:setTimeout': ([runner, seconds], _ws, ctx) =>
+    setRunnerTimeout(ctx.userId, runner as RunnerType, Number(seconds) || 0).then(() => undefined),
 
   // Data-directory maintenance — run the sweeper on demand from Settings. Safe
   // for any authenticated user: it only removes artifacts of runs that are not

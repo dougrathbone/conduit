@@ -1,8 +1,9 @@
-import React, { useState } from 'react'
-import { Info, Check, Loader2, KeyRound, HardDrive, Trash2 } from 'lucide-react'
+import React, { useState, useEffect } from 'react'
+import { Info, Check, Loader2, KeyRound, HardDrive, Trash2, Timer } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
 import { useAgentCredentialStatus, useSetAgentCredential } from '@renderer/hooks/useAgentCredentials'
+import { useRunnerTimeouts, useSetRunnerTimeout } from '@renderer/hooks/useRunnerTimeouts'
 import { useDataDirSweep } from '@renderer/hooks/useDataDirSweep'
 import { useStorageUsage } from '@renderer/hooks/useStorageUsage'
 import { formatBytes } from '@renderer/lib/utils'
@@ -93,6 +94,83 @@ function CredentialRow({ meta, configured }: { meta: RunnerMeta; configured: boo
         )}
       </div>
     </div>
+  )
+}
+
+function RunnerTimeoutRow({ meta, seconds }: { meta: RunnerMeta; seconds: number }) {
+  const [value, setValue] = useState(String(seconds))
+  const saveTimeout = useSetRunnerTimeout()
+  const busy = saveTimeout.isPending
+  const supported = meta.runner === 'claude'
+
+  // Keep the field in sync when the stored value changes (initial load / refetch).
+  useEffect(() => {
+    setValue(String(seconds))
+  }, [seconds])
+
+  const dirty = String(seconds) !== value.trim()
+
+  const handleSave = async () => {
+    const n = Math.max(0, Math.floor(Number(value) || 0))
+    try {
+      await saveTimeout.mutateAsync({ runner: meta.runner, seconds: n })
+      setValue(String(n))
+    } catch (err) {
+      console.error('Failed to save timeout:', err)
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-[var(--border)] px-4 py-3.5" style={{ background: 'var(--bg-secondary)' }}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <Timer className="h-4 w-4 flex-shrink-0 text-[var(--text-secondary)]" />
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-[var(--text-primary)]">{meta.label}</span>
+              {!supported && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-primary)] text-[var(--text-secondary)]">
+                  no effect yet
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-[var(--text-secondary)] mt-0.5">
+              {supported
+                ? 'Injected as CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS. 0 = wait indefinitely.'
+                : 'No known wait-ceiling env var for this CLI yet — stored, but not applied.'}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <Input
+            type="number"
+            min={0}
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleSave()
+            }}
+            className="w-24"
+          />
+          <span className="text-xs text-[var(--text-secondary)]">sec</span>
+          <Button size="sm" onClick={handleSave} disabled={busy || !dirty} className="gap-1.5">
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Save
+          </Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function BackgroundTimeoutSection() {
+  const { data } = useRunnerTimeouts()
+  return (
+    <>
+      {RUNNERS.map((meta) => (
+        <RunnerTimeoutRow key={meta.runner} meta={meta} seconds={data?.[meta.runner] ?? 0} />
+      ))}
+    </>
   )
 }
 
@@ -213,6 +291,17 @@ export function SettingsManager() {
         {RUNNERS.map((meta) => (
           <CredentialRow key={meta.runner} meta={meta} configured={!!status?.[meta.runner]} />
         ))}
+
+        <h2 className="text-xs font-medium text-[var(--text-secondary)] pt-3">Background task timeout</h2>
+        <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-[var(--accent)]/10 border border-[var(--accent)]/20 text-xs text-[var(--text-secondary)]">
+          <Info className="h-3.5 w-3.5 text-[var(--accent)] flex-shrink-0 mt-0.5" />
+          <span>
+            How long a runner waits for background tasks before terminating them, in seconds.
+            <strong className="text-[var(--text-primary)]"> 0 means wait indefinitely</strong> (the
+            default). An individual agent can override this in its settings.
+          </span>
+        </div>
+        <BackgroundTimeoutSection />
 
         <h2 className="text-xs font-medium text-[var(--text-secondary)] pt-3">Storage maintenance</h2>
         <StorageMaintenanceCard />

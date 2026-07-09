@@ -145,6 +145,7 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
         publishTargetIds: agent.publishTargetIds,
         repositoryId: agent.repositoryId,
         effort: agent.effort,
+        bgTaskTimeoutSeconds: agent.bgTaskTimeoutSeconds,
         enableRepoMcps: agent.enableRepoMcps ?? false,
       })
     }
@@ -213,8 +214,8 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
     (field: keyof typeof draft, value: unknown) => {
       const updated = { ...draft, [field]: value }
       setDraft(updated)
-      const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, enableRepoMcps } = updated
-      scheduleSave({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, enableRepoMcps })
+      const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps } = updated
+      scheduleSave({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps })
     },
     [draft, scheduleSave]
   )
@@ -306,6 +307,31 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
             </p>
           </div>
         )}
+
+        {/* Background-task timeout — per-agent override (0 = run indefinitely) */}
+        <div className="space-y-1.5">
+          <label className="block text-xs font-medium text-[var(--text-secondary)]">
+            Background Task Timeout (seconds)
+          </label>
+          <Input
+            type="number"
+            min={0}
+            value={draft.bgTaskTimeoutSeconds ?? ''}
+            onChange={(e) => {
+              const raw = e.target.value.trim()
+              handleChange(
+                'bgTaskTimeoutSeconds',
+                raw === '' ? undefined : Math.max(0, Math.floor(Number(raw) || 0))
+              )
+            }}
+            placeholder="Inherit default (0 = run indefinitely)"
+          />
+          <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
+            How long to wait for background tasks before terminating them. 0 waits indefinitely.
+            Leave blank to inherit your per-provider default from Settings.
+            {(draft.runner ?? 'claude') !== 'claude' && ' Currently only the Claude runner acts on this.'}
+          </p>
+        </div>
 
         {/* Repository-configured MCPs toggle */}
         <div className="space-y-1.5">

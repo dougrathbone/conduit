@@ -2,11 +2,13 @@ import { spawn, ChildProcess } from 'child_process'
 import { createInterface } from 'readline'
 import * as fs from 'fs'
 import * as path from 'path'
-import type { ExecutionRun, LogEntry, TriggerContext } from '../shared/types'
+import type { ExecutionRun, LogEntry, TriggerContext, RunnerType } from '../shared/types'
 import { createRun, updateRun } from '../main/db/queries/runs'
 import { getAgent } from '../main/db/queries/agents'
 import { getRepository } from '../main/db/queries/repositories'
 import { getCredentialValue } from '../main/db/queries/agentCredentials'
+import { getRunnerTimeout } from '../main/db/queries/runnerSettings'
+import { resolveBgTaskTimeoutSeconds, bgTaskTimeoutEnvEntry } from './runnerTimeout'
 import { createWorkspace, deleteWorkspace } from '../main/execution/workspace'
 import { writeMcpConfig, deleteMcpConfig } from '../main/utils/mcp'
 import { DEV_USER_ID } from './auth/config'
@@ -33,17 +35,19 @@ const RUNNER_ENV_VAR: Record<string, string> = {
 /**
  * Build the child-process environment for a run: the host env, overlaid with
  * the agent's explicit envVars, then the acting user's stored runner credential
- * (Settings screen) injected as the runner's API-key env var. An explicit
- * per-agent envVar always wins over the stored credential.
+ * (Settings screen) injected as the runner's API-key env var, and the resolved
+ * background-task timeout injected as the runner's wait-ceiling env var. An
+ * explicit per-agent envVar always wins over both injected values.
  */
 async function buildRunnerEnv(
-  agent: { runner: string; envVars?: Record<string, string>; ownerId?: string },
+  agent: { runner: string; envVars?: Record<string, string>; ownerId?: string; bgTaskTimeoutSeconds?: number },
   startedBy?: string
 ): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = { ...process.env, ...(agent.envVars ?? {}) }
+  const ownerId = startedBy || agent.ownerId || DEV_USER_ID
+
   const envVar = RUNNER_ENV_VAR[agent.runner]
   if (envVar && !(agent.envVars && envVar in agent.envVars)) {
-    const ownerId = startedBy || agent.ownerId || DEV_USER_ID
     try {
       const cred = await getCredentialValue(ownerId, agent.runner as 'claude' | 'amp' | 'cursor')
       if (cred) env[envVar] = cred
@@ -51,6 +55,17 @@ async function buildRunnerEnv(
       console.error(`[server/runner] Failed to load ${agent.runner} credential for ${ownerId}:`, err)
     }
   }
+
+  // Background-task timeout: agent override → user's per-provider Settings value
+  // → 0 (run indefinitely). Injected as the runner's wait-ceiling env var.
+  try {
+    const userSeconds = await getRunnerTimeout(ownerId, agent.runner as RunnerType)
+    const effective = resolveBgTaskTimeoutSeconds(agent.bgTaskTimeoutSeconds, userSeconds)
+    Object.assign(env, bgTaskTimeoutEnvEntry(agent.runner, effective, agent.envVars))
+  } catch (err) {
+    console.error(`[server/runner] Failed to resolve bg-task timeout for ${ownerId}:`, err)
+  }
+
   return env
 }
 

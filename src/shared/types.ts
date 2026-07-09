@@ -25,6 +25,18 @@ export interface AgentCredentialStatus {
 }
 
 /**
+ * The acting user's per-runner background-task timeout, in **seconds** (`0` =
+ * run indefinitely, the default). Injected as the runner's wait-ceiling env var
+ * at launch — currently only Claude (`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`);
+ * Amp/cursor values are stored but have no effect yet.
+ */
+export interface RunnerTimeouts {
+  claude: number
+  amp: number
+  cursor: number
+}
+
+/**
  * Result of a data-directory sweep — how many stale run artifacts were removed.
  * Returned by both the periodic sweeper (logged) and the manual Settings trigger.
  */
@@ -195,6 +207,12 @@ export interface AgentConfig {
   repositoryId?: string
   /** Reasoning effort for the Claude runner. Ignored by other runners; unset uses the CLI default. */
   effort?: RunnerEffort
+  /**
+   * Per-agent background-task timeout in seconds (0 = run indefinitely). Overrides
+   * the user's per-provider Settings value; unset inherits it. Currently only the
+   * Claude runner acts on it (`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`).
+   */
+  bgTaskTimeoutSeconds?: number
   /**
    * When true, MCP servers configured in the repository (its `.mcp.json`) and the
    * host's personal connectors load alongside Conduit's managed MCPs. When false
@@ -494,6 +512,12 @@ export interface ConduitAPI {
     getStatus: () => Promise<AgentCredentialStatus>
     /** Store (or, with an empty string, clear) the acting user's credential for a runner. */
     set: (runner: RunnerType, value: string) => Promise<void>
+  }
+  runnerSettings: {
+    /** The acting user's per-runner background-task timeout, in seconds (0 = indefinite). */
+    getTimeouts: () => Promise<RunnerTimeouts>
+    /** Set the acting user's background-task timeout for a runner, in seconds (0 = indefinite). */
+    setTimeout: (runner: RunnerType, seconds: number) => Promise<void>
   }
   maintenance: {
     /** Run the data-directory sweeper once, now, and report what was removed. */

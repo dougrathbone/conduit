@@ -237,6 +237,12 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       checkCli: () => invoke<import('@shared/types').RunnerCliStatus[]>('runners:checkCli'),
     },
 
+    runnerSettings: {
+      getTimeouts: () => invoke<import('@shared/types').RunnerTimeouts>('runnerSettings:getTimeouts'),
+      setTimeout: (runner: RunnerType, seconds: number) =>
+        invoke<void>('runnerSettings:setTimeout', runner, seconds),
+    },
+
     agentCredentials: {
       getStatus: () => invoke<import('@shared/types').AgentCredentialStatus>('agentCreds:getStatus'),
       set: (runner: RunnerType, value: string) => invoke<void>('agentCreds:set', runner, value),

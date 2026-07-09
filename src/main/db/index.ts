@@ -231,6 +231,7 @@ export async function initDb(): Promise<void> {
     -- Idempotent column adds for databases created before these columns existed.
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS owner_id TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS effort TEXT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS bg_task_timeout_seconds BIGINT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS enable_repo_mcps BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE global_mcp_servers ADD COLUMN IF NOT EXISTS owner_id TEXT;
     ALTER TABLE publish_targets ADD COLUMN IF NOT EXISTS owner_id TEXT;
@@ -264,6 +265,14 @@ export async function initDb(): Promise<void> {
       user_id TEXT NOT NULL,
       runner TEXT NOT NULL,
       value_enc TEXT NOT NULL,
+      updated_at BIGINT NOT NULL,
+      PRIMARY KEY (user_id, runner)
+    );
+
+    CREATE TABLE IF NOT EXISTS runner_settings (
+      user_id TEXT NOT NULL,
+      runner TEXT NOT NULL,
+      bg_task_timeout_seconds BIGINT NOT NULL DEFAULT 0,
       updated_at BIGINT NOT NULL,
       PRIMARY KEY (user_id, runner)
     );

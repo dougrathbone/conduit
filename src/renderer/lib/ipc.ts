@@ -38,6 +38,9 @@ export const api = {
   get agentCredentials() {
     return getConduit().agentCredentials
   },
+  get runnerSettings() {
+    return getConduit().runnerSettings
+  },
   get maintenance() {
     return getConduit().maintenance
   },
