@@ -199,6 +199,18 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
     save({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId })
   }, [draft, save])
 
+  // Flush the pending debounced save and wait for it to land. The per-agent MCP
+  // OAuth flow needs the latest `mcpConfig` persisted so the server can resolve
+  // "{agentId}:{serverKey}" — otherwise a just-added URL server isn't found.
+  const flushSave = useCallback(async () => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current)
+      debounceRef.current = null
+    }
+    const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps } = draft
+    await save({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps })
+  }, [draft, save])
+
   useImperativeHandle(ref, () => ({
     saveNow,
     saveState,
@@ -451,6 +463,8 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
           <McpEditor
             value={draft.mcpConfig ?? { mcpServers: {} }}
             onChange={(v) => handleChange('mcpConfig', v)}
+            agentId={agentId}
+            flushSave={flushSave}
           />
         </div>
 

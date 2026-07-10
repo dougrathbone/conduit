@@ -18,9 +18,15 @@ export interface McpOAuthButtonProps {
   /** MCP server URL — used only to match completion broadcasts. */
   serverUrl: string
   serverName: string
+  /**
+   * Optional hook run just before starting the auth flow. Used by the per-agent
+   * editor (which auto-saves on a debounce) to flush the latest `mcpConfig` so
+   * the server resolves the up-to-date URL/OAuth config for "{agentId}:{serverKey}".
+   */
+  beforeAuth?: () => Promise<void> | void
 }
 
-export function McpOAuthButton({ serverId, isGlobal, serverUrl, serverName }: McpOAuthButtonProps) {
+export function McpOAuthButton({ serverId, isGlobal, serverUrl, serverName, beforeAuth }: McpOAuthButtonProps) {
   const queryClient = useQueryClient()
   const [authInProgress, setAuthInProgress] = useState(false)
   const [lastError, setLastError] = useState<string | null>(null)
@@ -46,9 +52,16 @@ export function McpOAuthButton({ serverId, isGlobal, serverUrl, serverName }: Mc
   )
   useMcpOAuthListener(handleComplete)
 
-  const handleAuthenticate = () => {
+  const handleAuthenticate = async () => {
     setLastError(null)
     setAuthInProgress(true)
+    try {
+      await beforeAuth?.()
+    } catch (err) {
+      setAuthInProgress(false)
+      setLastError(err instanceof Error ? err.message : String(err))
+      return
+    }
     startAuth.mutate(
       { serverId, isGlobal },
       { onError: (err) => { setAuthInProgress(false); setLastError(err instanceof Error ? err.message : String(err)) } }

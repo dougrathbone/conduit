@@ -1,77 +1,68 @@
-import React, { useState, useCallback } from 'react'
-import CodeMirror from '@uiw/react-codemirror'
-import { json } from '@codemirror/lang-json'
-import { oneDark } from '@codemirror/theme-one-dark'
-import { Info } from 'lucide-react'
+import React, { useState } from 'react'
+import { Info, Plus } from 'lucide-react'
+import { Button } from '@renderer/components/ui/button'
 import { useUIStore } from '@renderer/store/ui'
 import { useGlobalMcps } from '@renderer/hooks/useGlobalMcps'
-import { McpOAuthButton } from '@renderer/components/settings/McpOAuthButton'
-import { useMcpOAuthProbe } from '@renderer/hooks/useMcpOAuth'
-import type { McpServersConfig, McpServerEntry } from '@shared/types'
-
-const DEFAULT_MCP_CONFIG: McpServersConfig = { mcpServers: {} }
-
-function AgentMcpOAuthRow({ agentId, serverKey, entry }: { agentId: string; serverKey: string; entry: McpServerEntry }) {
-  const probe = useMcpOAuthProbe(entry)
-  const show = !!entry.oauth || !!probe.data?.supportsOAuth
-  return (
-    <div className="flex items-center justify-between gap-3 px-2.5 py-1.5 rounded bg-[var(--bg-primary)] border border-[var(--border)]">
-      <div className="min-w-0">
-        <p className="text-xs font-medium text-[var(--text-primary)] truncate">{serverKey}</p>
-        <p className="text-xs text-[var(--text-secondary)] font-mono truncate opacity-70">{entry.url}</p>
-      </div>
-      {show ? (
-        <McpOAuthButton serverId={`${agentId}:${serverKey}`} isGlobal={false} serverUrl={entry.url!} serverName={serverKey} />
-      ) : probe.isLoading && !entry.oauth ? (
-        <span className="text-xs text-[var(--text-secondary)] opacity-60">Checking…</span>
-      ) : (
-        <span className="text-xs text-[var(--text-secondary)] opacity-60">No authentication required</span>
-      )}
-    </div>
-  )
-}
+import { McpServerForm, type McpServerFormValues } from '@renderer/components/mcp/McpServerForm'
+import { McpServerRow } from '@renderer/components/mcp/McpServerRow'
+import type { McpServersConfig } from '@shared/types'
 
 interface McpEditorProps {
   value: McpServersConfig
   onChange: (value: McpServersConfig) => void
-  /** Optional agent ID — when provided, shows OAuth buttons for URL-type servers */
+  /** Agent ID — enables health/tools/OAuth for this agent's servers ("{agentId}:{serverKey}"). */
   agentId?: string
+  /**
+   * Flush any pending debounced save of `mcpConfig` before an OAuth flow starts,
+   * so the server resolves the up-to-date config for "{agentId}:{serverKey}".
+   */
+  flushSave?: () => Promise<void> | void
 }
 
-export function McpEditor({ value, onChange, agentId }: McpEditorProps) {
+export function McpEditor({ value, onChange, agentId, flushSave }: McpEditorProps) {
   const { theme, setShowGlobalMcpManager } = useUIStore()
   const isDark = theme === 'dark' || (theme === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
 
   const { data: globalMcps = [] } = useGlobalMcps()
   const enabledGlobalCount = globalMcps.filter((m) => m.enabled).length
 
-  const serialize = (v: McpServersConfig) => JSON.stringify(v, null, 2)
+  const [showAddForm, setShowAddForm] = useState(false)
 
-  const [text, setText] = useState(() => serialize(value ?? DEFAULT_MCP_CONFIG))
-  const [error, setError] = useState<string | null>(null)
+  const servers = value?.mcpServers ?? {}
+  const serverKeys = Object.keys(servers)
 
-  const handleChange = useCallback(
-    (val: string) => {
-      setText(val)
-      try {
-        const parsed = JSON.parse(val) as McpServersConfig
-        if (typeof parsed !== 'object' || parsed === null || !('mcpServers' in parsed)) {
-          setError('Must be an object with a "mcpServers" key')
-          return
-        }
-        setError(null)
-        onChange(parsed)
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Invalid JSON')
-      }
-    },
-    [onChange]
-  )
+  const serverIdFor = (key: string) => (agentId ? `${agentId}:${key}` : key)
 
-  // Collect all URL-type servers for the authentication panel (probe will determine per-row whether OAuth is needed)
-  const urlServers = Object.entries(value?.mcpServers ?? {}).filter(
-    ([, entry]) => (entry.type === 'url' || !!entry.url) && !!entry.url
-  )
+  const handleAdd = async (values: McpServerFormValues): Promise<{ ok: boolean; error?: string }> => {
+    if (servers[values.serverKey]) {
+      return { ok: false, error: `A server with the key "${values.serverKey}" already exists.` }
+    }
+    onChange({ mcpServers: { ...servers, [values.serverKey]: values.config } })
+    return { ok: true }
+  }
+
+  const handleSaveEdit = (oldKey: string) => async (
+    values: McpServerFormValues
+  ): Promise<{ ok: boolean; error?: string }> => {
+    const newKey = values.serverKey
+    if (newKey === oldKey) {
+      // Replace in place, preserving position.
+      onChange({ mcpServers: { ...servers, [oldKey]: values.config } })
+      return { ok: true }
+    }
+    if (servers[newKey]) {
+      return { ok: false, error: `A server with the key "${newKey}" already exists.` }
+    }
+    // Rename: drop the old key, add the new one.
+    const { [oldKey]: _removed, ...rest } = servers
+    onChange({ mcpServers: { ...rest, [newKey]: values.config } })
+    return { ok: true }
+  }
+
+  const handleDelete = (key: string) => () => {
+    const { [key]: _removed, ...rest } = servers
+    onChange({ mcpServers: rest })
+  }
 
   return (
     <div className="space-y-2">
@@ -91,37 +82,59 @@ export function McpEditor({ value, onChange, agentId }: McpEditorProps) {
         </button>
       </div>
 
-      <div className="space-y-1">
-        <div className="rounded-md border border-[var(--border)] overflow-hidden text-xs">
-          <CodeMirror
-            value={text}
-            height="200px"
-            extensions={[json()]}
-            theme={isDark ? oneDark : undefined}
-            onChange={handleChange}
-            basicSetup={{
-              lineNumbers: true,
-              foldGutter: true,
-              highlightActiveLine: true,
-              autocompletion: true,
-            }}
-          />
-        </div>
-        {error && (
-          <p className="text-xs text-red-400 flex items-center gap-1">
-            <span className="font-medium">JSON error:</span> {error}
-          </p>
-        )}
+      {/* Add button */}
+      <div className="flex justify-end">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => setShowAddForm(true)}
+          disabled={showAddForm}
+          className="gap-1.5"
+        >
+          <Plus className="h-3.5 w-3.5" />
+          Add MCP server
+        </Button>
       </div>
 
-      {/* OAuth authentication panel for URL-type servers */}
-      {agentId && urlServers.length > 0 && (
-        <div className="rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] p-2.5 space-y-2">
-          <p className="text-xs font-medium text-[var(--text-secondary)]">
-            URL-based MCP servers:
+      {/* Add form */}
+      {showAddForm && (
+        <McpServerForm
+          initial={{ name: '', serverKey: '', config: null, enabled: true }}
+          onSave={handleAdd}
+          onClose={() => setShowAddForm(false)}
+          isDark={isDark}
+          showName={false}
+          showEnabled={false}
+        />
+      )}
+
+      {/* Server list */}
+      {serverKeys.length === 0 && !showAddForm ? (
+        <div className="rounded-lg border border-dashed border-[var(--border)] px-4 py-6 text-center">
+          <p className="text-xs text-[var(--text-secondary)]">
+            No agent-specific MCP servers.
           </p>
-          {urlServers.map(([serverKey, entry]) => (
-            <AgentMcpOAuthRow key={serverKey} agentId={agentId} serverKey={serverKey} entry={entry} />
+          <p className="text-[10px] text-[var(--text-secondary)] opacity-70 mt-1">
+            Add one above, or rely on the global MCP servers.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {serverKeys.map((key) => (
+            <McpServerRow
+              key={key}
+              displayName={key}
+              serverKey={key}
+              config={servers[key]}
+              isDark={isDark}
+              serverId={serverIdFor(key)}
+              isGlobal={false}
+              onSave={handleSaveEdit(key)}
+              onDelete={handleDelete(key)}
+              showName={false}
+              showEnabled={false}
+              beforeAuth={flushSave}
+            />
           ))}
         </div>
       )}
