@@ -14,6 +14,7 @@ import { writeMcpConfig, deleteMcpConfig } from '../main/utils/mcp'
 import { DEV_USER_ID } from './auth/config'
 import { LOGS_DIR } from '../main/utils/paths'
 import { createWorktree, removeWorktree, configureWorktreeGit } from './gitOps'
+import { buildRunFailureReport } from './runFailure'
 import { resolvePushCredential } from './githubApp'
 import { buildClaudeArgs, parseClaudeOutput } from '../main/execution/adapters/claude'
 import { buildAmpArgs, parseAmpOutput } from '../main/execution/adapters/amp'
@@ -488,6 +489,14 @@ export async function startRunServer(
   // Process close
   child.on('close', (code) => {
     const status = code === 0 ? 'completed' : 'failed'
+    // Surface failed runs to the error reporter — a non-zero exit (or a process
+    // killed when the disk filled) was previously only written to the DB and
+    // never captured. Skip when already finalized: a spawn 'error' or an
+    // explicit stopRun has its own handling and would otherwise double-report.
+    if (status === 'failed' && !finalized) {
+      const report = buildRunFailureReport({ runId, runner: agent.runner, exitCode: code, lastLine })
+      reporter.captureMessage(report.message, report.level, report.ctx)
+    }
     finalizeRun(status, code)
   })
 

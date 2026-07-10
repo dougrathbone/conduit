@@ -15,7 +15,24 @@ export function redactCredentials(s: string): string {
  * Run a git command and return a promise that resolves on success
  * or rejects with stderr on failure.
  */
-function runGit(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}): Promise<string> {
+/**
+ * Default wall-clock bound for a git invocation. A git process can hang forever
+ * — blocked on a `.git` lock left by a crashed process, or (with no TTY) on a
+ * credential prompt — and without a bound that hang propagates: a stuck
+ * `git worktree remove` inside the data-dir sweep never resolves, and because
+ * the sweep coalesces on one in-flight promise it silently disables ALL cleanup
+ * (periodic, post-run, and the manual "Clean up now" button). Every git call
+ * therefore runs under a timeout that SIGKILLs the child and rejects. The
+ * default is generous enough for a large clone/fetch; callers whose op should be
+ * fast (worktree remove/prune) pass a shorter `timeoutMs`.
+ */
+export const DEFAULT_GIT_TIMEOUT_MS = 10 * 60 * 1000 // 10 min
+
+export function runGit(
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}
+): Promise<string> {
+  const timeoutMs = options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS
   return new Promise((resolve, reject) => {
     const child = spawn('git', args, {
       cwd: options.cwd,
@@ -25,11 +42,25 @@ function runGit(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv
 
     let stdout = ''
     let stderr = ''
+    let settled = false
+
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      // SIGKILL (not SIGTERM): a git process wedged on a lock may ignore TERM.
+      child.kill('SIGKILL')
+      reject(new Error(redactCredentials(`git ${args[0]} timed out after ${timeoutMs}ms`)))
+    }, timeoutMs)
+    // Don't let a pending git timeout keep the event loop (or a test) alive.
+    if (typeof timer.unref === 'function') timer.unref()
 
     child.stdout.on('data', (data: Buffer) => { stdout += data.toString() })
     child.stderr.on('data', (data: Buffer) => { stderr += data.toString() })
 
     child.on('close', (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
       if (code === 0) {
         resolve(stdout.trim())
       } else {
@@ -38,6 +69,9 @@ function runGit(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv
     })
 
     child.on('error', (err) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
       reject(new Error(`Failed to spawn git: ${err.message}`))
     })
   })
@@ -142,20 +176,52 @@ export async function configureWorktreeGit(
   }
 }
 
+/** Worktree remove/prune should be quick; bound them well under the default so a
+ *  lock-wedged git can't stall a sweep for 10 minutes per leaked worktree. */
+const WORKTREE_GIT_TIMEOUT_MS = 2 * 60 * 1000 // 2 min
+
 /**
- * Remove a git worktree. Falls back to fs.rmSync if git command fails.
+ * Remove a git worktree and guarantee the space is reclaimed — or throw.
+ *
+ * A worktree checkout of a large monorepo is gigabytes and ~30k files; leaving
+ * one behind leaks disk. The prior version swallowed every failure, so when a
+ * removal failed (a lock-wedged `git worktree remove` that hung with no timeout,
+ * or an `fs.rmSync` that errored) the worktree silently persisted and the data
+ * dir filled until runs crashed. Now: try git's own removal (deregisters the
+ * admin entry cleanly), then force-delete the directory regardless, then prune
+ * stale refs — all bounded by a timeout so nothing can hang. If the directory
+ * still exists afterwards the space was NOT reclaimed; we throw so the caller
+ * (the sweeper / per-run cleanup) reports it instead of leaking in silence.
  */
 export async function removeWorktree(clonePath: string, worktreePath: string): Promise<void> {
-  try {
-    await runGit(['worktree', 'remove', '--force', worktreePath], { cwd: clonePath })
-  } catch {
-    // Fallback: remove the directory directly
+  // 1. Prefer git's own removal — it also deregisters the worktree admin entry,
+  //    so a later `git worktree add <branch>` won't hit "already checked out".
+  await runGit(['worktree', 'remove', '--force', worktreePath], {
+    cwd: clonePath,
+    timeoutMs: WORKTREE_GIT_TIMEOUT_MS,
+  }).catch(() => {
+    /* fall through to a direct filesystem removal */
+  })
+
+  // 2. Whatever git did, make sure the directory is actually gone.
+  if (fs.existsSync(worktreePath)) {
     try {
-      fs.rmSync(worktreePath, { recursive: true, force: true })
-      // Also prune stale worktree references
-      await runGit(['worktree', 'prune'], { cwd: clonePath }).catch(() => {})
+      fs.rmSync(worktreePath, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
     } catch {
-      // Ignore — directory may already be gone
+      // Reported via the survival check below.
     }
+  }
+
+  // 3. Drop any stale admin ref a direct removal would leave behind (best-effort).
+  await runGit(['worktree', 'prune'], { cwd: clonePath, timeoutMs: WORKTREE_GIT_TIMEOUT_MS }).catch(
+    () => {}
+  )
+
+  // 4. Still present ⇒ space not reclaimed. Surface it — silent failure here is
+  //    exactly how the volume filled.
+  if (fs.existsSync(worktreePath)) {
+    throw new Error(
+      `Failed to remove worktree ${worktreePath}: directory still present after git and filesystem removal`
+    )
   }
 }

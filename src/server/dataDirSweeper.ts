@@ -404,6 +404,79 @@ export function warmStorageUsage(): void {
   )
 }
 
+// ── Disk-pressure telemetry ─────────────────────────────────────────────────
+//
+// Even with the sweeper working, the data volume can fill (a burst of runs, a
+// leak the sweeper can't reach, an oversized clone). When it does, `git worktree
+// add` dies with ENOSPC and every run crashes — with no prior warning. These
+// helpers surface fill level to the error reporter *before* that happens, so the
+// operator sees "80% full" instead of only the eventual crash.
+
+export type DiskPressureLevel = 'ok' | 'warning' | 'critical'
+export const DISK_WARNING_FRACTION = 0.8
+export const DISK_CRITICAL_FRACTION = 0.9
+
+/** Bucket a used-space fraction (0–1) into an alerting level. */
+export function classifyDiskUsage(usedFraction: number): DiskPressureLevel {
+  if (usedFraction >= DISK_CRITICAL_FRACTION) return 'critical'
+  if (usedFraction >= DISK_WARNING_FRACTION) return 'warning'
+  return 'ok'
+}
+
+export interface DiskPressure {
+  totalBytes: number
+  freeBytes: number
+  usedFraction: number
+}
+
+/**
+ * Real filesystem usage of the volume backing `dir`, via `statfs` (the actual
+ * device capacity/free — unlike {@link estimateStorageUsage}, which only sizes
+ * Conduit's own artifacts). `freeBytes` uses blocks available to an unprivileged
+ * user. Never returns a fraction outside [0, 1].
+ */
+export async function measureDiskPressure(dir: string = DATA_DIR): Promise<DiskPressure> {
+  const st = await fs.promises.statfs(dir)
+  const totalBytes = st.bsize * st.blocks
+  const freeBytes = st.bsize * st.bavail
+  const usedFraction =
+    totalBytes > 0 ? Math.min(1, Math.max(0, (totalBytes - freeBytes) / totalBytes)) : 0
+  return { totalBytes, freeBytes, usedFraction }
+}
+
+/**
+ * Measure the data volume and emit telemetry: always a breadcrumb (so any later
+ * event carries the fill level), plus a warning/error `captureMessage` once the
+ * volume crosses {@link DISK_WARNING_FRACTION}/{@link DISK_CRITICAL_FRACTION}.
+ * Fire-and-forget; never throws.
+ */
+export async function reportDiskPressure(dir: string = DATA_DIR): Promise<DiskPressure | null> {
+  let pressure: DiskPressure
+  try {
+    pressure = await measureDiskPressure(dir)
+  } catch (err) {
+    reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'diskPressure' } })
+    return null
+  }
+  const level = classifyDiskUsage(pressure.usedFraction)
+  const pct = Math.round(pressure.usedFraction * 100)
+  const freeMb = Math.round(pressure.freeBytes / (1024 * 1024))
+  reporter.addBreadcrumb({
+    category: 'disk',
+    message: `data volume ${pct}% used, ${freeMb} MB free`,
+    level: level === 'critical' ? 'error' : level === 'warning' ? 'warning' : 'info',
+    data: { ...pressure, level },
+  })
+  if (level !== 'ok') {
+    reporter.captureMessage(
+      `Conduit data volume ${pct}% full (${freeMb} MB free) — agent runs will fail with ENOSPC as it fills.`,
+      level === 'critical' ? 'error' : 'warning',
+      { tags: { component: 'dataDirSweeper', op: 'diskPressure', level }, extra: { ...pressure } }
+    )
+  }
+  return pressure
+}
+
 /**
  * Background service: one immediate sweep on start (reclaiming anything left by a
  * previous process), then a sweep every `intervalMs`.
@@ -419,11 +492,15 @@ export class DataDirSweeper {
       .catch((err) =>
         reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'startup' } })
       )
-      .finally(() => warmStorageUsage())
+      .finally(() => {
+        warmStorageUsage()
+        void reportDiskPressure()
+      })
     this.intervalId = setInterval(() => {
       sweepOnce().catch((err) =>
         reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'periodic' } })
       )
+      void reportDiskPressure()
     }, intervalMs)
   }
 
