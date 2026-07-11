@@ -4,7 +4,7 @@ import * as path from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { REPOS_DIR, DATA_DIR } from '../main/utils/paths'
-import { removeWorktree } from './gitOps'
+import { removeWorktree, getClonesInProgress } from './gitOps'
 import { deleteWorkspace } from '../main/execution/workspace'
 import { getActiveWorkspacePaths, getActiveRunIds } from './runner'
 import { getAllRepositoryIds } from '../main/db/queries/repositories'
@@ -192,6 +192,8 @@ export interface SweepCandidates {
   logs: SweepCandidate[]
   /** Bare clones (repos/<id>) whose repository no longer exists — orphans only. */
   bareClones: SweepCandidate[]
+  /** Leftover clone temp dirs (repos/<id>.cloning) from an interrupted clone. */
+  cloningTmp: SweepCandidate[]
 }
 
 /** Overrides for the directories/active-sets scanned — injected in tests. */
@@ -205,6 +207,9 @@ export interface SweepScanOptions {
    *  is NOT in this set is an orphan a sweep may reclaim. Omitted ⇒ bare clones
    *  are left untouched — the safe default: never delete a clone we can't verify. */
   knownRepoIds?: Set<string>
+  /** Absolute paths of clone temp dirs an in-flight clone is writing on this pod;
+   *  such a `.cloning` dir is spared. Omitted ⇒ read from the live gitOps set. */
+  activeClonePaths?: Set<string>
 }
 
 /**
@@ -224,14 +229,29 @@ export function collectSweepCandidates(opts: SweepScanOptions = {}): SweepCandid
   const activePaths = opts.activePaths ?? getActiveWorkspacePaths()
   const activeRunIds = opts.activeRunIds ?? getActiveRunIds()
   const knownRepoIds = opts.knownRepoIds
+  const activeClonePaths = opts.activeClonePaths ?? getClonesInProgress()
 
   // 1. Git worktrees (reposDir/<repoId>/worktrees-run/<uuid>) and, alongside,
-  //    orphaned bare clones (reposDir/<repoId> whose repository no longer exists).
+  //    orphaned bare clones (reposDir/<repoId> whose repository no longer exists)
+  //    and leftover clone temp dirs (reposDir/<repoId>.cloning).
   const worktrees: WorktreeCandidate[] = []
   const bareClones: SweepCandidate[] = []
+  const cloningTmp: SweepCandidate[] = []
   for (const repoEntry of listDir(reposDir)) {
     if (!repoEntry.isDirectory()) continue
     const repoId = repoEntry.name
+    // A leftover clone temp (repos/<id>.cloning) from an interrupted clone — not a
+    // real bare clone. Reclaimable unless an in-flight clone is writing it.
+    if (repoId.endsWith('.cloning')) {
+      const p = path.join(reposDir, repoId)
+      cloningTmp.push({
+        key: p,
+        path: p,
+        mtimeMs: safeMtimeMs(p),
+        protectedByActive: activeClonePaths.has(p),
+      })
+      continue
+    }
     const clonePath = path.join(reposDir, repoId)
     const worktreesDir = path.join(clonePath, 'worktrees-run')
     for (const e of listDir(worktreesDir)) {
@@ -299,7 +319,7 @@ export function collectSweepCandidates(opts: SweepScanOptions = {}): SweepCandid
     })
   }
 
-  return { worktrees, workspaces, mcpConfigs, logs, bareClones }
+  return { worktrees, workspaces, mcpConfigs, logs, bareClones, cloningTmp }
 }
 
 /**
@@ -338,13 +358,14 @@ export function sweepOnce(now: number = Date.now()): Promise<SweepResult> {
  */
 async function runSweep(now: number): Promise<SweepResult> {
   const knownRepoIds = await safeKnownRepoIds()
-  const { worktrees, workspaces, mcpConfigs, logs, bareClones } = collectSweepCandidates({ knownRepoIds })
+  const { worktrees, workspaces, mcpConfigs, logs, bareClones, cloningTmp } = collectSweepCandidates({ knownRepoIds })
   const result: SweepResult = {
     worktreesRemoved: 0,
     workspacesRemoved: 0,
     mcpConfigsRemoved: 0,
     logsRemoved: 0,
     bareClonesRemoved: 0,
+    cloningTmpRemoved: 0,
   }
 
   // 1. Git worktrees: reposDir/<repoId>/worktrees-run/<uuid>
@@ -392,17 +413,31 @@ async function runSweep(now: number): Promise<SweepResult> {
     }
   }
 
+  // 6. Leftover clone temp dirs (repos/<id>.cloning) from a clone interrupted by a
+  //    crash. An in-flight clone's temp is spared (protectedByActive); the short
+  //    grace covers one that just started but hasn't registered as active yet.
+  for (const stale of selectStale(cloningTmp, { now, graceMs: SWEEP_GRACE_MS })) {
+    try {
+      fs.rmSync(stale.path, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+      if (!fs.existsSync(stale.path)) result.cloningTmpRemoved++
+    } catch (err) {
+      reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'cloningTmp' } })
+    }
+  }
+
   const total =
     result.worktreesRemoved +
     result.workspacesRemoved +
     result.mcpConfigsRemoved +
     result.logsRemoved +
-    result.bareClonesRemoved
+    result.bareClonesRemoved +
+    result.cloningTmpRemoved
   if (total > 0) {
     console.log(
       `[dataDirSweeper] Removed ${result.worktreesRemoved} worktree(s), ` +
         `${result.workspacesRemoved} workspace(s), ${result.mcpConfigsRemoved} MCP config(s), ` +
-        `${result.logsRemoved} log(s), ${result.bareClonesRemoved} bare clone(s).`
+        `${result.logsRemoved} log(s), ${result.bareClonesRemoved} bare clone(s), ` +
+        `${result.cloningTmpRemoved} clone temp(s).`
     )
   }
   // A sweep changes on-disk sizes; drop the cached usage so the next read (and
@@ -443,7 +478,7 @@ export async function estimateStorageUsage(opts: StorageScanOptions = {}): Promi
   // inject an explicit reposDir and stay DB-free.
   const knownRepoIds =
     opts.knownRepoIds ?? (opts.reposDir === undefined ? await safeKnownRepoIds() : undefined)
-  const { worktrees, workspaces, mcpConfigs, logs, bareClones } = collectSweepCandidates({
+  const { worktrees, workspaces, mcpConfigs, logs, bareClones, cloningTmp } = collectSweepCandidates({
     ...opts,
     knownRepoIds,
   })
@@ -470,6 +505,7 @@ export async function estimateStorageUsage(opts: StorageScanOptions = {}): Promi
   for (const mc of selectStale(mcpConfigs, { now, graceMs })) reclaimableBytes += await measureFile(mc.path)
   for (const lg of selectStale(logs, { now, graceMs: LOG_RETENTION_MS })) reclaimableBytes += await measureFile(lg.path)
   for (const bc of reclaimableClones) reclaimableBytes += await measureDir(bc.path)
+  for (const ct of selectStale(cloningTmp, { now, graceMs })) reclaimableBytes += await measureDir(ct.path)
 
   return { totalBytes, reclaimableBytes }
 }

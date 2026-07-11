@@ -10,7 +10,10 @@ vi.mock('./runner', () => ({
   getActiveWorkspacePaths: () => new Set<string>(),
   getActiveRunIds: () => new Set<string>(),
 }))
-vi.mock('./gitOps', () => ({ removeWorktree: vi.fn(async () => {}) }))
+vi.mock('./gitOps', () => ({
+  removeWorktree: vi.fn(async () => {}),
+  getClonesInProgress: () => new Set<string>(),
+}))
 vi.mock('../main/execution/workspace', () => ({ deleteWorkspace: vi.fn(() => {}) }))
 vi.mock('./observability', () => ({ reporter: { captureException: vi.fn() } }))
 vi.mock('../main/utils/paths', () => ({

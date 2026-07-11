@@ -119,6 +119,21 @@ export async function testRepoConnection(url: string, pat?: string): Promise<str
  * repo forever instead of re-cloning. So the final path only ever appears once a
  * clone has fully succeeded, and any partial output is removed on failure.
  */
+/**
+ * Bare-clone temp paths (`<clonePath>.cloning`) currently being written by an
+ * in-flight clone on this process. The data-dir sweeper consults this so it never
+ * reclaims a clone temp that's actively being populated: a large clone can run
+ * for minutes (longer than the sweep grace) and the temp dir's mtime doesn't
+ * reflect deep writes, so time alone can't distinguish "in progress" from
+ * "abandoned by a crash".
+ */
+const clonesInProgress = new Set<string>()
+
+/** Clone temp paths currently in flight on this process (see {@link cloneRepo}). */
+export function getClonesInProgress(): ReadonlySet<string> {
+  return clonesInProgress
+}
+
 export async function cloneRepo(
   url: string,
   clonePath: string,
@@ -127,17 +142,22 @@ export async function cloneRepo(
 ): Promise<void> {
   const authUrl = buildAuthUrl(url, pat)
   const tmpPath = `${clonePath}.cloning`
-  // Clear any leftover from a previously-interrupted clone before starting.
-  fs.rmSync(tmpPath, { recursive: true, force: true })
+  clonesInProgress.add(tmpPath)
   try {
-    await runGit(['clone', '--bare', '--single-branch', '--branch', branch, authUrl, tmpPath])
-  } catch (err) {
+    // Clear any leftover from a previously-interrupted clone before starting.
     fs.rmSync(tmpPath, { recursive: true, force: true })
-    throw err
+    try {
+      await runGit(['clone', '--bare', '--single-branch', '--branch', branch, authUrl, tmpPath])
+    } catch (err) {
+      fs.rmSync(tmpPath, { recursive: true, force: true })
+      throw err
+    }
+    // Publish the completed clone into its final location.
+    fs.rmSync(clonePath, { recursive: true, force: true })
+    fs.renameSync(tmpPath, clonePath)
+  } finally {
+    clonesInProgress.delete(tmpPath)
   }
-  // Publish the completed clone into its final location.
-  fs.rmSync(clonePath, { recursive: true, force: true })
-  fs.renameSync(tmpPath, clonePath)
 }
 
 /**

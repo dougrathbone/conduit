@@ -51,6 +51,8 @@ export interface SweepResult {
   logsRemoved: number
   /** Bare clones removed from repos/ whose repository no longer exists. */
   bareClonesRemoved: number
+  /** Leftover clone temp dirs (repos/<id>.cloning) removed after an interrupted clone. */
+  cloningTmpRemoved: number
 }
 
 /**
