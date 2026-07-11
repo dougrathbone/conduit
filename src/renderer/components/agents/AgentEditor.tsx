@@ -1,17 +1,16 @@
 import React, { useEffect, useState, useCallback, useRef, useImperativeHandle, forwardRef } from 'react'
-import { Loader2, Send, Share2 } from 'lucide-react'
+import { Loader2, Send } from 'lucide-react'
 import { Input } from '@renderer/components/ui/input'
-import { Button } from '@renderer/components/ui/button'
 import { PromptEditor } from './PromptEditor'
 import { EnvVarEditor } from './EnvVarEditor'
 import { McpEditor } from './McpEditor'
 import { TriggerEditor } from './TriggerEditor'
-import { ShareDialog } from '@renderer/components/ShareDialog'
+import { CollapsibleSection } from './CollapsibleSection'
 import { useAgent, useUpdateAgent, useRunnerClis } from '@renderer/hooks/useAgents'
 import { usePublishTargets } from '@renderer/hooks/usePublishTargets'
 import { useRepositories, useRepoSyncEvents } from '@renderer/hooks/useRepositories'
+import { useTriggers } from '@renderer/hooks/useTriggers'
 import { useUIStore } from '@renderer/store/ui'
-import { useAuth } from '@renderer/contexts/AuthContext'
 import { cn } from '@renderer/lib/utils'
 import type { AgentConfig, RunnerType, RunnerEffort } from '@shared/types'
 
@@ -117,11 +116,9 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
   const updateAgent = useUpdateAgent()
   const { data: allPublishTargets = [] } = usePublishTargets()
   const { data: allRepos = [] } = useRepositories()
+  const { data: triggers = [] } = useTriggers(agentId)
   useRepoSyncEvents()
   const { setShowPublishTargets, setShowRepositories } = useUIStore()
-  const { user } = useAuth()
-  const [showShareDialog, setShowShareDialog] = useState(false)
-  const isOwner = agent?.ownerId === user?.id
 
   const [draft, setDraft] = useState<Partial<AgentConfig>>({})
   const [saveState, setSaveState] = useState<SaveState>('idle')
@@ -248,192 +245,100 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
     )
   }
 
+  // Collapsed-section summaries — keep each section's state visible at a glance.
+  const runnerLabel =
+    RUNNER_OPTIONS.find((o) => o.value === (draft.runner ?? 'claude'))?.label ?? draft.runner
+  const identitySummary = `${draft.name?.trim() || 'Unnamed'} · ${runnerLabel}`
+
+  const promptLen = (draft.prompt ?? '').length
+  const promptSummary = promptLen > 0 ? `${promptLen} chars` : 'empty'
+
+  const selectedRepo = allRepos.find((r) => r.id === draft.repositoryId)
+  const workspaceLabel = selectedRepo
+    ? `${selectedRepo.name} (${selectedRepo.defaultBranch})`
+    : draft.workingDir
+    ? 'custom dir'
+    : 'ephemeral'
+  const timeoutLabel =
+    draft.bgTaskTimeoutSeconds != null ? `timeout ${draft.bgTaskTimeoutSeconds}s` : 'default timeout'
+  const workspaceSummary = `${workspaceLabel} · ${timeoutLabel} · repo MCPs ${draft.enableRepoMcps ? 'on' : 'off'}`
+
+  const mcpCount = Object.keys(draft.mcpConfig?.mcpServers ?? {}).length
+  const envCount = Object.keys(draft.envVars ?? {}).length
+  const publishCount = (draft.publishTargetIds ?? []).length
+  const toolsParts = [
+    mcpCount ? `${mcpCount} MCP server${mcpCount === 1 ? '' : 's'}` : null,
+    envCount ? `${envCount} env var${envCount === 1 ? '' : 's'}` : null,
+    publishCount ? `${publishCount} publish target${publishCount === 1 ? '' : 's'}` : null,
+  ].filter(Boolean)
+  const toolsSummary = toolsParts.length > 0 ? toolsParts.join(' · ') : 'not configured'
+
+  const triggerCount = triggers.length
+  const automationSummary =
+    triggerCount > 0 ? `${triggerCount} trigger${triggerCount === 1 ? '' : 's'}` : 'no triggers — runs on demand'
+
   return (
     <div className="flex flex-col h-full overflow-y-auto">
-      <div className="flex-1 px-6 py-5 space-y-6 max-w-2xl">
-        {/* Name + Share */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
+      <div className="flex-1 px-6 py-5 space-y-3 max-w-3xl">
+        {/* Identity */}
+        <CollapsibleSection title="Identity" summary={identitySummary}>
+          <div className="space-y-1.5">
             <label className="block text-xs font-medium text-[var(--text-secondary)]">
               Name
             </label>
-            {isOwner && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setShowShareDialog(true)}
-                className="gap-1.5 text-xs h-7 px-2"
-              >
-                <Share2 className="h-3.5 w-3.5" />
-                Share
-              </Button>
-            )}
-          </div>
-          <Input
-            ref={nameInputRef}
-            value={draft.name ?? ''}
-            onChange={(e) => handleChange('name', e.target.value)}
-            placeholder="My Agent"
-          />
-        </div>
-
-        {/* Runner */}
-        <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-[var(--text-secondary)]">
-            Runner
-          </label>
-          <RunnerPicker
-            value={draft.runner ?? 'claude'}
-            onChange={(r) => handleChange('runner', r)}
-          />
-        </div>
-
-        {/* Reasoning effort — Claude only (maps to `claude --effort`) */}
-        {(draft.runner ?? 'claude') === 'claude' && (
-          <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-[var(--text-secondary)]">
-              Reasoning Effort
-            </label>
-            <div className="flex gap-1 p-0.5 rounded-md bg-[var(--bg-primary)] border border-[var(--border)]">
-              {([undefined, 'low', 'medium', 'high', 'xhigh', 'max'] as (RunnerEffort | undefined)[]).map((level) => {
-                const active = (draft.effort ?? undefined) === level
-                return (
-                  <button
-                    key={level ?? 'default'}
-                    type="button"
-                    onClick={() => handleChange('effort', level)}
-                    className={cn(
-                      'flex-1 text-xs py-1.5 rounded-md transition-colors font-medium capitalize',
-                      active
-                        ? 'bg-[var(--bg-secondary)] text-[var(--text-primary)] shadow-sm'
-                        : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                    )}
-                  >
-                    {level ?? 'Default'}
-                  </button>
-                )
-              })}
-            </div>
-            <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
-              Higher effort lets Claude reason longer. Default uses the CLI's built-in setting.
-            </p>
-          </div>
-        )}
-
-        {/* Background-task timeout — per-agent override (0 = run indefinitely) */}
-        <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-[var(--text-secondary)]">
-            Background Task Timeout (seconds)
-          </label>
-          <Input
-            type="number"
-            min={0}
-            value={draft.bgTaskTimeoutSeconds ?? ''}
-            onChange={(e) => {
-              const raw = e.target.value.trim()
-              handleChange(
-                'bgTaskTimeoutSeconds',
-                raw === '' ? undefined : Math.max(0, Math.floor(Number(raw) || 0))
-              )
-            }}
-            placeholder="Inherit default (0 = run indefinitely)"
-          />
-          <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
-            How long to wait for background tasks before terminating them. 0 waits indefinitely.
-            Leave blank to inherit your per-provider default from Settings.
-            {(draft.runner ?? 'claude') !== 'claude' && ' Currently only the Claude runner acts on this.'}
-          </p>
-        </div>
-
-        {/* Repository-configured MCPs toggle */}
-        <div className="space-y-1.5">
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={draft.enableRepoMcps ?? false}
-              onChange={(e) => handleChange('enableRepoMcps', e.target.checked)}
-              className="rounded border-[var(--border)] accent-[var(--accent)]"
-            />
-            <span className="text-xs font-medium text-[var(--text-primary)]">
-              Enable repository-configured MCP servers
-            </span>
-          </label>
-          <p className="text-[10px] text-[var(--text-secondary)] opacity-70 pl-6">
-            When on, MCP servers defined in the repository's own <code className="font-mono">.mcp.json</code> (and the
-            host's personal Claude connectors) load alongside Conduit's managed MCPs. When off, runs use only Conduit's
-            global and agent MCP servers for a clean, reproducible environment.
-          </p>
-        </div>
-
-        {/* Repository */}
-        <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-[var(--text-secondary)]">
-            Repository
-          </label>
-          <select
-            value={draft.repositoryId ?? ''}
-            onChange={(e) => handleChange('repositoryId', e.target.value || undefined)}
-            className="w-full h-9 rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] px-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
-          >
-            <option value="">None (ephemeral workspace)</option>
-            {allRepos.map((repo) => (
-              <option key={repo.id} value={repo.id}>
-                {repo.name} ({repo.defaultBranch}) — {repo.syncStatus === 'ready' ? 'ready' : repo.syncStatus}
-              </option>
-            ))}
-          </select>
-          {draft.repositoryId && (() => {
-            const repo = allRepos.find((r) => r.id === draft.repositoryId)
-            if (!repo) return null
-            return (
-              <div className="flex items-center gap-2 text-xs">
-                <div className={cn(
-                  'w-2 h-2 rounded-full',
-                  repo.syncStatus === 'ready' ? 'bg-green-500' :
-                  repo.syncStatus === 'error' ? 'bg-red-500' :
-                  repo.syncStatus === 'cloning' || repo.syncStatus === 'syncing' ? 'bg-yellow-500' :
-                  'bg-[var(--text-secondary)]'
-                )} />
-                <span className="text-[var(--text-secondary)]">
-                  {repo.syncStatus === 'ready' ? 'Ready' : repo.syncStatus === 'error' ? `Error: ${repo.syncError}` : repo.syncStatus}
-                </span>
-              </div>
-            )
-          })()}
-          <p className="text-xs text-[var(--text-secondary)]">
-            Assign a managed repository to give the agent an isolated worktree per run.{' '}
-            <button
-              onClick={() => setShowRepositories(true)}
-              className="text-[var(--accent)] hover:underline"
-            >
-              Manage repositories
-            </button>
-          </p>
-        </div>
-
-        {/* Working Directory (hidden when repo is selected) */}
-        {!draft.repositoryId && (
-          <div className="space-y-1.5">
-            <label className="block text-xs font-medium text-[var(--text-secondary)]">
-              Working Directory
-            </label>
             <Input
-              value={draft.workingDir ?? ''}
-              onChange={(e) => handleChange('workingDir', e.target.value || undefined)}
-              placeholder="Leave blank for ephemeral workspace (e.g. /Users/you/code/myrepo)"
-              className="font-mono text-xs"
+              ref={nameInputRef}
+              value={draft.name ?? ''}
+              onChange={(e) => handleChange('name', e.target.value)}
+              placeholder="My Agent"
             />
-            <p className="text-xs text-[var(--text-secondary)]">
-              If set, the agent runs inside this directory instead of a temporary workspace.
-            </p>
           </div>
-        )}
 
-        {/* Prompt */}
-        <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-[var(--text-secondary)]">
-            Prompt
-          </label>
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[var(--text-secondary)]">
+              Runner
+            </label>
+            <RunnerPicker
+              value={draft.runner ?? 'claude'}
+              onChange={(r) => handleChange('runner', r)}
+            />
+          </div>
+
+          {/* Reasoning effort — Claude only (maps to `claude --effort`) */}
+          {(draft.runner ?? 'claude') === 'claude' && (
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-[var(--text-secondary)]">
+                Reasoning Effort
+              </label>
+              <div className="flex gap-1 p-0.5 rounded-md bg-[var(--bg-primary)] border border-[var(--border)]">
+                {([undefined, 'low', 'medium', 'high', 'xhigh', 'max'] as (RunnerEffort | undefined)[]).map((level) => {
+                  const active = (draft.effort ?? undefined) === level
+                  return (
+                    <button
+                      key={level ?? 'default'}
+                      type="button"
+                      onClick={() => handleChange('effort', level)}
+                      className={cn(
+                        'flex-1 text-xs py-1.5 rounded-md transition-colors font-medium capitalize',
+                        active
+                          ? 'bg-[var(--bg-secondary)] text-[var(--text-primary)] shadow-sm'
+                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                      )}
+                    >
+                      {level ?? 'Default'}
+                    </button>
+                  )
+                })}
+              </div>
+              <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
+                Higher effort lets Claude reason longer. Default uses the CLI's built-in setting.
+              </p>
+            </div>
+          )}
+        </CollapsibleSection>
+
+        {/* Prompt — the heart of the agent */}
+        <CollapsibleSection title="Prompt" hero summary={promptSummary}>
           <PromptEditor
             value={draft.prompt ?? ''}
             onChange={(v) => handleChange('prompt', v)}
@@ -442,116 +347,224 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
             agentId={agentId}
             runner={draft.runner ?? agent.runner}
           />
-        </div>
+        </CollapsibleSection>
 
-        {/* Environment Variables */}
-        <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-[var(--text-secondary)]">
-            Environment Variables
-          </label>
-          <EnvVarEditor
-            value={draft.envVars ?? {}}
-            onChange={(v) => handleChange('envVars', v)}
-          />
-        </div>
-
-        {/* MCP Config */}
-        <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-[var(--text-secondary)]">
-            MCP Configuration
-          </label>
-          <McpEditor
-            value={draft.mcpConfig ?? { mcpServers: {} }}
-            onChange={(v) => handleChange('mcpConfig', v)}
-            agentId={agentId}
-            flushSave={flushSave}
-          />
-        </div>
-
-        {/* Publish Targets */}
-        <div className="space-y-1.5">
-          <label className="block text-xs font-medium text-[var(--text-secondary)]">
-            Publish Targets
-          </label>
-          {allPublishTargets.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-[var(--border)] px-4 py-3 text-center">
-              <p className="text-xs text-[var(--text-secondary)]">
-                No publish targets configured.
-              </p>
+        {/* Workspace & execution */}
+        <CollapsibleSection title="Workspace & execution" defaultOpen={false} summary={workspaceSummary}>
+          {/* Repository */}
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[var(--text-secondary)]">
+              Repository
+            </label>
+            <select
+              value={draft.repositoryId ?? ''}
+              onChange={(e) => handleChange('repositoryId', e.target.value || undefined)}
+              className="w-full h-9 rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] px-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
+            >
+              <option value="">None (ephemeral workspace)</option>
+              {allRepos.map((repo) => (
+                <option key={repo.id} value={repo.id}>
+                  {repo.name} ({repo.defaultBranch}) — {repo.syncStatus === 'ready' ? 'ready' : repo.syncStatus}
+                </option>
+              ))}
+            </select>
+            {draft.repositoryId && (() => {
+              const repo = allRepos.find((r) => r.id === draft.repositoryId)
+              if (!repo) return null
+              return (
+                <div className="flex items-center gap-2 text-xs">
+                  <div className={cn(
+                    'w-2 h-2 rounded-full',
+                    repo.syncStatus === 'ready' ? 'bg-green-500' :
+                    repo.syncStatus === 'error' ? 'bg-red-500' :
+                    repo.syncStatus === 'cloning' || repo.syncStatus === 'syncing' ? 'bg-yellow-500' :
+                    'bg-[var(--text-secondary)]'
+                  )} />
+                  <span className="text-[var(--text-secondary)]">
+                    {repo.syncStatus === 'ready' ? 'Ready' : repo.syncStatus === 'error' ? `Error: ${repo.syncError}` : repo.syncStatus}
+                  </span>
+                </div>
+              )
+            })()}
+            <p className="text-xs text-[var(--text-secondary)]">
+              Assign a managed repository to give the agent an isolated worktree per run.{' '}
               <button
-                onClick={() => setShowPublishTargets(true)}
-                className="text-xs text-[var(--accent)] hover:underline mt-1"
+                onClick={() => setShowRepositories(true)}
+                className="text-[var(--accent)] hover:underline"
               >
-                Create a publish target
+                Manage repositories
               </button>
-            </div>
-          ) : (
+            </p>
+          </div>
+
+          {/* Working Directory (hidden when repo is selected) */}
+          {!draft.repositoryId && (
             <div className="space-y-1.5">
-              {allPublishTargets.map((target) => {
-                const selected = (draft.publishTargetIds ?? []).includes(target.id)
-                return (
-                  <button
-                    key={target.id}
-                    type="button"
-                    onClick={() => {
-                      const current = draft.publishTargetIds ?? []
-                      const next = selected
-                        ? current.filter((id) => id !== target.id)
-                        : [...current, target.id]
-                      handleChange('publishTargetIds', next.length > 0 ? next : undefined)
-                    }}
-                    className={cn(
-                      'w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border text-left transition-all',
-                      selected
-                        ? 'border-[var(--accent)] bg-[var(--accent)]/10'
-                        : 'border-[var(--border)] bg-[var(--bg-secondary)] hover:border-[var(--text-secondary)]'
-                    )}
-                  >
-                    <div
-                      className={cn(
-                        'w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center transition-colors',
-                        selected
-                          ? 'bg-[var(--accent)] border-[var(--accent)]'
-                          : 'border-[var(--text-secondary)]'
-                      )}
-                    >
-                      {selected && (
-                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                          <path d="M2 5L4 7L8 3" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                        </svg>
-                      )}
-                    </div>
-                    <Send className="h-3 w-3 flex-shrink-0 text-[var(--text-secondary)]" />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs font-medium text-[var(--text-primary)] truncate">
-                        {target.name}
-                      </p>
-                      <p className="text-[10px] text-[var(--text-secondary)] truncate">
-                        {target.type === 'slack' ? ((target.config as any).webhookUrl ? 'Slack Webhook' : `Slack → #${(target.config as any).channel}`) : target.type === 'email' ? `Email → ${(target.config as any).to}` : `Webhook → ${(target.config as any).url}`}
-                      </p>
-                    </div>
-                    {!target.enabled && (
-                      <span className="text-[10px] text-amber-400 flex-shrink-0">disabled</span>
-                    )}
-                  </button>
-                )
-              })}
+              <label className="block text-xs font-medium text-[var(--text-secondary)]">
+                Working Directory
+              </label>
+              <Input
+                value={draft.workingDir ?? ''}
+                onChange={(e) => handleChange('workingDir', e.target.value || undefined)}
+                placeholder="Leave blank for ephemeral workspace (e.g. /Users/you/code/myrepo)"
+                className="font-mono text-xs"
+              />
+              <p className="text-xs text-[var(--text-secondary)]">
+                If set, the agent runs inside this directory instead of a temporary workspace.
+              </p>
             </div>
           )}
-        </div>
 
-        {/* Triggers */}
-        <TriggerEditor agentId={agentId} />
+          {/* Background-task timeout — per-agent override (0 = run indefinitely) */}
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[var(--text-secondary)]">
+              Background Task Timeout (seconds)
+            </label>
+            <Input
+              type="number"
+              min={0}
+              value={draft.bgTaskTimeoutSeconds ?? ''}
+              onChange={(e) => {
+                const raw = e.target.value.trim()
+                handleChange(
+                  'bgTaskTimeoutSeconds',
+                  raw === '' ? undefined : Math.max(0, Math.floor(Number(raw) || 0))
+                )
+              }}
+              placeholder="Inherit default (0 = run indefinitely)"
+            />
+            <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
+              How long to wait for background tasks before terminating them. 0 waits indefinitely.
+              Leave blank to inherit your per-provider default from Settings.
+              {(draft.runner ?? 'claude') !== 'claude' && ' Currently only the Claude runner acts on this.'}
+            </p>
+          </div>
+
+          {/* Repository-configured MCPs toggle */}
+          <div className="space-y-1.5">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={draft.enableRepoMcps ?? false}
+                onChange={(e) => handleChange('enableRepoMcps', e.target.checked)}
+                className="rounded border-[var(--border)] accent-[var(--accent)]"
+              />
+              <span className="text-xs font-medium text-[var(--text-primary)]">
+                Enable repository-configured MCP servers
+              </span>
+            </label>
+            <p className="text-[10px] text-[var(--text-secondary)] opacity-70 pl-6">
+              When on, MCP servers defined in the repository's own <code className="font-mono">.mcp.json</code> (and the
+              host's personal Claude connectors) load alongside Conduit's managed MCPs. When off, runs use only Conduit's
+              global and agent MCP servers for a clean, reproducible environment.
+            </p>
+          </div>
+        </CollapsibleSection>
+
+        {/* Tools & integrations */}
+        <CollapsibleSection title="Tools & integrations" defaultOpen={false} summary={toolsSummary}>
+          {/* Environment Variables */}
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[var(--text-secondary)]">
+              Environment Variables
+            </label>
+            <EnvVarEditor
+              value={draft.envVars ?? {}}
+              onChange={(v) => handleChange('envVars', v)}
+            />
+          </div>
+
+          {/* MCP Config */}
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[var(--text-secondary)]">
+              MCP Configuration
+            </label>
+            <McpEditor
+              value={draft.mcpConfig ?? { mcpServers: {} }}
+              onChange={(v) => handleChange('mcpConfig', v)}
+              agentId={agentId}
+              flushSave={flushSave}
+            />
+          </div>
+
+          {/* Publish Targets */}
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[var(--text-secondary)]">
+              Publish Targets
+            </label>
+            {allPublishTargets.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-[var(--border)] px-4 py-3 text-center">
+                <p className="text-xs text-[var(--text-secondary)]">
+                  No publish targets configured.
+                </p>
+                <button
+                  onClick={() => setShowPublishTargets(true)}
+                  className="text-xs text-[var(--accent)] hover:underline mt-1"
+                >
+                  Create a publish target
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-1.5">
+                {allPublishTargets.map((target) => {
+                  const selected = (draft.publishTargetIds ?? []).includes(target.id)
+                  return (
+                    <button
+                      key={target.id}
+                      type="button"
+                      onClick={() => {
+                        const current = draft.publishTargetIds ?? []
+                        const next = selected
+                          ? current.filter((id) => id !== target.id)
+                          : [...current, target.id]
+                        handleChange('publishTargetIds', next.length > 0 ? next : undefined)
+                      }}
+                      className={cn(
+                        'w-full flex items-center gap-2.5 px-3 py-2 rounded-lg border text-left transition-all',
+                        selected
+                          ? 'border-[var(--accent)] bg-[var(--accent)]/10'
+                          : 'border-[var(--border)] bg-[var(--bg-secondary)] hover:border-[var(--text-secondary)]'
+                      )}
+                    >
+                      <div
+                        className={cn(
+                          'w-4 h-4 rounded border-2 flex-shrink-0 flex items-center justify-center transition-colors',
+                          selected
+                            ? 'bg-[var(--accent)] border-[var(--accent)]'
+                            : 'border-[var(--text-secondary)]'
+                        )}
+                      >
+                        {selected && (
+                          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                            <path d="M2 5L4 7L8 3" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
+                        )}
+                      </div>
+                      <Send className="h-3 w-3 flex-shrink-0 text-[var(--text-secondary)]" />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-medium text-[var(--text-primary)] truncate">
+                          {target.name}
+                        </p>
+                        <p className="text-[10px] text-[var(--text-secondary)] truncate">
+                          {target.type === 'slack' ? ((target.config as any).webhookUrl ? 'Slack Webhook' : `Slack → #${(target.config as any).channel}`) : target.type === 'email' ? `Email → ${(target.config as any).to}` : `Webhook → ${(target.config as any).url}`}
+                        </p>
+                      </div>
+                      {!target.enabled && (
+                        <span className="text-[10px] text-amber-400 flex-shrink-0">disabled</span>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </CollapsibleSection>
+
+        {/* Automation */}
+        <CollapsibleSection title="Automation" defaultOpen={false} summary={automationSummary}>
+          <TriggerEditor agentId={agentId} />
+        </CollapsibleSection>
       </div>
-
-      {showShareDialog && agent && (
-        <ShareDialog
-          entityType="agent"
-          entityId={agent.id}
-          isOpen={showShareDialog}
-          onClose={() => setShowShareDialog(false)}
-        />
-      )}
     </div>
   )
 })

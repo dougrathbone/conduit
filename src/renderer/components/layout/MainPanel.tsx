@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react'
-import { Trash2, Save, CheckCircle2, Loader2, Copy } from 'lucide-react'
+import { Trash2, Save, CheckCircle2, Loader2, Copy, Share2 } from 'lucide-react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import { useQueryClient } from '@tanstack/react-query'
 import { Button } from '@renderer/components/ui/button'
 import { AgentEditor, type AgentEditorHandle } from '@renderer/components/agents/AgentEditor'
+import { ShareDialog } from '@renderer/components/ShareDialog'
 import { RunControls } from '@renderer/components/runs/RunControls'
 import { RunHistory } from '@renderer/components/runs/RunHistory'
 import { RunDetail } from '@renderer/components/runs/RunDetail'
@@ -36,6 +37,7 @@ export function MainPanel({ agentId }: MainPanelProps) {
 
   const editorRef = useRef<AgentEditorHandle>(null)
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
+  const [showShareDialog, setShowShareDialog] = useState(false)
 
   // This agent's in-progress run, derived from its OWN runs list — so the Run
   // button + live view are per-agent, not keyed off a single global activeRunId
@@ -87,6 +89,31 @@ export function MainPanel({ agentId }: MainPanelProps) {
           {agent ? (agent.name || '(Untitled agent)') : 'Agent'}
         </h1>
         <div className="flex items-center gap-2">
+          {isOwner && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowShareDialog(true)}
+              className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] px-1.5"
+              title="Share this agent"
+            >
+              <Share2 className="h-4 w-4" />
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleCloneAgent}
+            disabled={!agent || cloneAgent.isPending}
+            className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] px-1.5"
+            title="Clone this agent into a new agent"
+          >
+            {cloneAgent.isPending ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Copy className="h-4 w-4" />
+            )}
+          </Button>
           {saveState === 'saved' && (
             <span className="flex items-center gap-1 text-xs text-green-500">
               <CheckCircle2 className="h-3 w-3" />
@@ -122,20 +149,6 @@ export function MainPanel({ agentId }: MainPanelProps) {
               setTab('runs')
             }}
           />
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleCloneAgent}
-            disabled={!agent || cloneAgent.isPending}
-            className="text-[var(--text-secondary)] hover:text-[var(--text-primary)] px-1.5"
-            title="Clone this agent into a new agent"
-          >
-            {cloneAgent.isPending ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
-              <Copy className="h-4 w-4" />
-            )}
-          </Button>
           {isOwner && (
             <Button
               variant="ghost"
@@ -214,6 +227,15 @@ export function MainPanel({ agentId }: MainPanelProps) {
           </PanelGroup>
         )}
       </div>
+
+      {showShareDialog && agent && (
+        <ShareDialog
+          entityType="agent"
+          entityId={agent.id}
+          isOpen={showShareDialog}
+          onClose={() => setShowShareDialog(false)}
+        />
+      )}
     </div>
   )
 }
