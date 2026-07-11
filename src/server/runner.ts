@@ -15,7 +15,7 @@ import { writeMcpConfig, deleteMcpConfig } from '../main/utils/mcp'
 import { writeClaudeConfig, deleteClaudeConfig } from '../main/utils/claudeConfig'
 import { DEV_USER_ID } from './auth/config'
 import { LOGS_DIR } from '../main/utils/paths'
-import { createWorktree, removeWorktree, configureWorktreeGit } from './gitOps'
+import { createConfiguredWorktree, removeWorktree } from './gitOps'
 import { buildRunFailureReport } from './runFailure'
 import { resolvePushCredential } from './githubApp'
 import { buildClaudeArgs, parseClaudeEvents } from '../main/execution/adapters/claude'
@@ -238,27 +238,37 @@ export async function startRunServer(
     // Generate a run-scoped worktree path under the bare clone
     const tempRunId = crypto.randomUUID()
     const worktreeDir = path.join(repo.clonePath!, 'worktrees-run', tempRunId)
-    await createWorktree(repo.clonePath!, worktreeDir, repo.defaultBranch)
-    // Configure committer identity + push credentials so the agent can commit and
-    // push (and open PRs). Uses the repo's "commit as" settings, falling back to a
-    // Conduit identity, and a freshly-resolved token so origin authenticates.
+    // Resolve push credentials first (non-throwing) so the token can be injected
+    // into the worktree's origin below. A failed mint is recorded, not fatal — the
+    // agent's later `git push` fails with an opaque credential error otherwise, so
+    // record why in both Sentry and the run log (the run-log line is emitted below,
+    // once the log stream is open).
     const { token: pushToken, error: pushTokenError } = await resolvePushCredential(repo)
     if (pushTokenError) {
-      // Never swallow this: a failed mint means the agent's `git push` will fail
-      // later with an opaque credential error. Record why, in both Sentry and the
-      // run log (the run-log line is emitted below, once the log stream is open).
       pushCredentialError = pushTokenError.message
       reporter.captureException(pushTokenError, {
         tags: { component: 'runner', op: 'resolvePushCredential', repoId: repo.id },
       })
       console.error(`[server/runner] Could not resolve push credentials for repo ${repo.id}:`, pushTokenError)
     }
-    await configureWorktreeGit(worktreeDir, {
-      url: repo.url,
-      token: pushToken,
-      authorName: repo.commitAuthorName?.trim() || 'Conduit',
-      authorEmail: repo.commitAuthorEmail?.trim() || 'conduit@dovetail.com',
-    })
+    // Create + configure the worktree as one unit. On any failure the worktree is
+    // torn down (see createConfiguredWorktree) and the error is reported here and
+    // rethrown — so a broken checkout (e.g. a stale/missing bare clone despite a
+    // 'ready' status) fails the run cleanly instead of escaping uncaught and
+    // orphaning a multi-GB worktree for the slow sweeper to reclaim.
+    try {
+      await createConfiguredWorktree(repo.clonePath!, worktreeDir, repo.defaultBranch, {
+        url: repo.url,
+        token: pushToken,
+        authorName: repo.commitAuthorName?.trim() || 'Conduit',
+        authorEmail: repo.commitAuthorEmail?.trim() || 'conduit@dovetail.com',
+      })
+    } catch (err) {
+      reporter.captureException(err instanceof Error ? err : new Error(String(err)), {
+        tags: { component: 'runner', op: 'createWorktree', repoId: repo.id, agentId },
+      })
+      throw err
+    }
     workspacePath = worktreeDir
     worktreeClonePath = repo.clonePath!
     isEphemeral = false

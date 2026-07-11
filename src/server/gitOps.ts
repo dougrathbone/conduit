@@ -110,6 +110,14 @@ export async function testRepoConnection(url: string, pat?: string): Promise<str
 
 /**
  * Clone a repository as a bare clone (no working tree).
+ *
+ * Clones into a sibling temp path, then atomically renames into place. A clone
+ * that fails part-way — classically on bad credentials — otherwise leaves a
+ * partial bare repo at the final path, which (a) leaks disk: the sweeper only
+ * reclaims clones whose repository no longer exists, never a live repo's; and
+ * (b) makes `clonePath` "exist", trapping the sync loop into fetching an invalid
+ * repo forever instead of re-cloning. So the final path only ever appears once a
+ * clone has fully succeeded, and any partial output is removed on failure.
  */
 export async function cloneRepo(
   url: string,
@@ -118,7 +126,18 @@ export async function cloneRepo(
   pat?: string
 ): Promise<void> {
   const authUrl = buildAuthUrl(url, pat)
-  await runGit(['clone', '--bare', '--single-branch', '--branch', branch, authUrl, clonePath])
+  const tmpPath = `${clonePath}.cloning`
+  // Clear any leftover from a previously-interrupted clone before starting.
+  fs.rmSync(tmpPath, { recursive: true, force: true })
+  try {
+    await runGit(['clone', '--bare', '--single-branch', '--branch', branch, authUrl, tmpPath])
+  } catch (err) {
+    fs.rmSync(tmpPath, { recursive: true, force: true })
+    throw err
+  }
+  // Publish the completed clone into its final location.
+  fs.rmSync(clonePath, { recursive: true, force: true })
+  fs.renameSync(tmpPath, clonePath)
 }
 
 /**
@@ -183,6 +202,29 @@ export async function configureWorktreeGit(
   await runGit(['config', 'user.email', opts.authorEmail], { cwd: worktreePath })
   if (opts.token && opts.url.startsWith('https://')) {
     await runGit(['remote', 'set-url', 'origin', buildAuthUrl(opts.url, opts.token)], { cwd: worktreePath })
+  }
+}
+
+/**
+ * Create a run worktree and configure its committer identity + push remote as a
+ * single unit. If configuration fails *after* the worktree is created, the
+ * worktree is torn down before rethrowing — otherwise a created-but-unconfigured
+ * worktree (a multi-gigabyte checkout) is orphaned and reclaimed only by the slow
+ * periodic sweeper, not the per-run cleanup. (`createWorktree` already cleans up
+ * its own partial `worktree add` failure.)
+ */
+export async function createConfiguredWorktree(
+  clonePath: string,
+  worktreePath: string,
+  branch: string,
+  config: { url: string; token?: string; authorName: string; authorEmail: string }
+): Promise<void> {
+  await createWorktree(clonePath, worktreePath, branch)
+  try {
+    await configureWorktreeGit(worktreePath, config)
+  } catch (err) {
+    await removeWorktree(clonePath, worktreePath).catch(() => {})
+    throw err
   }
 }
 
