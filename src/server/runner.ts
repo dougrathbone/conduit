@@ -12,6 +12,7 @@ import { getRunnerTimeout } from '../main/db/queries/runnerSettings'
 import { resolveBgTaskTimeoutSeconds, bgTaskTimeoutEnvEntry } from './runnerTimeout'
 import { createWorkspace, deleteWorkspace } from '../main/execution/workspace'
 import { writeMcpConfig, deleteMcpConfig } from '../main/utils/mcp'
+import { writeClaudeConfig, deleteClaudeConfig } from '../main/utils/claudeConfig'
 import { DEV_USER_ID } from './auth/config'
 import { LOGS_DIR } from '../main/utils/paths'
 import { createWorktree, removeWorktree, configureWorktreeGit } from './gitOps'
@@ -164,6 +165,7 @@ function cleanupRun(
   worktreeClonePath?: string
 ): void {
   deleteMcpConfig(runId)
+  deleteClaudeConfig(runId)
   const removable = !!workspacePath && (!!worktreeClonePath || ephemeral)
   if (!removable) return
 
@@ -476,9 +478,19 @@ export async function startRunServer(
 
     const binary = agent.runner === 'amp' ? 'amp' : 'claude'
 
+    const runnerEnv = await buildRunnerEnv(agent, startedBy)
+    if (agent.runner === 'claude') {
+      // Pre-trust the workspace so Claude honors the repo's .claude/settings.json
+      // instead of warning "this workspace has not been trusted" and dropping its
+      // permissions on every headless run. Trust both the workspace and the bare
+      // clone (Claude keys trust by the git root for a worktree).
+      const trusted = [workspacePath, worktreeClonePath].filter((p): p is string => !!p)
+      runnerEnv.CLAUDE_CONFIG_DIR = writeClaudeConfig(runId, trusted)
+    }
+
     child = spawn(binary, cliArgs, {
       cwd: workspacePath,
-      env: await buildRunnerEnv(agent, startedBy),
+      env: runnerEnv,
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 
