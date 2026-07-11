@@ -54,6 +54,38 @@ body {
   background: var(--text-secondary);
 }
 
+/* Animated "working…" text for a live run's current activity. */
+.shimmer-text {
+  background: linear-gradient(
+    90deg,
+    var(--text-secondary) 0%,
+    var(--text-primary) 45%,
+    var(--text-secondary) 90%
+  );
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: conduit-shimmer 2.6s linear infinite;
+}
+@keyframes conduit-shimmer {
+  0% {
+    background-position: 120% 0;
+  }
+  100% {
+    background-position: -120% 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-text {
+    animation: none;
+    background: none;
+    color: var(--text-secondary);
+    -webkit-text-fill-color: currentColor;
+  }
+}
+
 /* xterm.js theme integration */
 .xterm {
   padding: 12px;

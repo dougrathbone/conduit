@@ -54,7 +54,7 @@ import { startAuth as mcpStartAuth, getStatus as mcpGetStatus, revoke as mcpRevo
 import { listMcpTools } from './mcpTools'
 import { classifyUrlHealth } from './mcpHealth'
 import { getGithubPat } from './store'
-import { readLogFile } from './utils'
+import { readRunLog } from './utils'
 import { Octokit } from '@octokit/rest'
 import { createSession, sendMessageServer, closeSession } from './promptChatServer'
 import { loadIpRestrictionsConfig, isIpAllowed, extractClientIp } from './ipRestrictions'
@@ -272,7 +272,7 @@ const handlers: Record<string, HandlerFn> = {
   'runs:list': ([agentId]) => Promise.resolve(listRuns(agentId as string)),
   'runs:start': ([agentId], _ws, ctx) => startRunServer(agentId as string, broadcast, undefined, ctx.userId),
   'runs:stop': ([runId]) => stopRun(runId as string),
-  'runs:getLog': ([runId]) => Promise.resolve(readLogFile(runId as string)),
+  'runs:getLog': ([runId]) => Promise.resolve(readRunLog(runId as string)),
 
   // Global MCPs
   'globalMcps:list': (_args, _ws, ctx) => Promise.resolve(listGlobalMcps(ctx.userId, ctx.userGroupIds)),

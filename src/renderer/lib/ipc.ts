@@ -1,4 +1,4 @@
-import type { RunOutputPayload, RunStatusChangePayload, RepoSyncStatusPayload } from '@shared/types'
+import type { RunOutputPayload, RunEventsPayload, RunStatusChangePayload, RepoSyncStatusPayload } from '@shared/types'
 
 function getConduit() {
   if (typeof window === 'undefined' || !window.conduit) {
@@ -61,6 +61,9 @@ export const api = {
   },
   onOutput: (cb: (payload: RunOutputPayload) => void): (() => void) => {
     return getConduit().onOutput(cb)
+  },
+  onRunEvents: (cb: (payload: RunEventsPayload) => void): (() => void) => {
+    return getConduit().onRunEvents(cb)
   },
   onRunStatusChange: (cb: (payload: RunStatusChangePayload) => void): (() => void) => {
     return getConduit().onRunStatusChange(cb)

@@ -1,9 +1,9 @@
-import React from 'react'
+import React, { useEffect, useState } from 'react'
 import { Loader2 } from 'lucide-react'
 import { cn } from '@renderer/lib/utils'
 import { formatDuration, formatRelativeTime } from '@renderer/lib/utils'
 import { StatusBadge } from '@renderer/components/ui/badge'
-import { useRuns } from '@renderer/hooks/useRuns'
+import { useRuns, useLiveActivity } from '@renderer/hooks/useRuns'
 import type { ExecutionRun } from '@shared/types'
 
 interface RunHistoryProps {
@@ -20,6 +20,24 @@ interface RunRowProps {
 }
 
 function RunRow({ run, index, isSelected, onClick }: RunRowProps) {
+  const isRunning = run.status === 'running'
+  // Current activity for a live run comes from the event stream — run.lastLine is
+  // only persisted when the run finalizes, so it's empty mid-run.
+  const liveActivity = useLiveActivity(run.id, isRunning)
+  const activity = (isRunning ? liveActivity : '') || run.lastLine || ''
+
+  // Live elapsed timer while running (durationMs is only set on finalize).
+  const [elapsed, setElapsed] = useState<number | null>(null)
+  useEffect(() => {
+    if (!isRunning) {
+      setElapsed(null)
+      return
+    }
+    setElapsed(Date.now() - run.startedAt)
+    const id = setInterval(() => setElapsed(Date.now() - run.startedAt), 1000)
+    return () => clearInterval(id)
+  }, [isRunning, run.startedAt])
+
   return (
     <button
       onClick={onClick}
@@ -35,17 +53,20 @@ function RunRow({ run, index, isSelected, onClick }: RunRowProps) {
       </span>
       <div className="flex-1 min-w-0 flex items-center gap-2">
         <StatusBadge status={run.status} />
-        {run.lastLine && (
+        {activity && (
           <span
-            className="text-xs text-[var(--text-secondary)] font-mono truncate min-w-0"
-            title={run.lastLine}
+            className={cn(
+              'text-xs font-mono truncate min-w-0',
+              isRunning ? 'shimmer-text' : 'text-[var(--text-secondary)]'
+            )}
+            title={activity}
           >
-            {run.lastLine}
+            {isRunning ? `Working · ${activity}` : activity}
           </span>
         )}
       </div>
       <span className="text-xs text-[var(--text-secondary)] font-mono tabular-nums flex-shrink-0">
-        {formatDuration(run.durationMs)}
+        {isRunning ? formatDuration(elapsed ?? undefined) : formatDuration(run.durationMs)}
       </span>
       <span className="text-xs text-[var(--text-secondary)] flex-shrink-0 min-w-[80px] text-right">
         {formatRelativeTime(run.startedAt)}

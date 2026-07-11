@@ -2,7 +2,7 @@ import * as crypto from 'crypto'
 import type { ExecutionRun, SlackPublishConfig, EmailPublishConfig, WebhookPublishConfig, PublishTargetType, PublishConfig, PublishTargetHealthResult } from '../shared/types'
 import { getPublishTarget } from '../main/db/queries/publishTargets'
 import { getAgent } from '../main/db/queries/agents'
-import { readLogFile } from './utils'
+import { readRunOutputText } from './utils'
 
 /**
  * Publish target is a dumb delivery channel — the agent controls the content.
@@ -16,10 +16,6 @@ import { readLogFile } from './utils'
 
 const PUBLISH_START = '<!--CONDUIT:PUBLISH-->'
 const PUBLISH_END = '<!--/CONDUIT:PUBLISH-->'
-
-function stripAnsi(text: string): string {
-  return text.replace(/\x1b\[[0-9;]*m/g, '')
-}
 
 function extractPublishContent(stdout: string): string | null {
   const startIdx = stdout.indexOf(PUBLISH_START)
@@ -296,12 +292,7 @@ export async function publishRunResult(
 
   let fullStdout = ''
   try {
-    const entries = readLogFile(run.id)
-    fullStdout = entries
-      .filter((e) => e.stream === 'stdout')
-      .map((e) => stripAnsi(e.chunk).trim())
-      .filter(Boolean)
-      .join('\n')
+    fullStdout = readRunOutputText(run.id)
   } catch {
     return
   }

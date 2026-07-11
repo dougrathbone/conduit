@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useMemo, useRef } from 'react'
 import { Trash2, Save, CheckCircle2, Loader2, Copy } from 'lucide-react'
 import { Panel, PanelGroup, PanelResizeHandle } from 'react-resizable-panels'
 import { useQueryClient } from '@tanstack/react-query'
@@ -7,14 +7,13 @@ import { AgentEditor, type AgentEditorHandle } from '@renderer/components/agents
 import { RunControls } from '@renderer/components/runs/RunControls'
 import { RunHistory } from '@renderer/components/runs/RunHistory'
 import { RunDetail } from '@renderer/components/runs/RunDetail'
-import { TerminalPane } from '@renderer/components/layout/TerminalPane'
+import { RunLogView } from '@renderer/components/runs/RunLogView'
 import { useAgent, useDeleteAgent, useCloneAgent } from '@renderer/hooks/useAgents'
 import { useRuns } from '@renderer/hooks/useRuns'
 import { useAuth } from '@renderer/contexts/AuthContext'
 import { useUIStore } from '@renderer/store/ui'
 import { cn } from '@renderer/lib/utils'
 import { api } from '@renderer/lib/ipc'
-import type { RunStatus, RunStatusChangePayload } from '@shared/types'
 
 type Tab = 'configure' | 'runs'
 
@@ -28,44 +27,34 @@ export function MainPanel({ agentId }: MainPanelProps) {
   const deleteAgent = useDeleteAgent()
   const cloneAgent = useCloneAgent()
   const { user } = useAuth()
-  const { activeRunId, setActiveRun, selectAgent, viewedRunId, setViewedRun } = useUIStore()
+  const { activeRunId, selectAgent, viewedRunId, setViewedRun } = useUIStore()
   const isOwner = agent?.ownerId === user?.id
   const queryClient = useQueryClient()
 
   // Open on the runs tab when the URL deep-links a specific run.
   const [tab, setTab] = useState<Tab>(viewedRunId ? 'runs' : 'configure')
 
-  // Track live run status locally so RunControls can react
-  const [liveRunStatus, setLiveRunStatus] = useState<RunStatus | null>(null)
-  const [liveRunStartedAt, setLiveRunStartedAt] = useState<number | null>(null)
   const editorRef = useRef<AgentEditorHandle>(null)
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle')
 
-  // When the active run changes, sync local status
-  useEffect(() => {
-    if (!activeRunId || !runs) {
-      setLiveRunStatus(null)
-      setLiveRunStartedAt(null)
-      return
-    }
-    const run = runs.find((r) => r.id === activeRunId)
-    if (run) {
-      setLiveRunStatus(run.status)
-      setLiveRunStartedAt(run.startedAt)
-    }
-  }, [activeRunId, runs])
+  // This agent's in-progress run, derived from its OWN runs list — so the Run
+  // button + live view are per-agent, not keyed off a single global activeRunId
+  // (which previously let a run be started per agent simultaneously). At most one
+  // exists (the server rejects a second concurrent run per agent).
+  const runningRun = useMemo(() => runs?.find((r) => r.status === 'running') ?? null, [runs])
+  // runs are sorted newest-first, so [0] is the latest — used only for the
+  // idle button label ("Run" vs "Run Again").
+  const latestRun = runs && runs.length > 0 ? runs[0] : null
 
-  // Subscribe to global run status changes for the active run
+  // Any run status change for this agent refreshes its list (→ recomputes the
+  // running run) and the affected run's log (so a finished run shows its full log).
   useEffect(() => {
-    const unsub = api.onRunStatusChange((payload: RunStatusChangePayload) => {
-      if (payload.runId === activeRunId) {
-        setLiveRunStatus(payload.status)
-        // Refresh the runs list so history shows updated status/duration
-        queryClient.invalidateQueries({ queryKey: ['runs', agentId] })
-      }
+    const unsub = api.onRunStatusChange((payload) => {
+      queryClient.invalidateQueries({ queryKey: ['runs', agentId] })
+      queryClient.invalidateQueries({ queryKey: ['run-log', payload.runId] })
     })
     return () => unsub()
-  }, [activeRunId, agentId, queryClient])
+  }, [agentId, queryClient])
 
   const handleDeleteAgent = async () => {
     if (!window.confirm(`Delete agent "${agent?.name}"? This cannot be undone.`)) return
@@ -84,13 +73,11 @@ export function MainPanel({ agentId }: MainPanelProps) {
     }
   }
 
-  const isLive =
-    activeRunId !== null &&
-    (liveRunStatus === 'running' || liveRunStatus === 'launched')
-
-  // Which terminal to show in the runs tab
-  const showLiveTerminal = isLive && tab === 'runs'
-  const showReplayTerminal = !isLive && viewedRunId !== null && tab === 'runs'
+  // Which run the bottom pane shows: an explicit selection wins, else the
+  // in-progress run. It's "live" only when that run is the one still running.
+  const displayRunId = viewedRunId ?? activeRunId ?? runningRun?.id ?? null
+  const showLiveTerminal = tab === 'runs' && displayRunId !== null && displayRunId === runningRun?.id
+  const showReplayTerminal = tab === 'runs' && displayRunId !== null && !showLiveTerminal
 
   return (
     <div className="flex flex-col h-full" style={{ background: 'var(--bg-primary)' }}>
@@ -126,9 +113,9 @@ export function MainPanel({ agentId }: MainPanelProps) {
           </Button>
           <RunControls
             agentId={agentId}
-            activeRunId={activeRunId}
-            activeRunStatus={liveRunStatus}
-            activeRunStartedAt={liveRunStartedAt}
+            activeRunId={runningRun?.id ?? null}
+            activeRunStatus={runningRun ? 'running' : latestRun?.status ?? null}
+            activeRunStartedAt={runningRun?.startedAt ?? null}
             onRunStarted={() => {
               // setActiveRun (in RunControls) already points viewedRunId + URL at the
               // new run; the live terminal takes precedence while it's running.
@@ -196,7 +183,7 @@ export function MainPanel({ agentId }: MainPanelProps) {
               <div className="h-full overflow-y-auto border-b border-[var(--border)]">
                 <RunHistory
                   agentId={agentId}
-                  selectedRunId={viewedRunId ?? activeRunId}
+                  selectedRunId={displayRunId}
                   onSelectRun={(runId) => {
                     // Sets viewedRunId + updates the URL for deep-linking. When it's
                     // the active run and still live, showLiveTerminal takes precedence.
@@ -211,11 +198,11 @@ export function MainPanel({ agentId }: MainPanelProps) {
             {/* Terminal area */}
             <Panel defaultSize={65} minSize={20}>
               <div className="h-full">
-                {showLiveTerminal && (
-                  <TerminalPane runId={activeRunId} />
+                {showLiveTerminal && runningRun && (
+                  <RunLogView runId={runningRun.id} live startedAt={runningRun.startedAt} />
                 )}
-                {showReplayTerminal && (
-                  <RunDetail runId={viewedRunId!} />
+                {showReplayTerminal && displayRunId && (
+                  <RunDetail runId={displayRunId} />
                 )}
                 {!showLiveTerminal && !showReplayTerminal && (
                   <div className="flex items-center justify-center h-full text-sm text-[var(--text-secondary)]">

@@ -1,11 +1,12 @@
 import type {
   ConduitAPI,
   RunOutputPayload,
+  RunEventsPayload,
   RunStatusChangePayload,
   RepoSyncStatusPayload,
   AgentConfig,
   ExecutionRun,
-  LogEntry,
+  RunLog,
   GlobalMcpServer,
   PublishTarget,
   Repository,
@@ -59,6 +60,7 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
     }
   })
   const outputListeners = new Set<(p: RunOutputPayload) => void>()
+  const runEventsListeners = new Set<(p: RunEventsPayload) => void>()
   const statusListeners = new Set<(p: RunStatusChangePayload) => void>()
   const oauthCompleteListeners = new Set<(p: { serverUrl: string; success: boolean; error?: string }) => void>()
   const promptTokenListeners = new Set<(p: { sessionId: string; token: string }) => void>()
@@ -97,6 +99,8 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
     } else if (msg.type === 'event') {
       if (msg.channel === 'run:output') {
         outputListeners.forEach((cb) => cb(msg.payload as RunOutputPayload))
+      } else if (msg.channel === 'run:events') {
+        runEventsListeners.forEach((cb) => cb(msg.payload as RunEventsPayload))
       } else if (msg.channel === 'run:statusChange') {
         statusListeners.forEach((cb) => cb(msg.payload as RunStatusChangePayload))
       } else if (msg.channel === 'mcp:oauth:complete') {
@@ -174,12 +178,17 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       list: (agentId: string) => invoke<ExecutionRun[]>('runs:list', agentId),
       start: (agentId: string) => invoke<ExecutionRun>('runs:start', agentId),
       stop: (runId: string) => invoke<void>('runs:stop', runId),
-      getLog: (runId: string) => invoke<LogEntry[]>('runs:getLog', runId),
+      getLog: (runId: string) => invoke<RunLog>('runs:getLog', runId),
     },
 
     onOutput: (cb: (payload: RunOutputPayload) => void): (() => void) => {
       outputListeners.add(cb)
       return () => outputListeners.delete(cb)
+    },
+
+    onRunEvents: (cb: (payload: RunEventsPayload) => void): (() => void) => {
+      runEventsListeners.add(cb)
+      return () => runEventsListeners.delete(cb)
     },
 
     onRunStatusChange: (cb: (payload: RunStatusChangePayload) => void): (() => void) => {

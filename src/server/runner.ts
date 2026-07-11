@@ -2,7 +2,8 @@ import { spawn, ChildProcess } from 'child_process'
 import { createInterface } from 'readline'
 import * as fs from 'fs'
 import * as path from 'path'
-import type { ExecutionRun, LogEntry, TriggerContext, RunnerType } from '../shared/types'
+import type { ExecutionRun, RunEvent, RunEventInit, TriggerContext, RunnerType } from '../shared/types'
+import { summarizeEvent } from '../shared/runEvents'
 import { createRun, updateRun } from '../main/db/queries/runs'
 import { getAgent } from '../main/db/queries/agents'
 import { getRepository } from '../main/db/queries/repositories'
@@ -16,8 +17,8 @@ import { LOGS_DIR } from '../main/utils/paths'
 import { createWorktree, removeWorktree, configureWorktreeGit } from './gitOps'
 import { buildRunFailureReport } from './runFailure'
 import { resolvePushCredential } from './githubApp'
-import { buildClaudeArgs, parseClaudeOutput } from '../main/execution/adapters/claude'
-import { buildAmpArgs, parseAmpOutput } from '../main/execution/adapters/amp'
+import { buildClaudeArgs, parseClaudeEvents } from '../main/execution/adapters/claude'
+import { buildAmpArgs, parseAmpEvents } from '../main/execution/adapters/amp'
 import { buildCursorArgs, CURSOR_NOTICE } from '../main/execution/adapters/cursor'
 import { publishRunResult } from './publisher'
 import { buildTriggeredPrompt } from './triggers/promptBuilder'
@@ -76,10 +77,22 @@ interface ActiveRun {
   /** The run's workspace dir (git worktree or ephemeral tmp dir). Used by the
    *  data-dir sweeper to avoid deleting a running run's workspace. */
   workspacePath: string
+  /** The agent this run belongs to — used to enforce one live run per agent. */
+  agentId: string
 }
 
 // Active child processes keyed by runId
 const activeProcesses = new Map<string, ActiveRun>()
+
+/** Whether an agent already has a run executing on this pod. One streaming run
+ *  per agent at a time: a second concurrent run would double the (multi-GB)
+ *  worktree footprint and race the same workspace. */
+export function hasActiveRunForAgent(agentId: string): boolean {
+  for (const r of activeProcesses.values()) {
+    if (r.agentId === agentId) return true
+  }
+  return false
+}
 
 /** Workspace dirs of runs currently executing on this pod. The data-dir sweeper
  *  treats these as protected — never sweeps a live run's worktree/workspace. */
@@ -126,16 +139,16 @@ const RUN_LOG_MAX_BYTES = (() => {
   return Number.isFinite(n) && n >= 0 ? n : 500 * 1024 * 1024 // 500 MB
 })()
 
-/** Append a system log entry to a run's log file (used after the log stream is
+/** Append a system event to a run's log file (used after the log stream is
  *  closed, e.g. by the delayed cleanup). Also emits to stdout for log forwarding. */
-function appendRunLog(runId: string, chunk: string): void {
-  const entry: LogEntry = { t: Date.now(), stream: 'system', chunk }
+function appendRunLog(runId: string, text: string): void {
+  const event: RunEvent = { t: Date.now(), kind: 'raw', stream: 'system', text }
   try {
-    fs.appendFileSync(path.join(LOGS_DIR, `${runId}.jsonl`), JSON.stringify(entry) + '\n')
+    fs.appendFileSync(path.join(LOGS_DIR, `${runId}.jsonl`), JSON.stringify(event) + '\n')
   } catch (err) {
     console.error(`[runner] Failed to append cleanup log for run ${runId}: ${err}`)
   }
-  process.stdout.write(JSON.stringify({ runId, ...entry }) + '\n')
+  process.stdout.write(JSON.stringify({ runId, ...event }) + '\n')
 }
 
 /**
@@ -192,6 +205,16 @@ export async function startRunServer(
   // 1. Load agent
   const agent = await getAgent(agentId)
   if (!agent) throw new Error(`Agent ${agentId} not found`)
+
+  // One live run per agent: reject a second concurrent start rather than spin up
+  // another multi-GB worktree racing the same agent. (Cursor "launches" don't stay
+  // in the active set, so they're unaffected.)
+  if (hasActiveRunForAgent(agentId)) {
+    throw new Error(
+      `Agent "${agent.name || agentId}" already has a run in progress. ` +
+        `Stop it before starting another.`
+    )
+  }
 
   // 2. Determine workspace: repo worktree > fixed workingDir > ephemeral
   let workspacePath: string
@@ -276,11 +299,12 @@ export async function startRunServer(
   let logBytesWritten = 0
   let logCapped = false
 
-  function writeLogEntry(entry: LogEntry): void {
-    const line = JSON.stringify(entry)
-    // Write to per-run log file (for UI replay via runs:getLog), until the run's
-    // log exceeds RUN_LOG_MAX_BYTES — then stop persisting so a runaway run can't
-    // fill the disk with unbounded history the sweeper won't reclaim.
+  // Persist one structured event to the run's log file (until the per-run size
+  // cap), then forward it to the platform log pipeline. New runs store RunEvents
+  // (one per NDJSON line); old runs' ANSI LogEntry logs still replay via the
+  // format-detecting reader.
+  function writeRunEvent(event: RunEvent): void {
+    const line = JSON.stringify(event)
     if (!logCapped) {
       logStream.write(line + '\n')
       if (RUN_LOG_MAX_BYTES > 0) {
@@ -290,66 +314,48 @@ export async function startRunServer(
           logStream.write(
             JSON.stringify({
               t: Date.now(),
+              kind: 'raw',
               stream: 'system',
-              chunk: `\n[Conduit: run log truncated on disk — exceeded ${RUN_LOG_MAX_BYTES}-byte cap. Live output continues.]`,
+              text: `[Conduit: run log truncated on disk — exceeded ${RUN_LOG_MAX_BYTES}-byte cap. Live output continues.]`,
             }) + '\n'
           )
         }
       }
     }
     // Always emit to stdout so the platform log forwarder (Datadog, etc.) ingests.
-    process.stdout.write(JSON.stringify({ runId, agentId, ...entry }) + '\n')
+    process.stdout.write(JSON.stringify({ runId, agentId, ...event }) + '\n')
   }
 
-  function emitSystemMessage(chunk: string): void {
-    const entry: LogEntry = { t: Date.now(), stream: 'system', chunk }
-    writeLogEntry(entry)
-    broadcast('run:output', { runId, stream: 'system', chunks: [chunk] })
-  }
-
-  // Track the last non-empty output line (ANSI-stripped) for a run-list excerpt.
+  // Last meaningful activity (plain text) for the runs-list excerpt / live label.
   let lastLine = ''
-  function updateLastLine(chunk: string): void {
-    const cleaned = chunk.replace(/\x1b\[[0-9;]*m/g, '')
-    const lines = cleaned.split(/\r?\n/).map((l) => l.trim()).filter(Boolean)
-    if (lines.length > 0) lastLine = lines[lines.length - 1].slice(0, 500)
-  }
 
-  // Buffer + flush helpers (batch rapid output into single WebSocket messages)
-  const stdoutBuffer: string[] = []
-  const stderrBuffer: string[] = []
+  // Buffer + flush structured events into batched WebSocket broadcasts.
+  const eventBuffer: RunEvent[] = []
   let flushScheduled = false
-
   function scheduleFlush(): void {
     if (flushScheduled) return
     flushScheduled = true
     setImmediate(() => {
       flushScheduled = false
-      if (stdoutBuffer.length > 0) {
-        const chunks = stdoutBuffer.splice(0)
-        broadcast('run:output', { runId, stream: 'stdout', chunks })
-      }
-      if (stderrBuffer.length > 0) {
-        const chunks = stderrBuffer.splice(0)
-        broadcast('run:output', { runId, stream: 'stderr', chunks })
+      if (eventBuffer.length > 0) {
+        const events = eventBuffer.splice(0)
+        broadcast('run:events', { runId, events })
       }
     })
   }
 
-  function handleStdoutChunk(chunk: string): void {
-    const entry: LogEntry = { t: Date.now(), stream: 'stdout', chunk }
-    writeLogEntry(entry)
-    updateLastLine(chunk)
-    stdoutBuffer.push(chunk)
+  // Stamp, persist, summarize (for lastLine), and queue an event for broadcast.
+  function emitEvent(init: RunEventInit): void {
+    const event: RunEvent = { ...init, t: Date.now() }
+    writeRunEvent(event)
+    const summary = summarizeEvent(event)
+    if (summary) lastLine = summary.slice(0, 500)
+    eventBuffer.push(event)
     scheduleFlush()
   }
 
-  function handleStderrChunk(chunk: string): void {
-    const entry: LogEntry = { t: Date.now(), stream: 'stderr', chunk }
-    writeLogEntry(entry)
-    updateLastLine(chunk)
-    stderrBuffer.push(chunk)
-    scheduleFlush()
+  function emitSystemMessage(text: string): void {
+    emitEvent({ kind: 'raw', stream: 'system', text })
   }
 
   // Guard against double-finalization (e.g. stopRun + close event)
@@ -364,14 +370,10 @@ export async function startRunServer(
     activeProcesses.delete(runId)
     cleanupRun(runId, workspacePath, isEphemeral, worktreeClonePath)
 
-    // Flush any remaining buffered output
-    if (stdoutBuffer.length > 0) {
-      const chunks = stdoutBuffer.splice(0)
-      broadcast('run:output', { runId, stream: 'stdout', chunks })
-    }
-    if (stderrBuffer.length > 0) {
-      const chunks = stderrBuffer.splice(0)
-      broadcast('run:output', { runId, stream: 'stderr', chunks })
+    // Flush any remaining buffered events
+    if (eventBuffer.length > 0) {
+      const events = eventBuffer.splice(0)
+      broadcast('run:events', { runId, events })
     }
 
     logStream.end()
@@ -485,7 +487,7 @@ export async function startRunServer(
     throw err
   }
 
-  activeProcesses.set(runId, { child, finalize: finalizeRun, workspacePath })
+  activeProcesses.set(runId, { child, finalize: finalizeRun, workspacePath, agentId })
 
   // Handle spawn errors (binary not in PATH, etc.)
   child.on('error', (err) => {
@@ -497,24 +499,20 @@ export async function startRunServer(
     finalizeRun('failed', undefined)
   })
 
-  // Readline on stdout for NDJSON parsing
-  const parseOutput = agent.runner === 'amp' ? parseAmpOutput : parseClaudeOutput
+  // Readline on stdout for NDJSON parsing → structured events.
+  const parseEvents = agent.runner === 'amp' ? parseAmpEvents : parseClaudeEvents
 
   if (child.stdout) {
     const rl = createInterface({ input: child.stdout, crlfDelay: Infinity })
     rl.on('line', (line) => {
-      const parsed = parseOutput(line)
-      if (parsed !== null) {
-        // readline strips the newline — add \r\n so xterm renders on separate lines
-        handleStdoutChunk(parsed + '\r\n')
-      }
+      for (const ev of parseEvents(line)) emitEvent(ev)
     })
   }
 
   // Stderr: stream raw
   if (child.stderr) {
     child.stderr.on('data', (data: Buffer) => {
-      handleStderrChunk(data.toString('utf8'))
+      emitEvent({ kind: 'raw', stream: 'stderr', text: data.toString('utf8') })
     })
   }
 

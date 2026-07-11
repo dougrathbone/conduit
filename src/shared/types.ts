@@ -535,9 +535,10 @@ export interface ConduitAPI {
     list: (agentId: string) => Promise<ExecutionRun[]>
     start: (agentId: string) => Promise<ExecutionRun>
     stop: (runId: string) => Promise<void>
-    getLog: (runId: string) => Promise<LogEntry[]>
+    getLog: (runId: string) => Promise<RunLog>
   }
   onOutput: (cb: (payload: RunOutputPayload) => void) => () => void
+  onRunEvents: (cb: (payload: RunEventsPayload) => void) => () => void
   onRunStatusChange: (cb: (payload: RunStatusChangePayload) => void) => () => void
   gist: {
     save: (content: string, gistId?: string) => Promise<string>
