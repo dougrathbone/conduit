@@ -21,6 +21,7 @@ function rowToAgentConfig(row: typeof agents.$inferSelect): AgentConfig {
   return {
     id: row.id,
     name: row.name,
+    description: row.description ?? undefined,
     runner: row.runner as AgentConfig['runner'],
     prompt: row.prompt,
     envVars: JSON.parse(row.envVars ?? '{}') as Record<string, string>,
@@ -63,6 +64,7 @@ export async function createAgent(
   await getDb().insert(agents).values({
     id,
     name: data.name,
+    description: data.description ?? null,
     runner: data.runner,
     prompt: data.prompt,
     envVars: JSON.stringify(data.envVars ?? {}),
@@ -97,6 +99,7 @@ export async function updateAgent(
   if (data.mcpConfig !== undefined) await assertNoGlobalMcpKeyConflict(data.mcpConfig)
 
   if (data.name !== undefined) updateValues.name = data.name
+  if ('description' in data) updateValues.description = data.description ?? null
   if (data.runner !== undefined) updateValues.runner = data.runner
   if (data.prompt !== undefined) updateValues.prompt = data.prompt
   if (data.envVars !== undefined) updateValues.envVars = JSON.stringify(data.envVars)

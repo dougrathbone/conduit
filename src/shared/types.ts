@@ -198,6 +198,8 @@ export interface McpServersConfig {
 export interface AgentConfig {
   id: string
   name: string
+  /** Optional short description of what the agent does. */
+  description?: string
   runner: RunnerType
   prompt: string
   envVars: Record<string, string>

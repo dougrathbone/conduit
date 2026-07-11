@@ -136,6 +136,7 @@ export async function initDb(): Promise<void> {
     CREATE TABLE IF NOT EXISTS agents (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
+      description TEXT,
       runner TEXT NOT NULL,
       prompt TEXT NOT NULL,
       env_vars TEXT NOT NULL DEFAULT '{}',
@@ -233,6 +234,7 @@ export async function initDb(): Promise<void> {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS effort TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS bg_task_timeout_seconds BIGINT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS enable_repo_mcps BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS description TEXT;
     ALTER TABLE global_mcp_servers ADD COLUMN IF NOT EXISTS owner_id TEXT;
     ALTER TABLE publish_targets ADD COLUMN IF NOT EXISTS owner_id TEXT;
     ALTER TABLE repositories ADD COLUMN IF NOT EXISTS owner_id TEXT;

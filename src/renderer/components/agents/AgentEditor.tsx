@@ -136,6 +136,7 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
       initializedRef.current = agent.id
       setDraft({
         name: agent.name,
+        description: agent.description,
         runner: agent.runner,
         prompt: agent.prompt,
         envVars: agent.envVars,
@@ -195,8 +196,8 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
       clearTimeout(debounceRef.current)
       debounceRef.current = null
     }
-    const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId } = draft
-    save({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId })
+    const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId } = draft
+    save({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId })
   }, [draft, save])
 
   // Flush the pending debounced save and wait for it to land. The per-agent MCP
@@ -207,8 +208,8 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
       clearTimeout(debounceRef.current)
       debounceRef.current = null
     }
-    const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps } = draft
-    await save({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps })
+    const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps } = draft
+    await save({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps })
   }, [draft, save])
 
   useImperativeHandle(ref, () => ({
@@ -226,8 +227,8 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
     (field: keyof typeof draft, value: unknown) => {
       const updated = { ...draft, [field]: value }
       setDraft(updated)
-      const { name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps } = updated
-      scheduleSave({ name, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps })
+      const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps } = updated
+      scheduleSave({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps })
     },
     [draft, scheduleSave]
   )
@@ -294,6 +295,17 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
               value={draft.name ?? ''}
               onChange={(e) => handleChange('name', e.target.value)}
               placeholder="My Agent"
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[var(--text-secondary)]">
+              Description
+            </label>
+            <Input
+              value={draft.description ?? ''}
+              onChange={(e) => handleChange('description', e.target.value || undefined)}
+              placeholder="What does this agent do?"
             />
           </div>
 

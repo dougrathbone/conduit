@@ -126,6 +126,7 @@ export const runnerSettings = pgTable('runner_settings', {
 export const agents = pgTable('agents', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),
+  description: text('description'),
   runner: text('runner').notNull(),
   prompt: text('prompt').notNull(),
   envVars: text('env_vars').notNull().default('{}'),
