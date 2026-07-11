@@ -183,7 +183,9 @@ function sweepSummary(r: SweepResult): string {
   if (r.logsRemoved) parts.push(`${r.logsRemoved} old log${r.logsRemoved === 1 ? '' : 's'}`)
   if (r.bareClonesRemoved) parts.push(`${r.bareClonesRemoved} orphaned clone${r.bareClonesRemoved === 1 ? '' : 's'}`)
   if (r.cloningTmpRemoved) parts.push(`${r.cloningTmpRemoved} clone temp${r.cloningTmpRemoved === 1 ? '' : 's'}`)
-  return parts.length ? `Removed ${parts.join(', ')}.` : 'Nothing to clean up — already tidy.'
+  const removed = parts.length ? `Removed ${parts.join(', ')}.` : ''
+  const compacted = r.reposCompacted ? `Compacted ${r.reposCompacted} clone${r.reposCompacted === 1 ? '' : 's'}.` : ''
+  return [removed, compacted].filter(Boolean).join(' ') || 'Nothing to clean up — already tidy.'
 }
 
 function StorageUsageSummary() {

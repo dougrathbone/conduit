@@ -13,6 +13,9 @@ vi.mock('./runner', () => ({
 vi.mock('./gitOps', () => ({
   removeWorktree: vi.fn(async () => {}),
   getClonesInProgress: () => new Set<string>(),
+  listWorktrees: async () => [],
+  getGcStats: async () => ({ packs: 0, hasGarbage: false }),
+  gcBareClone: vi.fn(async () => {}),
 }))
 vi.mock('../main/execution/workspace', () => ({ deleteWorkspace: vi.fn(() => {}) }))
 vi.mock('./observability', () => ({ reporter: { captureException: vi.fn() } }))
@@ -126,8 +129,8 @@ describe('collectSweepCandidates', () => {
     fs.rmSync(fx.tmpDir, { recursive: true, force: true })
   })
 
-  it('discovers worktrees, workspaces, and mcp configs with their clone paths', () => {
-    const c = collectSweepCandidates({
+  it('discovers worktrees, workspaces, and mcp configs with their clone paths', async () => {
+    const c = await collectSweepCandidates({
       reposDir: fx.reposDir,
       tmpDir: fx.tmpDir,
       activePaths: new Set(),
@@ -141,8 +144,8 @@ describe('collectSweepCandidates', () => {
     expect(c.mcpConfigs.map((m) => path.basename(m.path))).toEqual([`conduit-mcp-${UUID_MCP}.json`])
   })
 
-  it('flags artifacts of live runs via the injected active sets', () => {
-    const c = collectSweepCandidates({
+  it('flags artifacts of live runs via the injected active sets', async () => {
+    const c = await collectSweepCandidates({
       reposDir: fx.reposDir,
       tmpDir: fx.tmpDir,
       activePaths: new Set([fx.activeWorkspacePath]),

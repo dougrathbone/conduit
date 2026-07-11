@@ -1,5 +1,6 @@
 import { spawn } from 'child_process'
 import * as fs from 'fs'
+import * as path from 'path'
 
 /**
  * Redact any credentials embedded in a URL's userinfo (e.g.
@@ -295,5 +296,101 @@ export async function removeWorktree(clonePath: string, worktreePath: string): P
     throw new Error(
       `Failed to remove worktree ${worktreePath}: directory still present after git and filesystem removal`
     )
+  }
+}
+
+/**
+ * List every git worktree registered against a bare clone, excluding the bare
+ * repo itself. Uses `git worktree list --porcelain`, so it finds worktrees
+ * wherever they live — including ones an agent created under `.claude/worktrees/`,
+ * which a filesystem scan of `worktrees-run/` alone would miss. Returns [] if git
+ * can't read the repo.
+ */
+export async function listWorktrees(clonePath: string): Promise<string[]> {
+  let out: string
+  try {
+    out = await runGit(['worktree', 'list', '--porcelain'], {
+      cwd: clonePath,
+      timeoutMs: WORKTREE_GIT_TIMEOUT_MS,
+    })
+  } catch {
+    return []
+  }
+  const paths: string[] = []
+  for (const line of out.split('\n')) {
+    if (!line.startsWith('worktree ')) continue
+    const p = line.slice('worktree '.length).trim()
+    // The bare repo lists itself; skip it — only the checkouts are reclaimable.
+    if (p && p !== clonePath) paths.push(p)
+  }
+  return paths
+}
+
+export interface GcStats {
+  /** Number of pack files — they accumulate one-per-fetch until a gc consolidates them. */
+  packs: number
+  /** Leftover git garbage (e.g. `tmp_pack_*` from an interrupted fetch). */
+  hasGarbage: boolean
+}
+
+/**
+ * Cheap probe of a bare clone's object store via `git count-objects -v`, used to
+ * decide whether a `git gc` is worthwhile. Returns a benign zero result if git
+ * can't read the repo (so gc is simply skipped).
+ */
+export async function getGcStats(clonePath: string): Promise<GcStats> {
+  let out: string
+  try {
+    out = await runGit(['count-objects', '-v'], { cwd: clonePath, timeoutMs: WORKTREE_GIT_TIMEOUT_MS })
+  } catch {
+    return { packs: 0, hasGarbage: false }
+  }
+  let packs = 0
+  let garbage = 0
+  for (const line of out.split('\n')) {
+    const idx = line.indexOf(':')
+    if (idx === -1) continue
+    const key = line.slice(0, idx).trim()
+    const value = Number(line.slice(idx + 1).trim())
+    if (key === 'packs') packs = Number.isFinite(value) ? value : 0
+    else if (key === 'garbage') garbage = Number.isFinite(value) ? value : 0
+  }
+  return { packs, hasGarbage: garbage > 0 }
+}
+
+/** Bound for `git gc` — repacking a large monorepo clone takes a while, but a
+ *  wedged gc must still never hang the sweep forever. */
+const GC_TIMEOUT_MS = 10 * 60 * 1000 // 10 min
+/** Only remove `objects/pack/tmp_*` files older than this — anything younger
+ *  could be a live fetch's in-progress temp pack. */
+const GC_TMP_MAX_AGE_MS = 60 * 60 * 1000 // 1 h
+
+/**
+ * Repack + prune a bare clone's object store, reclaiming two kinds of bloat:
+ *  - accumulated per-fetch packs → `git gc` consolidates them (uses git's
+ *    default prune window so a concurrent fetch's fresh objects are never pruned);
+ *  - leftover git "garbage" temp packs (`objects/pack/tmp_*` from a crashed or
+ *    timed-out fetch) → git gc does NOT remove these, so we delete the old ones
+ *    ourselves (sparing any young enough to belong to a live operation).
+ * Bounded by a timeout; throws on gc failure so the caller can report it.
+ */
+export async function gcBareClone(clonePath: string): Promise<void> {
+  await runGit(['gc'], { cwd: clonePath, timeoutMs: GC_TIMEOUT_MS })
+  const packDir = path.join(clonePath, 'objects', 'pack')
+  let entries: fs.Dirent[]
+  try {
+    entries = fs.readdirSync(packDir, { withFileTypes: true })
+  } catch {
+    return // no pack dir / unreadable — nothing to prune
+  }
+  const cutoff = Date.now() - GC_TMP_MAX_AGE_MS
+  for (const e of entries) {
+    if (!e.name.startsWith('tmp_')) continue
+    const p = path.join(packDir, e.name)
+    try {
+      if (fs.statSync(p).mtimeMs < cutoff) fs.rmSync(p, { recursive: true, force: true })
+    } catch {
+      /* best-effort: a file that vanished or is unreadable isn't our problem */
+    }
   }
 }

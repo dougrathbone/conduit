@@ -53,6 +53,8 @@ export interface SweepResult {
   bareClonesRemoved: number
   /** Leftover clone temp dirs (repos/<id>.cloning) removed after an interrupted clone. */
   cloningTmpRemoved: number
+  /** Bare clones compacted via `git gc` (per-fetch packs consolidated, garbage pruned). */
+  reposCompacted: number
 }
 
 /**

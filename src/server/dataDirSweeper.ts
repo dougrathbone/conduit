@@ -4,7 +4,7 @@ import * as path from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { REPOS_DIR, DATA_DIR } from '../main/utils/paths'
-import { removeWorktree, getClonesInProgress } from './gitOps'
+import { removeWorktree, getClonesInProgress, listWorktrees, getGcStats, gcBareClone } from './gitOps'
 import { deleteWorkspace } from '../main/execution/workspace'
 import { getActiveWorkspacePaths, getActiveRunIds } from './runner'
 import { getAllRepositoryIds } from '../main/db/queries/repositories'
@@ -43,6 +43,10 @@ export const SWEEP_GRACE_MS = envMs(process.env.CONDUIT_SWEEP_GRACE_MS, DEFAULT_
  *  not forever, or `logs/` grows unbounded (the sweeper never touched it before,
  *  a silent leak). Logs older than this are reclaimable. */
 export const LOG_RETENTION_MS = envMs(process.env.CONDUIT_LOG_RETENTION_MS, DEFAULT_LOG_RETENTION_MS)
+/** Compact a live bare clone once it has this many pack files (one is added per
+ *  fetch). A `git gc` consolidates them; after gc the count drops to ~1 so it
+ *  won't run again until packs re-accumulate — making the sweep self-limiting. */
+export const GC_PACK_THRESHOLD = envMs(process.env.CONDUIT_GC_PACK_THRESHOLD, 10)
 
 /** A candidate artifact considered for removal. */
 export interface SweepEntry {
@@ -194,6 +198,8 @@ export interface SweepCandidates {
   bareClones: SweepCandidate[]
   /** Leftover clone temp dirs (repos/<id>.cloning) from an interrupted clone. */
   cloningTmp: SweepCandidate[]
+  /** Bare clones (repos/<id>) whose repository still exists — eligible for gc. */
+  liveClonePaths: string[]
 }
 
 /** Overrides for the directories/active-sets scanned — injected in tests. */
@@ -210,6 +216,9 @@ export interface SweepScanOptions {
   /** Absolute paths of clone temp dirs an in-flight clone is writing on this pod;
    *  such a `.cloning` dir is spared. Omitted ⇒ read from the live gitOps set. */
   activeClonePaths?: Set<string>
+  /** Enumerate a bare clone's registered worktrees. Omitted ⇒ the live gitOps
+   *  `git worktree list`. Injected in tests to avoid spawning git. */
+  listWorktrees?: (clonePath: string) => Promise<string[]>
 }
 
 /**
@@ -220,7 +229,7 @@ export interface SweepScanOptions {
  * consume it, so the reclaimable estimate can never disagree with what a sweep
  * actually frees.
  */
-export function collectSweepCandidates(opts: SweepScanOptions = {}): SweepCandidates {
+export async function collectSweepCandidates(opts: SweepScanOptions = {}): Promise<SweepCandidates> {
   const reposDir = opts.reposDir ?? REPOS_DIR
   const tmpDir = opts.tmpDir ?? os.tmpdir()
   // Derive the logs dir from reposDir's parent so an injected (test) data dir
@@ -230,13 +239,16 @@ export function collectSweepCandidates(opts: SweepScanOptions = {}): SweepCandid
   const activeRunIds = opts.activeRunIds ?? getActiveRunIds()
   const knownRepoIds = opts.knownRepoIds
   const activeClonePaths = opts.activeClonePaths ?? getClonesInProgress()
+  const listWt = opts.listWorktrees ?? listWorktrees
 
-  // 1. Git worktrees (reposDir/<repoId>/worktrees-run/<uuid>) and, alongside,
-  //    orphaned bare clones (reposDir/<repoId> whose repository no longer exists)
-  //    and leftover clone temp dirs (reposDir/<repoId>.cloning).
+  // 1. Git worktrees (Conduit's under worktrees-run/ plus any an agent created,
+  //    e.g. .claude/worktrees/*), orphaned bare clones (repos/<id> whose repo is
+  //    gone), leftover clone temp dirs (repos/<id>.cloning), and the live clones
+  //    (repo still exists) that are eligible for gc.
   const worktrees: WorktreeCandidate[] = []
   const bareClones: SweepCandidate[] = []
   const cloningTmp: SweepCandidate[] = []
+  const liveClonePaths: string[] = []
   for (const repoEntry of listDir(reposDir)) {
     if (!repoEntry.isDirectory()) continue
     const repoId = repoEntry.name
@@ -254,29 +266,45 @@ export function collectSweepCandidates(opts: SweepScanOptions = {}): SweepCandid
     }
     const clonePath = path.join(reposDir, repoId)
     const worktreesDir = path.join(clonePath, 'worktrees-run')
+    // A live run occupies this clone when an active worktree sits under it. Used
+    // both to spare a whole clone's bare removal and to spare agent-created
+    // worktrees, which aren't individually tracked in the active set.
+    const cloneHasActiveRun = [...activePaths].some(
+      (ap) => ap === clonePath || ap.startsWith(clonePath + path.sep)
+    )
+    // Union of worktrees found on disk under worktrees-run/ (robust even if git's
+    // admin is broken) and every worktree git knows about (catches ones an agent
+    // created elsewhere, e.g. .claude/worktrees/*, that the sweeper used to miss).
+    const worktreePaths = new Set<string>()
     for (const e of listDir(worktreesDir)) {
-      if (!e.isDirectory()) continue
-      const p = path.join(worktreesDir, e.name)
+      if (e.isDirectory()) worktreePaths.add(path.join(worktreesDir, e.name))
+    }
+    for (const p of await listWt(clonePath)) worktreePaths.add(p)
+    for (const p of worktreePaths) {
+      const isRunDir = p === worktreesDir || p.startsWith(worktreesDir + path.sep)
       worktrees.push({
         key: p,
         path: p,
         clonePath,
         mtimeMs: safeMtimeMs(p),
-        protectedByActive: activePaths.has(p),
+        // Conduit's own run worktrees use the precise active set. Agent-created
+        // worktrees aren't tracked individually, so spare them whenever the clone
+        // has any live run rather than risk removing one mid-run.
+        protectedByActive: activePaths.has(p) || (!isRunDir && cloneHasActiveRun),
       })
     }
     // A bare clone is reclaimable only when we KNOW its repo is gone (id absent
-    // from knownRepoIds) and no live run's worktree sits under it.
+    // from knownRepoIds) and no live run sits under it; when the repo still
+    // exists it's a live clone eligible for gc.
     if (knownRepoIds && !knownRepoIds.has(repoId)) {
-      const activeUnder = [...activePaths].some(
-        (p) => p === clonePath || p.startsWith(clonePath + path.sep)
-      )
       bareClones.push({
         key: clonePath,
         path: clonePath,
         mtimeMs: safeMtimeMs(clonePath),
-        protectedByActive: activeUnder,
+        protectedByActive: cloneHasActiveRun,
       })
+    } else if (knownRepoIds) {
+      liveClonePaths.push(clonePath)
     }
   }
 
@@ -319,7 +347,7 @@ export function collectSweepCandidates(opts: SweepScanOptions = {}): SweepCandid
     })
   }
 
-  return { worktrees, workspaces, mcpConfigs, logs, bareClones, cloningTmp }
+  return { worktrees, workspaces, mcpConfigs, logs, bareClones, cloningTmp, liveClonePaths }
 }
 
 /**
@@ -358,7 +386,8 @@ export function sweepOnce(now: number = Date.now()): Promise<SweepResult> {
  */
 async function runSweep(now: number): Promise<SweepResult> {
   const knownRepoIds = await safeKnownRepoIds()
-  const { worktrees, workspaces, mcpConfigs, logs, bareClones, cloningTmp } = collectSweepCandidates({ knownRepoIds })
+  const { worktrees, workspaces, mcpConfigs, logs, bareClones, cloningTmp, liveClonePaths } =
+    await collectSweepCandidates({ knownRepoIds })
   const result: SweepResult = {
     worktreesRemoved: 0,
     workspacesRemoved: 0,
@@ -366,6 +395,7 @@ async function runSweep(now: number): Promise<SweepResult> {
     logsRemoved: 0,
     bareClonesRemoved: 0,
     cloningTmpRemoved: 0,
+    reposCompacted: 0,
   }
 
   // 1. Git worktrees: reposDir/<repoId>/worktrees-run/<uuid>
@@ -425,19 +455,37 @@ async function runSweep(now: number): Promise<SweepResult> {
     }
   }
 
+  // 7. Compact live bare clones that have accumulated per-fetch packs or leftover
+  //    git garbage (e.g. tmp_pack_* from a crashed fetch). Skip any with a clone
+  //    in flight; bounded + self-limiting (after gc, packs drop below threshold).
+  const activeClonePaths = getClonesInProgress()
+  for (const clonePath of liveClonePaths) {
+    if (activeClonePaths.has(`${clonePath}.cloning`)) continue
+    try {
+      const stats = await getGcStats(clonePath)
+      if (stats.hasGarbage || stats.packs >= GC_PACK_THRESHOLD) {
+        await gcBareClone(clonePath)
+        result.reposCompacted++
+      }
+    } catch (err) {
+      reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'gc' } })
+    }
+  }
+
   const total =
     result.worktreesRemoved +
     result.workspacesRemoved +
     result.mcpConfigsRemoved +
     result.logsRemoved +
     result.bareClonesRemoved +
-    result.cloningTmpRemoved
+    result.cloningTmpRemoved +
+    result.reposCompacted
   if (total > 0) {
     console.log(
       `[dataDirSweeper] Removed ${result.worktreesRemoved} worktree(s), ` +
         `${result.workspacesRemoved} workspace(s), ${result.mcpConfigsRemoved} MCP config(s), ` +
         `${result.logsRemoved} log(s), ${result.bareClonesRemoved} bare clone(s), ` +
-        `${result.cloningTmpRemoved} clone temp(s).`
+        `${result.cloningTmpRemoved} clone temp(s); compacted ${result.reposCompacted} clone(s).`
     )
   }
   // A sweep changes on-disk sizes; drop the cached usage so the next read (and
@@ -478,7 +526,7 @@ export async function estimateStorageUsage(opts: StorageScanOptions = {}): Promi
   // inject an explicit reposDir and stay DB-free.
   const knownRepoIds =
     opts.knownRepoIds ?? (opts.reposDir === undefined ? await safeKnownRepoIds() : undefined)
-  const { worktrees, workspaces, mcpConfigs, logs, bareClones, cloningTmp } = collectSweepCandidates({
+  const { worktrees, workspaces, mcpConfigs, logs, bareClones, cloningTmp } = await collectSweepCandidates({
     ...opts,
     knownRepoIds,
   })

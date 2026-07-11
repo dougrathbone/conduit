@@ -9,6 +9,9 @@ vi.mock('./runner', () => ({
 vi.mock('./gitOps', () => ({
   removeWorktree: vi.fn(async () => {}),
   getClonesInProgress: () => new Set<string>(),
+  listWorktrees: async () => [],
+  getGcStats: async () => ({ packs: 0, hasGarbage: false }),
+  gcBareClone: vi.fn(async () => {}),
 }))
 vi.mock('../main/execution/workspace', () => ({ deleteWorkspace: vi.fn(() => {}) }))
 vi.mock('./observability', () => ({ reporter: { captureException: vi.fn() } }))
@@ -86,7 +89,7 @@ describe('classifyTmpEntry', () => {
 })
 
 describe('collectSweepCandidates — orphaned `.cloning` clone temps', () => {
-  it('discovers leftover .cloning temp dirs and protects those an in-flight clone owns', () => {
+  it('discovers leftover .cloning temp dirs and protects those an in-flight clone owns', async () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sweeper-cloning-test-'))
     const reposDir = path.join(base, 'repos')
     const tmpDir = path.join(base, 'tmp')
@@ -104,19 +107,68 @@ describe('collectSweepCandidates — orphaned `.cloning` clone temps', () => {
       fs.mkdirSync(orphan)
       fs.mkdirSync(active)
 
-      const { cloningTmp } = collectSweepCandidates({
+      const { cloningTmp } = await collectSweepCandidates({
         reposDir,
         tmpDir,
         logsDir,
         activePaths: new Set(),
         activeRunIds: new Set(),
         activeClonePaths: new Set([active]),
+        listWorktrees: async () => [],
       })
 
       const byPath = new Map(cloningTmp.map((c) => [c.path, c]))
       expect(byPath.size).toBe(2)
       expect(byPath.get(orphan)?.protectedByActive).toBe(false)
       expect(byPath.get(active)?.protectedByActive).toBe(true)
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('collectSweepCandidates — agent-created worktrees (git-discovered)', () => {
+  it('finds worktrees outside worktrees-run/ and spares them while the clone has a live run', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sweeper-wt-test-'))
+    const reposDir = path.join(base, 'repos')
+    const clone = path.join(reposDir, 'repo-1')
+    const runWt = path.join(clone, 'worktrees-run', 'run-1') // Conduit's own (fs-scanned)
+    const agentWt = path.join(clone, '.claude', 'worktrees', 'agent-x') // git-discovered
+    fs.mkdirSync(runWt, { recursive: true })
+    fs.mkdirSync(agentWt, { recursive: true })
+    const tmpDir = path.join(base, 'tmp')
+    const logsDir = path.join(base, 'logs')
+    fs.mkdirSync(tmpDir)
+    fs.mkdirSync(logsDir)
+    try {
+      // Idle clone: both the run worktree and the agent worktree are orphans.
+      const idle = await collectSweepCandidates({
+        reposDir,
+        tmpDir,
+        logsDir,
+        activePaths: new Set(),
+        activeRunIds: new Set(),
+        activeClonePaths: new Set(),
+        listWorktrees: async () => [agentWt],
+      })
+      const idleByPath = new Map(idle.worktrees.map((w) => [w.path, w]))
+      expect(idleByPath.has(runWt)).toBe(true) // via filesystem scan
+      expect(idleByPath.has(agentWt)).toBe(true) // via git worktree list — the leak the sweeper missed
+      expect(idleByPath.get(agentWt)?.protectedByActive).toBe(false)
+
+      // A live run under the clone: the untracked agent worktree is spared.
+      const busy = await collectSweepCandidates({
+        reposDir,
+        tmpDir,
+        logsDir,
+        activePaths: new Set([runWt]),
+        activeRunIds: new Set(),
+        activeClonePaths: new Set(),
+        listWorktrees: async () => [agentWt],
+      })
+      const busyByPath = new Map(busy.worktrees.map((w) => [w.path, w]))
+      expect(busyByPath.get(runWt)?.protectedByActive).toBe(true) // exact active-set match
+      expect(busyByPath.get(agentWt)?.protectedByActive).toBe(true) // spared: clone has a live run
     } finally {
       fs.rmSync(base, { recursive: true, force: true })
     }
