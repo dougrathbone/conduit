@@ -288,9 +288,23 @@ export async function startRunServer(
   // Update run record with the real log path
   const run = await updateRun(runId, { logPath: realLogPath })
 
-  // 3b. Write MCP config now that we have the runId
+  // 3b. Write MCP config now that we have the runId. This can throw (e.g. an MCP
+  // OAuth token that can't be decrypted). Since the run record already exists,
+  // an unhandled throw here would leave it orphaned as "running" forever with no
+  // log — so on failure we mark it failed, record why in its log, and surface it.
   const actingUserId = startedBy ?? agent.ownerId ?? DEV_USER_ID
-  const mcpConfigPath = await writeMcpConfig(runId, agent.mcpConfig, actingUserId)
+  let mcpConfigPath: string
+  try {
+    mcpConfigPath = await writeMcpConfig(runId, agent.mcpConfig, actingUserId)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    appendRunLog(runId, `Failed to prepare run: ${msg}`)
+    cleanupRun(runId, workspacePath, isEphemeral, worktreeClonePath)
+    await updateRun(runId, { status: 'failed', endedAt: Date.now(), lastLine: `Failed to prepare run: ${msg}` })
+    broadcast('run:statusChange', { runId, status: 'failed' })
+    reporter.captureException(err, { tags: { component: 'runner', op: 'prepareRun', runId } })
+    throw err
+  }
 
   // 5. Open log file write stream
   const logStream = fs.createWriteStream(realLogPath, { flags: 'a', encoding: 'utf8' })

@@ -21,12 +21,15 @@ export function RunControls({
   activeRunStartedAt,
   onRunStarted,
 }: RunControlsProps) {
-  const { setActiveRun } = useUIStore()
+  const { setActiveRun, setViewedRun } = useUIStore()
   const startRun = useStartRun(agentId)
   const stopRun = useStopRun()
 
   // Elapsed time counter for live runs
   const [elapsed, setElapsed] = useState<number>(0)
+  // Surfaced when a run fails to even start (e.g. a bad credential) — otherwise
+  // the failure is invisible and the user just sees an unchanged, empty list.
+  const [startError, setStartError] = useState<string | null>(null)
 
   useEffect(() => {
     if (activeRunStatus !== 'running' && activeRunStatus !== 'launched') {
@@ -43,12 +46,18 @@ export function RunControls({
   }, [activeRunStatus, activeRunStartedAt])
 
   const handleStart = async () => {
+    setStartError(null)
     try {
       const run = await startRun.mutateAsync()
+      // Point both the active + viewed run at the new run so the pane switches to
+      // its live view immediately (otherwise a previously-selected run keeps the
+      // pane and the new run's output never shows).
       setActiveRun(run.id)
+      setViewedRun(run.id)
       onRunStarted?.()
     } catch (e) {
       console.error('Failed to start run:', e)
+      setStartError(e instanceof Error ? e.message : 'Failed to start run')
     }
   }
 
@@ -100,19 +109,29 @@ export function RunControls({
     activeRunStatus === 'stopped'
 
   return (
-    <Button
-      variant="default"
-      size="sm"
-      onClick={handleStart}
-      disabled={isStarting}
-      className="gap-1.5"
-    >
-      {isStarting ? (
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-      ) : (
-        <Play className="h-3.5 w-3.5 fill-current" />
+    <div className="flex items-center gap-2">
+      {startError && (
+        <span
+          className="max-w-[260px] truncate text-xs text-red-400"
+          title={startError}
+        >
+          Couldn’t start: {startError}
+        </span>
       )}
-      {hasCompleted ? 'Run Again' : 'Run'}
-    </Button>
+      <Button
+        variant="default"
+        size="sm"
+        onClick={handleStart}
+        disabled={isStarting}
+        className="gap-1.5"
+      >
+        {isStarting ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        ) : (
+          <Play className="h-3.5 w-3.5 fill-current" />
+        )}
+        {hasCompleted ? 'Run Again' : 'Run'}
+      </Button>
+    </div>
   )
 }

@@ -220,8 +220,15 @@ export function RunLogView({ runId, live = false, startedAt }: RunLogViewProps) 
       <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
         <div className="font-mono text-[13px]">
           {events.length === 0 && (
-            <div className="text-[var(--text-secondary)]">
-              {live ? 'Waiting for output…' : 'No output.'}
+            <div className="flex items-center gap-2 text-[var(--text-secondary)]">
+              {live ? (
+                <>
+                  <Spinner className="text-green-400" />
+                  <span>Starting run — waiting for the agent’s first output…</span>
+                </>
+              ) : (
+                'No output.'
+              )}
             </div>
           )}
           {events.map((e, i) => {

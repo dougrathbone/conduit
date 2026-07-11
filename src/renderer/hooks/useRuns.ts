@@ -2,7 +2,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '@renderer/lib/ipc'
 import { summarizeEvent } from '@shared/runEvents'
-import type { RunEvent } from '@shared/types'
+import type { RunEvent, ExecutionRun } from '@shared/types'
 
 export function useRuns(agentId: string) {
   return useQuery({
@@ -16,7 +16,13 @@ export function useStartRun(agentId: string) {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: () => api.runs.start(agentId),
-    onSuccess: () => {
+    onSuccess: (run) => {
+      // Show the new run in the list immediately, before the refetch round-trip —
+      // MainPanel derives the in-progress run (and the live pane) from this cache,
+      // so an optimistic prepend makes both appear the instant Run is pressed.
+      queryClient.setQueryData<ExecutionRun[]>(['runs', agentId], (old) =>
+        old ? [run, ...old.filter((r) => r.id !== run.id)] : [run]
+      )
       queryClient.invalidateQueries({ queryKey: ['runs', agentId] })
     },
   })
