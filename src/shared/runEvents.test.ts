@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { describeToolUse, summarizeEvent, isRunEvent } from './runEvents'
-import type { RunEventInit } from './types'
+import { describeToolUse, summarizeEvent, isRunEvent, runLogToText } from './runEvents'
+import type { RunEvent, RunEventInit } from './types'
 
 describe('describeToolUse', () => {
   const cases: Array<[string, string, unknown, { title: string; subtitle?: string }]> = [
@@ -57,6 +57,46 @@ describe('summarizeEvent', () => {
   it('summarizes raw text', () => {
     expect(summarizeEvent(mk({ kind: 'raw', stream: 'stderr', text: 'boom' }))).toBe('boom')
     expect(summarizeEvent(mk({ kind: 'raw', stream: 'system', text: '   ' }))).toBe('')
+  })
+})
+
+describe('runLogToText', () => {
+  it('renders assistant text, a tool call with its paired output, and the result', () => {
+    const events: RunEvent[] = [
+      { t: 1, kind: 'assistant', text: 'Let me check the build.' },
+      { t: 2, kind: 'tool_use', toolUseId: 'a', toolName: 'Bash', toolInput: { command: 'npm run build' } },
+      { t: 3, kind: 'tool_result', toolUseId: 'a', content: 'Build OK\nDone' },
+      { t: 4, kind: 'result', isError: false },
+    ]
+    const text = runLogToText(events)
+    expect(text).toContain('● Let me check the build.')
+    expect(text).toContain('❯ Bash npm run build')
+    expect(text).toContain('    Build OK')
+    expect(text).toContain('    Done')
+    expect(text).toContain('✓ Completed')
+    expect(text.endsWith('\n')).toBe(true)
+  })
+
+  it('pairs each output to its call by toolUseId, not by stream order', () => {
+    const events: RunEvent[] = [
+      { t: 1, kind: 'tool_use', toolUseId: 'x', toolName: 'Read', toolInput: { file_path: 'a.ts' } },
+      { t: 2, kind: 'tool_use', toolUseId: 'y', toolName: 'Read', toolInput: { file_path: 'b.ts' } },
+      { t: 3, kind: 'tool_result', toolUseId: 'y', content: 'contents of b' },
+      { t: 4, kind: 'tool_result', toolUseId: 'x', content: 'contents of a' },
+    ]
+    const text = runLogToText(events)
+    // Output for a.ts must sit under the a.ts call, before the b.ts call.
+    expect(text.indexOf('contents of a')).toBeLessThan(text.indexOf('b.ts'))
+    expect(text.indexOf('contents of b')).toBeGreaterThan(text.indexOf('b.ts'))
+  })
+
+  it('marks a failed result', () => {
+    expect(runLogToText([{ t: 1, kind: 'result', isError: true }])).toContain('✗ Failed')
+  })
+
+  it('renders a tool call with no output as just its header', () => {
+    const text = runLogToText([{ t: 1, kind: 'tool_use', toolName: 'TodoWrite', toolInput: {} }])
+    expect(text.trim()).toBe('❯ TodoWrite')
   })
 })
 

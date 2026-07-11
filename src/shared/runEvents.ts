@@ -112,6 +112,50 @@ export function summarizeEvent(ev: RunEventInit): string {
   }
 }
 
+/**
+ * Serialize a run's structured events into a plain-text transcript for download —
+ * a fully-expanded version of the on-screen log (assistant narration, each tool
+ * call with its output, and the final result). Tool results are paired to their
+ * call by `toolUseId`, matching the rendered view, so a collapsed UI still yields
+ * a complete log file. Pure and unit-tested.
+ */
+export function runLogToText(events: RunEvent[]): string {
+  const resultByToolUse = new Map<string, RunEvent>()
+  for (const e of events) {
+    if (e.kind === 'tool_result' && e.toolUseId) resultByToolUse.set(e.toolUseId, e)
+  }
+
+  const lines: string[] = []
+  const pushIndented = (text: string) => {
+    for (const l of text.trimEnd().split('\n')) lines.push(`    ${l}`)
+  }
+
+  for (const e of events) {
+    switch (e.kind) {
+      case 'assistant':
+        if (e.text?.trim()) lines.push(`● ${e.text.trim()}`, '')
+        break
+      case 'tool_use': {
+        const d = describeToolUse(e.toolName, e.toolInput)
+        lines.push(d.subtitle ? `❯ ${d.title} ${d.subtitle}` : `❯ ${d.title}`)
+        const output = (e.toolUseId ? resultByToolUse.get(e.toolUseId)?.content : undefined) ?? ''
+        if (output.trim()) pushIndented(output)
+        lines.push('')
+        break
+      }
+      case 'raw':
+        if (e.text?.trim()) lines.push(e.text.trimEnd(), '')
+        break
+      case 'result':
+        lines.push(e.isError ? '✗ Failed' : '✓ Completed')
+        break
+      // tool_result rows are consumed via the toolUseId map above.
+    }
+  }
+
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n'
+}
+
 /** Narrow a parsed JSONL object to a RunEvent (has the `kind` discriminant). */
 export function isRunEvent(value: unknown): value is RunEvent {
   return (

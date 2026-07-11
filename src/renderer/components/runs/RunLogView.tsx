@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Loader2, ChevronRight, ChevronsDownUp, ChevronsUpDown } from 'lucide-react'
+import { Loader2, ChevronRight, ChevronsDownUp, ChevronsUpDown, Download } from 'lucide-react'
 import { cn, formatDuration } from '@renderer/lib/utils'
 import { useRunEvents } from '@renderer/hooks/useRuns'
-import { describeToolUse, summarizeEvent } from '@shared/runEvents'
+import { describeToolUse, runLogToText, summarizeEvent } from '@shared/runEvents'
 import type { RunEvent } from '@shared/types'
 import { TerminalPane } from '@renderer/components/layout/TerminalPane'
 
@@ -179,6 +179,20 @@ export function RunLogView({ runId, live = false, startedAt }: RunLogViewProps) 
   const toggleAll = () =>
     setExpanded(allExpanded ? new Set() : new Set(toolKeys))
 
+  // Download the run's log as a fully-expanded plain-text transcript. Client-side
+  // only — the events are already loaded, so no server round-trip is needed.
+  const downloadLog = () => {
+    const blob = new Blob([runLogToText(events)], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `conduit-run-${runId}.log`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center text-[var(--text-secondary)]">
@@ -205,16 +219,29 @@ export function RunLogView({ runId, live = false, startedAt }: RunLogViewProps) 
         <span className="text-xs text-[var(--text-secondary)]">
           {toolKeys.length > 0 ? `${toolKeys.length} tool call${toolKeys.length === 1 ? '' : 's'}` : 'Log'}
         </span>
-        {toolKeys.length > 0 && (
-          <button
-            type="button"
-            onClick={toggleAll}
-            className="ml-auto flex items-center gap-1.5 rounded border border-[var(--border)] px-2 py-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
-          >
-            {allExpanded ? <ChevronsDownUp className="h-3 w-3" /> : <ChevronsUpDown className="h-3 w-3" />}
-            {allExpanded ? 'Collapse all' : 'Expand all'}
-          </button>
-        )}
+        <div className="ml-auto flex items-center gap-2">
+          {events.length > 0 && (
+            <button
+              type="button"
+              onClick={downloadLog}
+              title="Download this run's log as a text file"
+              className="flex items-center gap-1.5 rounded border border-[var(--border)] px-2 py-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            >
+              <Download className="h-3 w-3" />
+              Download log
+            </button>
+          )}
+          {toolKeys.length > 0 && (
+            <button
+              type="button"
+              onClick={toggleAll}
+              className="flex items-center gap-1.5 rounded border border-[var(--border)] px-2 py-1 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)]"
+            >
+              {allExpanded ? <ChevronsDownUp className="h-3 w-3" /> : <ChevronsUpDown className="h-3 w-3" />}
+              {allExpanded ? 'Collapse all' : 'Expand all'}
+            </button>
+          )}
+        </div>
       </div>
 
       <div ref={scrollRef} onScroll={onScroll} className="min-h-0 flex-1 overflow-y-auto px-3 py-3">
