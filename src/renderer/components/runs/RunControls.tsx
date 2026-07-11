@@ -103,11 +103,6 @@ export function RunControls({
     )
   }
 
-  const hasCompleted =
-    activeRunStatus === 'completed' ||
-    activeRunStatus === 'failed' ||
-    activeRunStatus === 'stopped'
-
   return (
     <div className="flex items-center gap-2">
       {startError && (
@@ -130,7 +125,7 @@ export function RunControls({
         ) : (
           <Play className="h-3.5 w-3.5 fill-current" />
         )}
-        {hasCompleted ? 'Run Again' : 'Run'}
+        Run
       </Button>
     </div>
   )
