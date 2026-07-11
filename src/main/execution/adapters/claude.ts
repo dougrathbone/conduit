@@ -23,12 +23,18 @@ export function buildClaudeArgs(mcpConfigPath: string, effort?: string, strictMc
   ]
 }
 
+import type { RunEventInit } from '../../../shared/types'
+import { capText } from '../../../shared/runEvents'
+
 interface ContentBlock {
   type: string
   text?: string
+  /** tool_use block id (correlates to a later tool_result's tool_use_id). */
+  id?: string
   name?: string
   input?: Record<string, unknown>
   tool_use_id?: string
+  is_error?: boolean
   content?: unknown
 }
 
@@ -234,4 +240,71 @@ export function parseClaudeOutput(line: string): string | null {
     default:
       return null
   }
+}
+
+/**
+ * Parse a single NDJSON line from `claude --output-format stream-json` into
+ * structured RunEvents (without a timestamp — the runner stamps `t`). A single
+ * line may yield several events (e.g. an assistant message with text + multiple
+ * tool calls). Unparseable lines become a `raw` event so nothing is dropped.
+ *
+ * Unlike parseClaudeOutput (which flattens to ANSI text for the legacy Electron
+ * path), this preserves the raw tool name/input/output so the client can render
+ * a simplified flow and expand details on demand.
+ */
+export function parseClaudeEvents(line: string): RunEventInit[] {
+  const trimmed = line.trim()
+  if (!trimmed) return []
+
+  let event: ClaudeStreamEvent
+  try {
+    event = JSON.parse(trimmed)
+  } catch {
+    return [{ kind: 'raw', stream: 'stdout', text: trimmed }]
+  }
+
+  const events: RunEventInit[] = []
+  switch (event.type) {
+    case 'assistant': {
+      for (const block of event.message?.content ?? []) {
+        if (block.type === 'text' && block.text) {
+          events.push({ kind: 'assistant', text: block.text })
+        } else if (block.type === 'tool_use') {
+          events.push({
+            kind: 'tool_use',
+            toolUseId: block.id,
+            toolName: block.name,
+            toolInput: block.input,
+          })
+        }
+        // skip 'thinking' blocks
+      }
+      break
+    }
+
+    case 'user': {
+      for (const block of event.message?.content ?? []) {
+        if (block.type === 'tool_result') {
+          const text = extractToolResultText(block.content)
+          events.push({
+            kind: 'tool_result',
+            toolUseId: block.tool_use_id,
+            content: capText(text),
+            isError: block.is_error === true,
+          })
+        }
+      }
+      break
+    }
+
+    case 'result': {
+      const ok = event.subtype === 'success'
+      events.push({ kind: 'result', isError: !ok, text: ok ? 'Completed' : 'Failed' })
+      break
+    }
+
+    default:
+      break
+  }
+  return events
 }

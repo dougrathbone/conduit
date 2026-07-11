@@ -12,18 +12,24 @@ export function buildAmpArgs(mcpConfigPath: string): string[] {
   ]
 }
 
+import type { RunEventInit } from '../../../shared/types'
+import { capText } from '../../../shared/runEvents'
+
 interface AmpStreamEvent {
   type: string
   message?: {
     content?: Array<{
       type: string
       text?: string
+      id?: string
       name?: string
+      input?: unknown
     }>
   }
   name?: string
   input?: unknown
   content?: unknown
+  tool_use_id?: string
   result?: string
   subtype?: string
 }
@@ -80,4 +86,63 @@ export function parseAmpOutput(line: string): string | null {
     default:
       return null
   }
+}
+
+/**
+ * Parse a single NDJSON line from the amp stream-json output into structured
+ * RunEvents (without a timestamp — the runner stamps `t`). Mirrors
+ * parseClaudeEvents; Amp emits tool_use / tool_result as either content blocks
+ * on an assistant message or as top-level events.
+ */
+export function parseAmpEvents(line: string): RunEventInit[] {
+  const trimmed = line.trim()
+  if (!trimmed) return []
+
+  let event: AmpStreamEvent
+  try {
+    event = JSON.parse(trimmed)
+  } catch {
+    return [{ kind: 'raw', stream: 'stdout', text: trimmed }]
+  }
+
+  const events: RunEventInit[] = []
+  switch (event.type) {
+    case 'assistant': {
+      for (const block of event.message?.content ?? []) {
+        if (block.type === 'text' && block.text) {
+          events.push({ kind: 'assistant', text: block.text })
+        } else if (block.type === 'tool_use' && block.name) {
+          events.push({
+            kind: 'tool_use',
+            toolUseId: block.id,
+            toolName: block.name,
+            toolInput: block.input,
+          })
+        }
+      }
+      break
+    }
+
+    case 'tool_use': {
+      events.push({ kind: 'tool_use', toolName: event.name, toolInput: event.input })
+      break
+    }
+
+    case 'tool_result': {
+      const text =
+        typeof event.content === 'string' ? event.content : JSON.stringify(event.content ?? '')
+      events.push({ kind: 'tool_result', toolUseId: event.tool_use_id, content: capText(text) })
+      break
+    }
+
+    case 'result': {
+      const ok = event.subtype === 'success' || event.result === 'success'
+      events.push({ kind: 'result', isError: !ok, text: ok ? 'Completed' : 'Failed' })
+      break
+    }
+
+    default:
+      break
+  }
+  return events
 }
