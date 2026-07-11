@@ -59,6 +59,17 @@ export async function getRepositoryCredentials(
   }
 }
 
+/**
+ * All repository IDs in the system, owner-agnostic. Used by the data-directory
+ * sweeper to distinguish a bare clone that still backs a live repository from an
+ * orphan left behind by a deleted repo (which it may reclaim). Deliberately
+ * unscoped by access — the sweeper is a system task, not a user request.
+ */
+export async function getAllRepositoryIds(): Promise<string[]> {
+  const rows = await getDb().select({ id: repositories.id }).from(repositories)
+  return rows.map((r) => r.id)
+}
+
 export async function listRepositories(userId: string, userGroupIds: string[]): Promise<Repository[]> {
   const visibleIds = await getVisibleEntityIds('repository', userId, userGroupIds)
   if (visibleIds.length === 0) return []

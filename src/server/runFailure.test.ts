@@ -27,9 +27,18 @@ describe('buildRunFailureReport', () => {
     expect(r.ctx.tags?.runId).toBe('r2')
   })
 
-  it('renders a null exit code (killed by signal) as "signal"', () => {
+  it('renders a null exit code (killed by signal) as "signal" and escalates to error', () => {
     const r = buildRunFailureReport({ runId: 'r3', runner: 'claude', exitCode: null, lastLine: '' })
     expect(r.ctx.tags?.exitCode).toBe('signal')
     expect(r.message).toContain('signal')
+    // A signal kill (OOM / disk-pressure eviction) is the "log just stops" failure
+    // — surface it at error level, not hidden at warning, with a flagging tag.
+    expect(r.level).toBe('error')
+    expect(r.ctx.tags?.killedBySignal).toBe('true')
+  })
+
+  it('tags a normal exit as not killed by signal', () => {
+    const r = buildRunFailureReport({ runId: 'r4', runner: 'claude', exitCode: 1, lastLine: 'boom' })
+    expect(r.ctx.tags?.killedBySignal).toBe('false')
   })
 })

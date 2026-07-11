@@ -106,6 +106,29 @@ export class RepoSyncService {
         return
       }
 
+      // An HTTPS repo that declares an auth method but resolves no token must NOT
+      // be cloned unauthenticated: git then fails every attempt with "could not
+      // read Username", which (before backoff) hammered GitHub and flooded Sentry
+      // with hundreds of identical errors. Fail fast with an actionable reason.
+      if (
+        !token &&
+        repo.url.startsWith('https://') &&
+        (repo.authMethod === 'pat' || repo.authMethod === 'githubapp')
+      ) {
+        await this.recordSyncFailure(
+          repoId,
+          new Error(
+            repo.authMethod === 'pat'
+              ? 'No GitHub credential resolved for this HTTPS repo (auth method: PAT). ' +
+                'Configure a global GitHub PAT, or switch the repo to GitHub App authentication.'
+              : 'No GitHub App token could be minted for this HTTPS repo. ' +
+                'Check the App is installed on the repository and its App ID + private key are configured.'
+          ),
+          'auth'
+        )
+        return
+      }
+
       const needsClone = repo.syncStatus === 'pending' || !fs.existsSync(repo.clonePath)
 
       if (needsClone) {

@@ -7,6 +7,7 @@ import { REPOS_DIR, DATA_DIR } from '../main/utils/paths'
 import { removeWorktree } from './gitOps'
 import { deleteWorkspace } from '../main/execution/workspace'
 import { getActiveWorkspacePaths, getActiveRunIds } from './runner'
+import { getAllRepositoryIds } from '../main/db/queries/repositories'
 import { reporter } from './observability'
 import type { SweepResult, StorageUsage } from '../shared/types'
 
@@ -29,6 +30,7 @@ import type { SweepResult, StorageUsage } from '../shared/types'
 
 const DEFAULT_INTERVAL_MS = 10 * 60 * 1000 // 10 min
 const DEFAULT_GRACE_MS = 5 * 60 * 1000 // 5 min
+const DEFAULT_LOG_RETENTION_MS = 14 * 24 * 60 * 60 * 1000 // 14 days
 
 function envMs(raw: string | undefined, fallback: number): number {
   const n = raw !== undefined ? Number(raw) : NaN
@@ -37,6 +39,10 @@ function envMs(raw: string | undefined, fallback: number): number {
 
 export const SWEEP_INTERVAL_MS = envMs(process.env.CONDUIT_SWEEP_INTERVAL_MS, DEFAULT_INTERVAL_MS)
 export const SWEEP_GRACE_MS = envMs(process.env.CONDUIT_SWEEP_GRACE_MS, DEFAULT_GRACE_MS)
+/** Run logs are history, so they survive far longer than other artifacts — but
+ *  not forever, or `logs/` grows unbounded (the sweeper never touched it before,
+ *  a silent leak). Logs older than this are reclaimable. */
+export const LOG_RETENTION_MS = envMs(process.env.CONDUIT_LOG_RETENTION_MS, DEFAULT_LOG_RETENTION_MS)
 
 /** A candidate artifact considered for removal. */
 export interface SweepEntry {
@@ -177,19 +183,28 @@ export interface WorktreeCandidate extends SweepCandidate {
   clonePath: string
 }
 
-/** The three artifact categories the sweeper considers, freshly discovered. */
+/** The artifact categories the sweeper considers, freshly discovered. */
 export interface SweepCandidates {
   worktrees: WorktreeCandidate[]
   workspaces: SweepCandidate[]
   mcpConfigs: SweepCandidate[]
+  /** Run-log files (logs/<runId>.jsonl), pruned on the long retention window. */
+  logs: SweepCandidate[]
+  /** Bare clones (repos/<id>) whose repository no longer exists — orphans only. */
+  bareClones: SweepCandidate[]
 }
 
 /** Overrides for the directories/active-sets scanned — injected in tests. */
 export interface SweepScanOptions {
   reposDir?: string
   tmpDir?: string
+  logsDir?: string
   activePaths?: Set<string>
   activeRunIds?: Set<string>
+  /** IDs of repositories that still exist. A bare clone under repos/<id> whose id
+   *  is NOT in this set is an orphan a sweep may reclaim. Omitted ⇒ bare clones
+   *  are left untouched — the safe default: never delete a clone we can't verify. */
+  knownRepoIds?: Set<string>
 }
 
 /**
@@ -203,14 +218,21 @@ export interface SweepScanOptions {
 export function collectSweepCandidates(opts: SweepScanOptions = {}): SweepCandidates {
   const reposDir = opts.reposDir ?? REPOS_DIR
   const tmpDir = opts.tmpDir ?? os.tmpdir()
+  // Derive the logs dir from reposDir's parent so an injected (test) data dir
+  // stays isolated and never scans the real ~/.conduit/logs.
+  const logsDir = opts.logsDir ?? path.join(path.dirname(reposDir), 'logs')
   const activePaths = opts.activePaths ?? getActiveWorkspacePaths()
   const activeRunIds = opts.activeRunIds ?? getActiveRunIds()
+  const knownRepoIds = opts.knownRepoIds
 
-  // 1. Git worktrees: reposDir/<repoId>/worktrees-run/<uuid>
+  // 1. Git worktrees (reposDir/<repoId>/worktrees-run/<uuid>) and, alongside,
+  //    orphaned bare clones (reposDir/<repoId> whose repository no longer exists).
   const worktrees: WorktreeCandidate[] = []
+  const bareClones: SweepCandidate[] = []
   for (const repoEntry of listDir(reposDir)) {
     if (!repoEntry.isDirectory()) continue
-    const clonePath = path.join(reposDir, repoEntry.name)
+    const repoId = repoEntry.name
+    const clonePath = path.join(reposDir, repoId)
     const worktreesDir = path.join(clonePath, 'worktrees-run')
     for (const e of listDir(worktreesDir)) {
       if (!e.isDirectory()) continue
@@ -221,6 +243,19 @@ export function collectSweepCandidates(opts: SweepScanOptions = {}): SweepCandid
         clonePath,
         mtimeMs: safeMtimeMs(p),
         protectedByActive: activePaths.has(p),
+      })
+    }
+    // A bare clone is reclaimable only when we KNOW its repo is gone (id absent
+    // from knownRepoIds) and no live run's worktree sits under it.
+    if (knownRepoIds && !knownRepoIds.has(repoId)) {
+      const activeUnder = [...activePaths].some(
+        (p) => p === clonePath || p.startsWith(clonePath + path.sep)
+      )
+      bareClones.push({
+        key: clonePath,
+        path: clonePath,
+        mtimeMs: safeMtimeMs(clonePath),
+        protectedByActive: activeUnder,
       })
     }
   }
@@ -249,7 +284,36 @@ export function collectSweepCandidates(opts: SweepScanOptions = {}): SweepCandid
     }
   }
 
-  return { worktrees, workspaces, mcpConfigs }
+  // 4. Run logs: logs/<runId>.jsonl. Pruned on the long retention window (not the
+  //    short grace) since they are the run history.
+  const logs: SweepCandidate[] = []
+  for (const e of listDir(logsDir)) {
+    if (!e.isFile() || !e.name.endsWith('.jsonl')) continue
+    const runId = e.name.slice(0, -'.jsonl'.length)
+    const p = path.join(logsDir, e.name)
+    logs.push({
+      key: p,
+      path: p,
+      mtimeMs: safeMtimeMs(p),
+      protectedByActive: activeRunIds.has(runId),
+    })
+  }
+
+  return { worktrees, workspaces, mcpConfigs, logs, bareClones }
+}
+
+/**
+ * The set of repository IDs that still exist, for bare-clone reclamation. Never
+ * throws: if the DB is unavailable the sweep simply skips bare clones this pass
+ * (returning `undefined`) rather than risk deleting a clone it can't verify.
+ */
+async function safeKnownRepoIds(): Promise<Set<string> | undefined> {
+  try {
+    return new Set(await getAllRepositoryIds())
+  } catch (err) {
+    reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'knownRepoIds' } })
+    return undefined
+  }
 }
 
 let inFlightSweep: Promise<SweepResult> | null = null
@@ -273,8 +337,15 @@ export function sweepOnce(now: number = Date.now()): Promise<SweepResult> {
  * can't abort the sweep.
  */
 async function runSweep(now: number): Promise<SweepResult> {
-  const { worktrees, workspaces, mcpConfigs } = collectSweepCandidates()
-  const result: SweepResult = { worktreesRemoved: 0, workspacesRemoved: 0, mcpConfigsRemoved: 0 }
+  const knownRepoIds = await safeKnownRepoIds()
+  const { worktrees, workspaces, mcpConfigs, logs, bareClones } = collectSweepCandidates({ knownRepoIds })
+  const result: SweepResult = {
+    worktreesRemoved: 0,
+    workspacesRemoved: 0,
+    mcpConfigsRemoved: 0,
+    logsRemoved: 0,
+    bareClonesRemoved: 0,
+  }
 
   // 1. Git worktrees: reposDir/<repoId>/worktrees-run/<uuid>
   for (const stale of selectStale(worktrees, { now, graceMs: SWEEP_GRACE_MS })) {
@@ -300,11 +371,38 @@ async function runSweep(now: number): Promise<SweepResult> {
     }
   }
 
-  const total = result.worktreesRemoved + result.workspacesRemoved + result.mcpConfigsRemoved
+  // 4. Expired run logs (retention window, not the short grace).
+  for (const stale of selectStale(logs, { now, graceMs: LOG_RETENTION_MS })) {
+    try {
+      fs.rmSync(stale.path, { force: true })
+      result.logsRemoved++
+    } catch (err) {
+      reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'log' } })
+    }
+  }
+
+  // 5. Orphaned bare clones (repository deleted). Short grace so a clone still
+  //    mid-registration is never reaped.
+  for (const stale of selectStale(bareClones, { now, graceMs: SWEEP_GRACE_MS })) {
+    try {
+      fs.rmSync(stale.path, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 })
+      if (!fs.existsSync(stale.path)) result.bareClonesRemoved++
+    } catch (err) {
+      reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'bareClone' } })
+    }
+  }
+
+  const total =
+    result.worktreesRemoved +
+    result.workspacesRemoved +
+    result.mcpConfigsRemoved +
+    result.logsRemoved +
+    result.bareClonesRemoved
   if (total > 0) {
     console.log(
       `[dataDirSweeper] Removed ${result.worktreesRemoved} worktree(s), ` +
-        `${result.workspacesRemoved} workspace(s), ${result.mcpConfigsRemoved} MCP config(s).`
+        `${result.workspacesRemoved} workspace(s), ${result.mcpConfigsRemoved} MCP config(s), ` +
+        `${result.logsRemoved} log(s), ${result.bareClonesRemoved} bare clone(s).`
     )
   }
   // A sweep changes on-disk sizes; drop the cached usage so the next read (and
@@ -341,19 +439,37 @@ export async function estimateStorageUsage(opts: StorageScanOptions = {}): Promi
   const dataDir = opts.dataDir ?? DATA_DIR
   const measureDir = opts.measureDir ?? measureDirBytes
   const measureFile = opts.measureFile ?? fileSizeBytes
-  const { worktrees, workspaces, mcpConfigs } = collectSweepCandidates(opts)
+  // Resolve known repo IDs (for orphaned-clone sizing) only in production — tests
+  // inject an explicit reposDir and stay DB-free.
+  const knownRepoIds =
+    opts.knownRepoIds ?? (opts.reposDir === undefined ? await safeKnownRepoIds() : undefined)
+  const { worktrees, workspaces, mcpConfigs, logs, bareClones } = collectSweepCandidates({
+    ...opts,
+    knownRepoIds,
+  })
 
   // Total: the full data directory + the temp artifacts (which sit outside it).
+  // The data dir already contains logs/ and repos/ (clones), so those aren't
+  // added again here.
   let totalBytes = await measureDir(dataDir)
   for (const w of workspaces) totalBytes += await measureDir(w.path)
   for (const m of mcpConfigs) totalBytes += await measureFile(m.path)
 
   // Reclaimable: exactly the stale set a sweep-now would free.
   const graceMs = SWEEP_GRACE_MS
+  const reclaimableClones = selectStale(bareClones, { now, graceMs })
+  // An orphaned clone is removed wholesale, so its worktrees are already covered
+  // by the clone's size — don't count them a second time.
+  const orphanClonePaths = new Set(reclaimableClones.map((c) => c.path))
   let reclaimableBytes = 0
-  for (const wt of selectStale(worktrees, { now, graceMs })) reclaimableBytes += await measureDir(wt.path)
+  for (const wt of selectStale(worktrees, { now, graceMs })) {
+    if (orphanClonePaths.has(wt.clonePath)) continue
+    reclaimableBytes += await measureDir(wt.path)
+  }
   for (const ws of selectStale(workspaces, { now, graceMs })) reclaimableBytes += await measureDir(ws.path)
   for (const mc of selectStale(mcpConfigs, { now, graceMs })) reclaimableBytes += await measureFile(mc.path)
+  for (const lg of selectStale(logs, { now, graceMs: LOG_RETENTION_MS })) reclaimableBytes += await measureFile(lg.path)
+  for (const bc of reclaimableClones) reclaimableBytes += await measureDir(bc.path)
 
   return { totalBytes, reclaimableBytes }
 }

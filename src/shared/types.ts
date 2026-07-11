@@ -47,6 +47,10 @@ export interface SweepResult {
   workspacesRemoved: number
   /** Leftover per-run MCP config files removed from the temp dir. */
   mcpConfigsRemoved: number
+  /** Expired run-log files removed from logs/ (older than the retention window). */
+  logsRemoved: number
+  /** Bare clones removed from repos/ whose repository no longer exists. */
+  bareClonesRemoved: number
 }
 
 /**
@@ -259,6 +263,58 @@ export interface RunStatusChangePayload {
   endedAt?: number
   durationMs?: number
 }
+
+// ── Structured run events ────────────────────────────────────────────────────
+
+/**
+ * Kind of a structured log event. New runs persist these (one per NDJSON line)
+ * instead of the pre-formatted ANSI `LogEntry`, so the UI can render a simplified
+ * flow and expand any tool's output on demand.
+ *  - `assistant`    — agent narration text
+ *  - `tool_use`     — a tool call (linked to its result by `toolUseId`)
+ *  - `tool_result`  — the output of a tool call (the collapsed-by-default detail)
+ *  - `result`       — the run's terminal success/failure marker from the CLI
+ *  - `raw`          — unparsed stdout, stderr, or a system message
+ */
+export type RunEventKind = 'assistant' | 'tool_use' | 'tool_result' | 'result' | 'raw'
+
+export interface RunEvent {
+  /** Unix ms when the event was recorded (stamped by the runner). */
+  t: number
+  kind: RunEventKind
+  /** assistant narration; raw/stderr/system text. */
+  text?: string
+  /** Correlates a `tool_result` back to its `tool_use`. */
+  toolUseId?: string
+  /** Tool name, e.g. 'Bash' | 'Read' | 'mcp__linear__create_issue'. */
+  toolName?: string
+  /** Raw tool input — drives the header label (client-side) and expand view. */
+  toolInput?: unknown
+  /** tool_result output text (shown when the tool row is expanded). */
+  content?: string
+  /** Set on a tool_result whose tool errored, or a failed `result`. */
+  isError?: boolean
+  /** Origin for `raw` events. */
+  stream?: 'stdout' | 'stderr' | 'system'
+}
+
+/** A parsed event before the runner stamps its timestamp. */
+export type RunEventInit = Omit<RunEvent, 't'>
+
+/** Live batch of structured events broadcast for a run (channel `run:events`). */
+export interface RunEventsPayload {
+  runId: string
+  events: RunEvent[]
+}
+
+/**
+ * A run's persisted log, tagged by format so the client can pick the renderer.
+ * New runs are `events` (structured view); pre-existing runs whose logs were
+ * flattened to ANSI text are `terminal` (rendered in the xterm terminal view).
+ */
+export type RunLog =
+  | { format: 'events'; events: RunEvent[] }
+  | { format: 'terminal'; entries: LogEntry[] }
 
 export interface McpHealthResult {
   status: 'healthy' | 'unhealthy' | 'unauthorized'

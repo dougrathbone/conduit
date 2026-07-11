@@ -36,7 +36,17 @@ export function runGit(
   return new Promise((resolve, reject) => {
     const child = spawn('git', args, {
       cwd: options.cwd,
-      env: { ...process.env, ...options.env },
+      // Force git non-interactive: never block on a credential prompt. Without
+      // this a git op against a private HTTPS remote with no usable credential
+      // can hang waiting for a username (or, with stdin closed, fail with an
+      // opaque "could not read Username"); either way it must fail fast and
+      // deterministically, not stall. Caller env still wins if it sets these.
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: '0',
+        GCM_INTERACTIVE: 'never',
+        ...options.env,
+      },
       stdio: ['ignore', 'pipe', 'pipe'],
     })
 

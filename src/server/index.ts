@@ -877,13 +877,26 @@ async function start(): Promise<void> {
     console.log('[server] Auth enabled — Okta OIDC configured')
   }
 
-  // Mark any runs that were left in "running" state as failed (server restart)
+  // Mark any runs that were left in "running" state as failed (server restart).
+  // A run in this state means the previous process exited mid-run (deploy, crash,
+  // OOM, or disk-pressure eviction) so its `child.on('close')` handler never ran —
+  // which is exactly why such failures were invisible. Capture it so the operator
+  // gets a signal (with the affected run IDs) instead of a silent DB flip.
   const orphaned = await getOrphanedRuns()
   for (const run of orphaned) {
     await updateRun(run.id, { status: 'failed', endedAt: Date.now() })
   }
   if (orphaned.length > 0) {
     console.log(`[server] Marked ${orphaned.length} orphaned run(s) as failed`)
+    reporter.captureMessage(
+      `Marked ${orphaned.length} orphaned run(s) as failed on startup — the previous Conduit ` +
+        `process exited mid-run (deploy, crash, OOM, or disk-pressure eviction).`,
+      'warning',
+      {
+        tags: { component: 'server', op: 'orphanReconcile' },
+        extra: { count: orphaned.length, runIds: orphaned.map((r) => r.id) },
+      }
+    )
   }
 
   // Start the repository sync service (clones new repos, fetches existing ones)

@@ -28,10 +28,15 @@ export function buildRunFailureReport(opts: {
 }): RunFailureReport {
   const { runId, runner, exitCode, lastLine } = opts
   const diskFull = isDiskFullError(lastLine ?? '')
-  const exitCodeTag = typeof exitCode === 'number' ? String(exitCode) : 'signal'
+  // `null`/`undefined` exit code ⇒ the process was killed by a signal rather than
+  // exiting on its own — typically an OOM kill or a disk-pressure eviction of the
+  // agent process. These are the failures that leave the log "just stopping", so
+  // escalate them to `error` (like disk-full) instead of hiding them at `warning`.
+  const killedBySignal = typeof exitCode !== 'number'
+  const exitCodeTag = killedBySignal ? 'signal' : String(exitCode)
   return {
     message: `Agent run failed (exit ${exitCodeTag})`,
-    level: diskFull ? 'error' : 'warning',
+    level: diskFull || killedBySignal ? 'error' : 'warning',
     ctx: {
       tags: {
         component: 'runner',
@@ -40,6 +45,7 @@ export function buildRunFailureReport(opts: {
         runner,
         exitCode: exitCodeTag,
         diskFull: String(diskFull),
+        killedBySignal: String(killedBySignal),
       },
       extra: { lastLine: lastLine || undefined },
     },

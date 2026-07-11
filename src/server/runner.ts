@@ -115,6 +115,17 @@ function notifyRunFinalized(): void {
  *  and release file handles before we delete the directory. */
 const WORKSPACE_CLEANUP_DELAY_MS = 30_000
 
+/** Per-run cap on the on-disk log file (`logs/<runId>.jsonl`). A runaway run —
+ *  e.g. one looping and spewing output — could otherwise write gigabytes that the
+ *  data-dir sweeper never reclaims (run logs are history, not swept until they
+ *  age out). Past the cap we stop persisting to disk (writing one truncation
+ *  marker); live streaming to the UI and stdout log-forwarding continue. `0`
+ *  disables the cap. */
+const RUN_LOG_MAX_BYTES = (() => {
+  const n = Number(process.env.CONDUIT_RUN_LOG_MAX_BYTES)
+  return Number.isFinite(n) && n >= 0 ? n : 500 * 1024 * 1024 // 500 MB
+})()
+
 /** Append a system log entry to a run's log file (used after the log stream is
  *  closed, e.g. by the delayed cleanup). Also emits to stdout for log forwarding. */
 function appendRunLog(runId: string, chunk: string): void {
@@ -261,11 +272,32 @@ export async function startRunServer(
   // 5. Open log file write stream
   const logStream = fs.createWriteStream(realLogPath, { flags: 'a', encoding: 'utf8' })
 
+  // Bytes written to the on-disk log so far, and whether the cap has been hit.
+  let logBytesWritten = 0
+  let logCapped = false
+
   function writeLogEntry(entry: LogEntry): void {
     const line = JSON.stringify(entry)
-    // Write to per-run log file (for UI replay via runs:getLog).
-    logStream.write(line + '\n')
-    // Also emit to stdout so the platform log forwarder (Datadog, etc.) ingests.
+    // Write to per-run log file (for UI replay via runs:getLog), until the run's
+    // log exceeds RUN_LOG_MAX_BYTES — then stop persisting so a runaway run can't
+    // fill the disk with unbounded history the sweeper won't reclaim.
+    if (!logCapped) {
+      logStream.write(line + '\n')
+      if (RUN_LOG_MAX_BYTES > 0) {
+        logBytesWritten += Buffer.byteLength(line) + 1
+        if (logBytesWritten >= RUN_LOG_MAX_BYTES) {
+          logCapped = true
+          logStream.write(
+            JSON.stringify({
+              t: Date.now(),
+              stream: 'system',
+              chunk: `\n[Conduit: run log truncated on disk — exceeded ${RUN_LOG_MAX_BYTES}-byte cap. Live output continues.]`,
+            }) + '\n'
+          )
+        }
+      }
+    }
+    // Always emit to stdout so the platform log forwarder (Datadog, etc.) ingests.
     process.stdout.write(JSON.stringify({ runId, agentId, ...entry }) + '\n')
   }
 

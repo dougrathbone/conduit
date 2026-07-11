@@ -181,10 +181,34 @@ describe('estimateStorageUsage', () => {
   })
 
   it('counts as reclaimable exactly what a sweep-now would free', async () => {
-    // stale worktree 2000 + stale workspace 400 + stale mcp 150 = 2550;
-    // the active 700-byte workspace is protected and excluded.
+    // stale worktree 2000 + stale workspace 400 + stale mcp 150 + expired log 300
+    // = 2850; the active 700-byte workspace is protected and excluded. (now is far
+    // in the future, so the log is well past the retention window.)
     const usage = await estimateStorageUsage(opts())
+    expect(usage.reclaimableBytes).toBe(2000 + 400 + 150 + 300)
+  })
+
+  it('does NOT count a recent log as reclaimable (within the retention window)', async () => {
+    // now = the log's mtime + 10 min: past the 5-min artifact grace (so worktree,
+    // workspace, mcp are reclaimable) but far short of the 14-day log retention —
+    // so the log is excluded. Reclaimable = 2000 + 400 + 150 = 2550, no log.
+    const logMtime = fs.statSync(path.join(fx.dataDir, 'logs', 'run.jsonl')).mtimeMs
+    const usage = await estimateStorageUsage({ ...opts(), now: logMtime + 10 * 60 * 1000 })
     expect(usage.reclaimableBytes).toBe(2000 + 400 + 150)
+  })
+
+  it('reclaims an orphaned bare clone when its repo is gone', async () => {
+    // repo1 is NOT in the known set → its whole bare clone (pack 1000 + worktree
+    // 2000 = 3000) is reclaimable. The worktree is subsumed by the clone (not
+    // double-counted), so: clone 3000 + workspace 400 + mcp 150 + log 300 = 3850.
+    const usage = await estimateStorageUsage({ ...opts(), knownRepoIds: new Set<string>() })
+    expect(usage.reclaimableBytes).toBe(3000 + 400 + 150 + 300)
+  })
+
+  it('does NOT reclaim a bare clone whose repo still exists', async () => {
+    // repo1 is known → clone kept; only the worktree/workspace/mcp/log count.
+    const usage = await estimateStorageUsage({ ...opts(), knownRepoIds: new Set(['repo1']) })
+    expect(usage.reclaimableBytes).toBe(2000 + 400 + 150 + 300)
   })
 
   it('keeps reclaimable a subset of total', async () => {
