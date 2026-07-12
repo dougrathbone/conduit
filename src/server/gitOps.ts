@@ -179,6 +179,17 @@ export function isDiskFullError(message: string): boolean {
 /**
  * Create a git worktree from a bare clone for an isolated run workspace.
  *
+ * `--detach` is essential, not cosmetic: git refuses to check out a branch that
+ * is already checked out in another worktree, so a name-based
+ * `git worktree add <path> master` fails the moment a second run of the same
+ * repo overlaps the first — `fatal: 'master' is already checked out at …`. Each
+ * run gets its own isolated worktree, but they all start from the same default
+ * branch, so without `--detach` concurrent runs collide. Checking out the
+ * branch's *commit* in detached HEAD gives every run identical starting content
+ * with no shared branch ref to contend over; the agent creates its own branch to
+ * commit and push on. (It also avoids leaking a per-run branch ref that
+ * `git worktree remove` would not clean up.)
+ *
  * If `git worktree add` fails part-way — classically because it ran out of disk
  * while checking out a large working tree — it leaves BOTH a partial checkout
  * and a registered worktree entry behind. Left in place those leak disk and
@@ -193,7 +204,7 @@ export async function createWorktree(
   branch: string
 ): Promise<void> {
   try {
-    await runGit(['worktree', 'add', worktreePath, branch], { cwd: clonePath })
+    await runGit(['worktree', 'add', '--detach', worktreePath, branch], { cwd: clonePath })
   } catch (err) {
     await removeWorktree(clonePath, worktreePath).catch(() => {})
     const message = err instanceof Error ? err.message : String(err)

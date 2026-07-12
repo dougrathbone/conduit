@@ -37,7 +37,9 @@ describe('createWorktree — git-LFS materialization', () => {
     const wt = '/clone/worktrees-run/r1'
     await createWorktree('/clone', wt, 'main')
     const subs = spawnCalls.map((c) => c.args.join(' '))
-    expect(subs).toContain('worktree add /clone/worktrees-run/r1 main')
+    // `--detach` so concurrent runs on the same branch don't collide (git refuses
+    // to check out a branch already checked out in another worktree).
+    expect(subs).toContain('worktree add --detach /clone/worktrees-run/r1 main')
     // Proven sequence: fetch objects (--all ignores any FetchExclude), then check
     // them out over the pointer files. Both run inside the worktree.
     const fetch = spawnCalls.find((c) => c.args[0] === 'lfs' && c.args[1] === 'fetch')

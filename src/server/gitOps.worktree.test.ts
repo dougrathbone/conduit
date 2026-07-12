@@ -7,7 +7,7 @@ import * as path from 'path'
 // Real-git integration: exercises removeWorktree against an actual repo + worktree
 // so we verify true reclamation behaviour (the incident was worktrees that would
 // not delete and whose failure was swallowed). No child_process mock here.
-import { removeWorktree } from './gitOps'
+import { createWorktree, removeWorktree } from './gitOps'
 
 const git = (cwd: string, ...args: string[]) =>
   execFileSync('git', args, { cwd, stdio: 'pipe' }).toString()
@@ -58,5 +58,49 @@ describe('removeWorktree', () => {
 
     await expect(removeWorktree(repo, worktree)).rejects.toThrow()
     expect(fs.existsSync(worktree)).toBe(true) // still there — that's why it threw
+  })
+})
+
+function makeCloneWithBranch(): { clone: string; cleanup: () => void } {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'conduit-gitops-conc-'))
+  const clone = path.join(root, 'repo')
+  fs.mkdirSync(clone)
+  git(clone, 'init', '-b', 'master')
+  git(clone, 'config', 'user.email', 't@t.com')
+  git(clone, 'config', 'user.name', 'T')
+  fs.writeFileSync(path.join(clone, 'f.txt'), 'hi')
+  git(clone, 'add', '.')
+  git(clone, 'commit', '-m', 'init')
+  fs.mkdirSync(path.join(clone, 'worktrees-run'))
+  return { clone, cleanup: () => fs.rmSync(root, { recursive: true, force: true }) }
+}
+
+describe('createWorktree — concurrent runs on the same branch', () => {
+  const cleanups: Array<() => void> = []
+  afterEach(() => { cleanups.splice(0).forEach((c) => c()) })
+
+  // Two runs of the same agent/repo overlap in time: both want a worktree at the
+  // tip of `master`. Git refuses to check out a branch that is already checked out
+  // in another worktree, so a name-based `worktree add <path> master` fails the
+  // second run with `fatal: 'master' is already checked out at …`. Each run must
+  // get its own isolated checkout of master's commit regardless of overlap.
+  it('lets a second worktree be created while the first is still checked out', async () => {
+    const { clone, cleanup } = makeCloneWithBranch()
+    cleanups.push(cleanup)
+
+    const wtA = path.join(clone, 'worktrees-run', 'run-a')
+    const wtB = path.join(clone, 'worktrees-run', 'run-b')
+
+    await createWorktree(clone, wtA, 'master')
+    // The first worktree is intentionally left in place (an active run) when the
+    // second is created — this is the concurrency the fix must support.
+    await createWorktree(clone, wtB, 'master')
+
+    // Both are real, independent checkouts at master's tip.
+    expect(fs.readFileSync(path.join(wtA, 'f.txt'), 'utf8')).toBe('hi')
+    expect(fs.readFileSync(path.join(wtB, 'f.txt'), 'utf8')).toBe('hi')
+    const head = git(clone, 'rev-parse', 'master').trim()
+    expect(git(wtA, 'rev-parse', 'HEAD').trim()).toBe(head)
+    expect(git(wtB, 'rev-parse', 'HEAD').trim()).toBe(head)
   })
 })
