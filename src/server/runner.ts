@@ -142,7 +142,7 @@ const RUN_LOG_MAX_BYTES = (() => {
 
 /** Append a system event to a run's log file (used after the log stream is
  *  closed, e.g. by the delayed cleanup). Also emits to stdout for log forwarding. */
-function appendRunLog(runId: string, text: string): void {
+export function appendRunLog(runId: string, text: string): void {
   const event: RunEvent = { t: Date.now(), kind: 'raw', stream: 'system', text }
   try {
     fs.appendFileSync(path.join(LOGS_DIR, `${runId}.jsonl`), JSON.stringify(event) + '\n')

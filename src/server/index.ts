@@ -12,7 +12,8 @@ import * as os from 'os'
 import { initDb } from '../main/db/index'
 import { listAgents, getAgent, createAgent, updateAgent, deleteAgent } from '../main/db/queries/agents'
 import { listRuns, updateRun, getOrphanedRuns } from '../main/db/queries/runs'
-import { startRunServer, stopRun, setRunFinalizedHook } from './runner'
+import { startRunServer, stopRun, setRunFinalizedHook, appendRunLog } from './runner'
+import { startMemoryMonitor } from './memoryPressure'
 import {
   listGlobalMcps,
   getGlobalMcp,
@@ -885,6 +886,13 @@ async function start(): Promise<void> {
   const orphaned = await getOrphanedRuns()
   for (const run of orphaned) {
     await updateRun(run.id, { status: 'failed', endedAt: Date.now() })
+    // Leave a trace in the run's own log so its transcript explains why it
+    // stopped, instead of just ending mid-output (the "quiet death").
+    appendRunLog(
+      run.id,
+      '✗ Run did not finish — the Conduit process exited mid-run (deploy, crash, ' +
+        'out-of-memory, or disk-pressure eviction). Marked failed on restart.'
+    )
   }
   if (orphaned.length > 0) {
     console.log(`[server] Marked ${orphaned.length} orphaned run(s) as failed`)
@@ -911,6 +919,11 @@ async function start(): Promise<void> {
       reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'postRun' } })
     )
   })
+
+  // Sample memory pressure so an impending OOM — which kills the whole process
+  // mid-run and leaves runs "quietly" dead — is surfaced as a warning + breadcrumbs
+  // ahead of the kill, rather than only reconciled as failed on the next startup.
+  const stopMemoryMonitor = startMemoryMonitor()
 
   // Start the trigger service (registers cron jobs from DB)
   await triggerService.start()
@@ -966,6 +979,7 @@ async function start(): Promise<void> {
     triggerService.stop()
     repoSyncService.stop()
     dataDirSweeper.stop()
+    stopMemoryMonitor()
     // Flush buffered error events so shutdown-time reports are delivered.
     await reporter.flush(2000).catch(() => {})
     // Give in-flight requests up to 10s to finish, then exit.
