@@ -51,12 +51,17 @@ FROM node:22-slim
 WORKDIR /app
 
 # git is required at runtime for repository sync (clone/fetch/worktree); curl
-# is needed to fetch the Cursor CLI installer below.
+# is needed to fetch the Cursor CLI installer below. git-lfs is required for
+# repos that store assets in git-LFS (e.g. a Yarn zero-install `.yarn/cache`):
+# without it, worktree checkouts contain LFS *pointer* files instead of content,
+# which breaks the agent's `yarn install`/build and stalls the run. `git lfs
+# install --system` registers the smudge/clean filters for every later git op.
 # No PID-1 wrapper (tini/dumb-init): Node 22 receives signals correctly when
 # used as PID 1 with an exec-form ENTRYPOINT, and the server installs its
 # own SIGTERM/SIGINT handlers for graceful shutdown.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git ca-certificates curl && \
+    apt-get install -y --no-install-recommends git git-lfs ca-certificates curl && \
+    git lfs install --system && \
     rm -rf /var/lib/apt/lists/*
 
 # Agent CLIs the runner shells out to. Without these the deployed host reports

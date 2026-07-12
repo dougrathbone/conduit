@@ -205,6 +205,26 @@ export async function createWorktree(
     }
     throw err instanceof Error ? err : new Error(message)
   }
+
+  // Materialize git-LFS content. `git worktree add` on a bare single-branch clone
+  // leaves LFS *pointer* files: the clone holds no LFS objects, and neither the
+  // checkout smudge nor `git lfs pull` reliably fetches them for a bare-clone
+  // worktree. The sequence that does (verified against a real LFS repo): fetch
+  // the objects into the shared store — `--all` so a `fetch.exclude=*` config
+  // can't suppress it — then check them out over the pointers. Without this a
+  // repo with committed LFS assets (e.g. a Yarn zero-install `.yarn/cache`)
+  // breaks the agent's `yarn install`/build and the run stalls (the failure this
+  // fixes). Best-effort: a repo without LFS is a fast no-op and a host without
+  // git-lfs just errors — neither should fail an otherwise-good worktree. Objects
+  // land in the shared bare clone, so repeated worktrees don't re-download.
+  try {
+    await runGit(['lfs', 'fetch', '--all'], { cwd: worktreePath })
+    await runGit(['lfs', 'checkout'], { cwd: worktreePath })
+  } catch (err) {
+    console.warn(
+      `[gitOps] git-lfs materialization skipped for ${worktreePath}: ${err instanceof Error ? err.message : String(err)}`
+    )
+  }
 }
 
 /**
