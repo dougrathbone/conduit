@@ -18,3 +18,27 @@ export function classifyUrlHealth(status: number, statusText: string): McpHealth
   }
   return { status: 'healthy', message: `HTTP ${status} ${statusText}` }
 }
+
+/**
+ * Build the headers for the MCP `initialize` health probe.
+ *
+ * Carries the user's own `config.headers` through — so a manually supplied
+ * `Authorization: Bearer …` (e.g. a Datadog PAT) is actually sent and the probe
+ * reflects real auth instead of always 401ing — while forcing the JSON-RPC
+ * content type and the streamable-HTTP `Accept` the probe requires. A resolved
+ * OAuth token, when present, overrides any manual header — matching the
+ * precedence of runtime injection (`injectOAuthTokens`) and the `listTools`
+ * handler, both of which spread `headers` then set `Authorization` from the token.
+ */
+export function buildHealthProbeHeaders(
+  configHeaders: Record<string, string> | undefined,
+  authOverride?: string
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    ...configHeaders,
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+  }
+  if (authOverride) headers.Authorization = authOverride
+  return headers
+}

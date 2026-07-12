@@ -53,7 +53,7 @@ import { createTriggerRoutes } from './triggers/triggerRoutes'
 import { createMcpOAuthRouter } from './mcpOAuth/routes'
 import { startAuth as mcpStartAuth, getStatus as mcpGetStatus, revoke as mcpRevoke, probeOAuthSupport as mcpProbe } from './mcpOAuth/service'
 import { listMcpTools } from './mcpTools'
-import { classifyUrlHealth } from './mcpHealth'
+import { classifyUrlHealth, buildHealthProbeHeaders } from './mcpHealth'
 import { getGithubPat } from './store'
 import { readRunLog } from './utils'
 import { Octokit } from '@octokit/rest'
@@ -332,18 +332,21 @@ const handlers: Record<string, HandlerFn> = {
         // gets past the 401, the probe would surface a misleading "Method Not
         // Allowed". A POST initialize with the streamable-HTTP Accept header is what
         // an actual MCP client sends: 200 when authenticated + usable, 401 when not.
-        const headers: Record<string, string> = {
-          'Content-Type': 'application/json',
-          Accept: 'application/json, text/event-stream',
-        }
+        // Carry the user's own headers (a manual `Authorization: Bearer …`, or
+        // Datadog-style DD-API-KEY headers) so the probe reflects real auth. A
+        // resolved global OAuth token, when present, still overrides — matching
+        // runtime injection precedence. Without this, a manually-authed server
+        // always 401s here, reads as `unauthorized`, and wrongly kicks OAuth.
+        let authOverride: string | undefined
         try {
           const { resolveGlobalMcpToken } = await import('../main/utils/mcp')
           const { normalizeTokenScheme } = await import('./mcpOAuth/flow')
           const token = await resolveGlobalMcpToken(config.url)
-          if (token) headers.Authorization = `${normalizeTokenScheme(token.tokenType)} ${token.accessToken}`
+          if (token) authOverride = `${normalizeTokenScheme(token.tokenType)} ${token.accessToken}`
         } catch {
-          // No token resolvable — fall through to an unauthenticated probe.
+          // No token resolvable — fall through to the config's own headers.
         }
+        const headers = buildHealthProbeHeaders(config.headers, authOverride)
         const controller = new AbortController()
         const timeout = setTimeout(() => controller.abort(), 4000)
         const res = await fetch(config.url, {

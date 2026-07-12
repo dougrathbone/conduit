@@ -12,7 +12,7 @@ import {
 import { useAuth } from '@renderer/contexts/AuthContext'
 import { useToast } from '@renderer/contexts/ToastContext'
 import { api } from '@renderer/lib/ipc'
-import { isUrlMcpServer } from '@shared/mcp'
+import { isUrlMcpServer, hasManualAuthHeader } from '@shared/mcp'
 import type { GlobalMcpServer, McpServerEntry } from '@shared/types'
 import { McpServerForm, type McpServerFormValues } from '@renderer/components/mcp/McpServerForm'
 import { McpServerRow } from '@renderer/components/mcp/McpServerRow'
@@ -28,6 +28,10 @@ import { McpServerRow } from '@renderer/components/mcp/McpServerRow'
  */
 async function maybeKickOAuth(serverId: string, cfg: McpServerEntry) {
   if (!isUrlMcpServer(cfg)) return
+  // A user-supplied Authorization header means they've opted into manual auth
+  // (e.g. a Datadog PAT) — don't hijack them into Conduit's managed OAuth flow.
+  // An explicit `oauth` block is still an opt-in and takes precedence.
+  if (hasManualAuthHeader(cfg) && !cfg.oauth) return
   try {
     const probe = cfg.oauth ? { supportsOAuth: true } : await api.mcpOAuth.probe(cfg)
     if (!probe.supportsOAuth) return

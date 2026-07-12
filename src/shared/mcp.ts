@@ -13,3 +13,20 @@ import type { McpServerEntry } from './types'
 export function isUrlMcpServer(cfg: McpServerEntry | undefined): boolean {
   return !!cfg && !!cfg.url && cfg.type !== 'stdio'
 }
+
+/**
+ * Whether the config carries a user-supplied `Authorization` header. Header
+ * names are case-insensitive, so this matches `Authorization`, `authorization`,
+ * etc., and ignores blank values.
+ *
+ * When present, the user has opted into manual auth for this server, so Conduit
+ * must NOT auto-initiate its managed OAuth flow — it should send that header on
+ * health checks and at run time instead. This is the signal that lets a config
+ * like Datadog's `{ headers: { Authorization: "Bearer …" } }` sidestep OAuth.
+ */
+export function hasManualAuthHeader(cfg: McpServerEntry | undefined): boolean {
+  if (!cfg?.headers) return false
+  return Object.entries(cfg.headers).some(
+    ([name, value]) => name.toLowerCase() === 'authorization' && typeof value === 'string' && value.trim() !== ''
+  )
+}

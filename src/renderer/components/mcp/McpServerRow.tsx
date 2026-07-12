@@ -6,6 +6,7 @@ import { useMcpTools } from '@renderer/hooks/useMcpTools'
 import { useMcpOAuthProbe } from '@renderer/hooks/useMcpOAuth'
 import { McpOAuthButton } from '@renderer/components/settings/McpOAuthButton'
 import type { McpServerEntry } from '@shared/types'
+import { hasManualAuthHeader } from '@shared/mcp'
 import { McpServerForm, getServerType, type McpServerFormValues } from './McpServerForm'
 
 function McpHealthDot({
@@ -208,8 +209,13 @@ export function McpServerRow({
       {/* Health indicator */}
       {isEnabled && <McpHealthDot serverId={serverId} serverConfig={config} onNeedsAuth={onNeedsAuth} />}
 
-      {/* OAuth button for URL-type servers — shown when oauth block present or probe detects support */}
-      {serverType === 'url' && config.url && (config.oauth || probe.data?.supportsOAuth) && (
+      {/* OAuth button for URL-type servers — shown when an explicit oauth block
+          is present, or the probe detects OAuth support AND the user hasn't
+          supplied their own Authorization header (a manual header opts out of
+          Conduit-managed OAuth). */}
+      {serverType === 'url' &&
+        config.url &&
+        (config.oauth || (probe.data?.supportsOAuth && !hasManualAuthHeader(config))) && (
         <McpOAuthButton
           serverId={serverId}
           isGlobal={isGlobal}
