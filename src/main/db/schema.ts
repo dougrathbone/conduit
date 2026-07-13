@@ -139,6 +139,10 @@ export const agents = pgTable('agents', {
   bgTaskTimeoutSeconds: bigint('bg_task_timeout_seconds', { mode: 'number' }),
   enableRepoMcps: boolean('enable_repo_mcps').notNull().default(false),
   ownerId: text('owner_id'),
+  // Soft-delete tombstone: unix ms when the agent was deleted, else null. We never
+  // hard-delete agents — runs.agent_id FKs them (RESTRICT) and deleting would
+  // orphan run history. Soft-deleted agents are filtered from all listings.
+  deletedAt: bigint('deleted_at', { mode: 'number' }),
   createdAt: bigint('created_at', { mode: 'number' }).notNull(),
   updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
 })

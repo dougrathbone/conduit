@@ -266,6 +266,12 @@ const handlers: Record<string, HandlerFn> = {
       throw new Error('Only the owner can delete this agent')
     }
     await deleteAgent(id as string)
+    // Soft-delete leaves the agent's trigger rows intact, so stop their live cron
+    // jobs now — otherwise they'd keep firing (harmlessly hitting the getAgent
+    // guard) until the next restart, which skips them.
+    for (const trigger of await listTriggers(id as string)) {
+      triggerService.unregisterTrigger(trigger.id)
+    }
     return Promise.resolve()
   },
 

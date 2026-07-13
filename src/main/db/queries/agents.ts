@@ -1,8 +1,7 @@
-import { eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { getDb } from '../index'
 import { agents } from '../schema'
 import { getVisibleEntityIds } from './access'
-import { deleteSharesForEntity } from './shares'
 import { findAgentMcpKeyConflictWithGlobals } from './globalMcps'
 import type { AgentConfig, McpServersConfig } from '../../../shared/types'
 
@@ -42,12 +41,18 @@ function rowToAgentConfig(row: typeof agents.$inferSelect): AgentConfig {
 export async function listAgents(userId: string, userGroupIds: string[]): Promise<AgentConfig[]> {
   const visibleIds = await getVisibleEntityIds('agent', userId, userGroupIds)
   if (visibleIds.length === 0) return []
-  const rows = await getDb().select().from(agents)
+  // Soft-deleted agents are hidden from every listing.
+  const rows = await getDb().select().from(agents).where(isNull(agents.deletedAt))
   return rows.filter(r => visibleIds.includes(r.id)).map(rowToAgentConfig)
 }
 
 export async function getAgent(id: string): Promise<AgentConfig | null> {
-  const rows = await getDb().select().from(agents).where(eq(agents.id, id))
+  // Exclude soft-deleted agents. This single guard makes a deleted agent inert
+  // everywhere it's fetched by id — run starts, publishing, chat, MCP OAuth.
+  const rows = await getDb()
+    .select()
+    .from(agents)
+    .where(and(eq(agents.id, id), isNull(agents.deletedAt)))
   if (rows.length === 0) return null
   return rowToAgentConfig(rows[0])
 }
@@ -119,7 +124,16 @@ export async function updateAgent(
   return updated
 }
 
+/**
+ * Soft-delete: never remove the row. `runs.agent_id` references `agents.id` with
+ * ON DELETE RESTRICT, so a hard DELETE fails for any agent that has ever run — and
+ * would destroy its run history besides. We stamp `deletedAt` instead, which hides
+ * the agent from every listing while keeping its runs (and their FK) intact.
+ *
+ * Shares are deliberately preserved so a manual DB-level restore (`deleted_at =
+ * NULL`) brings the agent back with its sharing untouched.
+ */
 export async function deleteAgent(id: string): Promise<void> {
-  await deleteSharesForEntity('agent', id)
-  await getDb().delete(agents).where(eq(agents.id, id))
+  const now = Date.now()
+  await getDb().update(agents).set({ deletedAt: now, updatedAt: now }).where(eq(agents.id, id))
 }

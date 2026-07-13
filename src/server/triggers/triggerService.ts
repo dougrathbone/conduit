@@ -1,6 +1,7 @@
 import cron, { type ScheduledTask } from 'node-cron'
 import type { Trigger, TriggerContext, CronTriggerConfig, ExecutionRun } from '../../shared/types'
 import { listAllEnabledTriggers, getTrigger, updateTrigger } from '../../main/db/queries/triggers'
+import { getAgent } from '../../main/db/queries/agents'
 import { startRunServer } from '../runner'
 import { reporter } from '../observability'
 
@@ -19,10 +20,12 @@ export class TriggerService {
     const triggers = await listAllEnabledTriggers()
     let cronCount = 0
     for (const trigger of triggers) {
-      if (trigger.type === 'cron') {
-        this.registerCron(trigger)
-        cronCount++
-      }
+      if (trigger.type !== 'cron') continue
+      // Skip triggers whose agent has been soft-deleted — getAgent returns null for
+      // those, so a restart must not re-register crons for a deleted agent.
+      if (!(await getAgent(trigger.agentId))) continue
+      this.registerCron(trigger)
+      cronCount++
     }
     if (cronCount > 0) {
       console.log(`[triggers] Registered ${cronCount} cron trigger(s)`)

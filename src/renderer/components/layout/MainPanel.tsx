@@ -59,7 +59,7 @@ export function MainPanel({ agentId }: MainPanelProps) {
   }, [agentId, queryClient])
 
   const handleDeleteAgent = async () => {
-    if (!window.confirm(`Delete agent "${agent?.name}"? This cannot be undone.`)) return
+    if (!window.confirm(`Delete agent "${agent?.name}"? It will be removed from your list; its run history is preserved.`)) return
     await deleteAgent.mutateAsync(agentId)
     selectAgent(null)
   }
