@@ -105,6 +105,32 @@ export async function resolveRepoToken(
   }
 }
 
+/**
+ * Env var the GitHub CLI (`gh`) reads its auth token from. `gh` does NOT pick up
+ * the tokenized `origin` URL that `git push` uses, so its token must be handed to
+ * the agent process explicitly. `GH_TOKEN` takes precedence over `GITHUB_TOKEN`
+ * in `gh`, and — unlike `GITHUB_TOKEN` — is `gh`-specific, so it won't shadow a
+ * token an agent/script manages itself.
+ */
+export const GH_TOKEN_ENV_VAR = 'GH_TOKEN'
+
+/**
+ * Shape the `GH_TOKEN` env entry for a run, mirroring the API-key/timeout
+ * injection rules in the runner:
+ * - no token resolved (ssh/none repos, repo-less runs) → set nothing;
+ * - an explicit per-agent `GH_TOKEN` in `existingEnvVars` always wins → set nothing;
+ * - otherwise expose the resolved repo credential as `GH_TOKEN` so `gh api` /
+ *   `gh pr create` authenticate as the same identity that `git push` uses.
+ */
+export function githubTokenEnvEntry(
+  token: string | undefined,
+  existingEnvVars?: Record<string, string>
+): Record<string, string> {
+  if (!token) return {}
+  if (existingEnvVars && GH_TOKEN_ENV_VAR in existingEnvVars) return {}
+  return { [GH_TOKEN_ENV_VAR]: token }
+}
+
 export interface PushCredential {
   /** The resolved git token, or undefined for ssh/none (or on failure). */
   token?: string

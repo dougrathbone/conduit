@@ -64,6 +64,23 @@ RUN apt-get update && \
     git lfs install --system && \
     rm -rf /var/lib/apt/lists/*
 
+# GitHub CLI (`gh`), installed from GitHub's official apt repo (needs the `curl`
+# installed above to fetch the signing key). Agents use it for API/PR operations
+# (`gh pr create`, `gh api`); at run time the runner injects the repo's git
+# credential as GH_TOKEN so `gh` authenticates as the same identity `git push`
+# uses. Install steps per https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+RUN mkdir -p -m 755 /etc/apt/keyrings && \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
+    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends gh && \
+    rm -rf /var/lib/apt/lists/* && \
+    # Fail the build loudly if `gh` ever fails to land on PATH.
+    gh --version
+
 # Agent CLIs the runner shells out to. Without these the deployed host reports
 # every runner as "not installed" on the agent select screen and runs fail.
 #   - claude       → @anthropic-ai/claude-code (npm, bin: claude)

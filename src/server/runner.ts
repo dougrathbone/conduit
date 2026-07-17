@@ -17,7 +17,7 @@ import { DEV_USER_ID } from './auth/config'
 import { LOGS_DIR } from '../main/utils/paths'
 import { createConfiguredWorktree, removeWorktree } from './gitOps'
 import { buildRunFailureReport } from './runFailure'
-import { resolvePushCredential } from './githubApp'
+import { resolvePushCredential, githubTokenEnvEntry } from './githubApp'
 import { buildClaudeArgs, parseClaudeEvents } from '../main/execution/adapters/claude'
 import { buildAmpArgs, parseAmpEvents } from '../main/execution/adapters/amp'
 import { buildCursorArgs, CURSOR_NOTICE } from '../main/execution/adapters/cursor'
@@ -38,16 +38,23 @@ const RUNNER_ENV_VAR: Record<string, string> = {
 /**
  * Build the child-process environment for a run: the host env, overlaid with
  * the agent's explicit envVars, then the acting user's stored runner credential
- * (Settings screen) injected as the runner's API-key env var, and the resolved
- * background-task timeout injected as the runner's wait-ceiling env var. An
- * explicit per-agent envVar always wins over both injected values.
+ * (Settings screen) injected as the runner's API-key env var, the resolved
+ * background-task timeout injected as the runner's wait-ceiling env var, and the
+ * resolved repo credential exposed as GH_TOKEN for the `gh` CLI. An explicit
+ * per-agent envVar always wins over every injected value.
  */
 async function buildRunnerEnv(
   agent: { runner: string; envVars?: Record<string, string>; ownerId?: string; bgTaskTimeoutSeconds?: number },
-  startedBy?: string
+  startedBy?: string,
+  githubToken?: string
 ): Promise<NodeJS.ProcessEnv> {
   const env: NodeJS.ProcessEnv = { ...process.env, ...(agent.envVars ?? {}) }
   const ownerId = startedBy || agent.ownerId || DEV_USER_ID
+
+  // Expose the repo's git credential as GH_TOKEN so the `gh` CLI authenticates as
+  // the same identity `git push` uses. Only set when a token resolved (pat/
+  // githubapp repos); ssh/none and repo-less runs leave `gh` unauthenticated.
+  Object.assign(env, githubTokenEnvEntry(githubToken, agent.envVars))
 
   const envVar = RUNNER_ENV_VAR[agent.runner]
   if (envVar && !(agent.envVars && envVar in agent.envVars)) {
@@ -225,6 +232,11 @@ export async function startRunServer(
   // Set when push-credential resolution failed; surfaced into the run log once
   // the log stream is open (see below), so a broken git token is never invisible.
   let pushCredentialError: string | undefined
+  // The resolved repo credential (global PAT / minted GitHub-App installation
+  // token). Tokenizes the worktree `origin` for `git push` AND is handed to the
+  // agent as GH_TOKEN so the `gh` CLI authenticates as the same identity.
+  // Hoisted here so it's in scope at spawn time (below).
+  let pushToken: string | undefined
 
   if (agent.repositoryId) {
     const repo = await getRepository(agent.repositoryId)
@@ -243,7 +255,8 @@ export async function startRunServer(
     // agent's later `git push` fails with an opaque credential error otherwise, so
     // record why in both Sentry and the run log (the run-log line is emitted below,
     // once the log stream is open).
-    const { token: pushToken, error: pushTokenError } = await resolvePushCredential(repo)
+    const { token: resolvedToken, error: pushTokenError } = await resolvePushCredential(repo)
+    pushToken = resolvedToken
     if (pushTokenError) {
       pushCredentialError = pushTokenError.message
       reporter.captureException(pushTokenError, {
@@ -448,7 +461,7 @@ export async function startRunServer(
       child = spawn('cursor', buildCursorArgs(workspacePath), {
         detached: true,
         stdio: 'ignore',
-        env: await buildRunnerEnv(agent, startedBy),
+        env: await buildRunnerEnv(agent, startedBy, pushToken),
       })
       child.unref()
     } catch (err) {
@@ -488,7 +501,7 @@ export async function startRunServer(
 
     const binary = agent.runner === 'amp' ? 'amp' : 'claude'
 
-    const runnerEnv = await buildRunnerEnv(agent, startedBy)
+    const runnerEnv = await buildRunnerEnv(agent, startedBy, pushToken)
     if (agent.runner === 'claude') {
       // Pre-trust the workspace so Claude honors the repo's .claude/settings.json
       // instead of warning "this workspace has not been trusted" and dropping its

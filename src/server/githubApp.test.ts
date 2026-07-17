@@ -17,7 +17,14 @@ vi.mock('./crypto', () => ({
   decryptSecret: vi.fn(() => 'DECRYPTED-PEM'),
 }))
 
-import { parseGithubOwnerRepo, mintInstallationToken, resolveRepoToken, resolvePushCredential } from './githubApp'
+import {
+  parseGithubOwnerRepo,
+  mintInstallationToken,
+  resolveRepoToken,
+  resolvePushCredential,
+  githubTokenEnvEntry,
+  GH_TOKEN_ENV_VAR,
+} from './githubApp'
 import { getRepositoryCredentials } from '../main/db/queries/repositories'
 import { decryptSecret } from './crypto'
 
@@ -158,5 +165,25 @@ describe('resolvePushCredential', () => {
     expect(result.token).toBeUndefined()
     expect(result.error).toBeInstanceOf(Error)
     expect(result.error?.message).toMatch(/missing/i)
+  })
+})
+
+describe('githubTokenEnvEntry', () => {
+  it('exposes the resolved token as GH_TOKEN', () => {
+    expect(githubTokenEnvEntry('ghp_abc')).toEqual({ [GH_TOKEN_ENV_VAR]: 'ghp_abc' })
+    expect(GH_TOKEN_ENV_VAR).toBe('GH_TOKEN')
+  })
+
+  it('sets nothing when no token resolved (ssh/none or repo-less runs)', () => {
+    expect(githubTokenEnvEntry(undefined)).toEqual({})
+    expect(githubTokenEnvEntry('')).toEqual({})
+  })
+
+  it('lets an explicit per-agent GH_TOKEN win over the injected token', () => {
+    expect(githubTokenEnvEntry('ghp_repo', { GH_TOKEN: 'ghp_agent' })).toEqual({})
+  })
+
+  it('injects when the agent sets unrelated envVars but not GH_TOKEN', () => {
+    expect(githubTokenEnvEntry('ghp_repo', { FOO: 'bar' })).toEqual({ [GH_TOKEN_ENV_VAR]: 'ghp_repo' })
   })
 })
