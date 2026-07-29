@@ -20,7 +20,7 @@ import { buildRunFailureReport } from './runFailure'
 import { resolvePushCredential, githubTokenEnvEntry } from './githubApp'
 import { buildClaudeArgs, parseClaudeEvents } from '../main/execution/adapters/claude'
 import { buildAmpArgs, parseAmpEvents } from '../main/execution/adapters/amp'
-import { buildCursorArgs, CURSOR_NOTICE } from '../main/execution/adapters/cursor'
+import { buildCursorArgs, parseCursorEvents } from '../main/execution/adapters/cursor'
 import { publishRunResult } from './publisher'
 import { buildTriggeredPrompt } from './triggers/promptBuilder'
 import { reporter } from './observability'
@@ -216,8 +216,7 @@ export async function startRunServer(
   if (!agent) throw new Error(`Agent ${agentId} not found`)
 
   // One live run per agent: reject a second concurrent start rather than spin up
-  // another multi-GB worktree racing the same agent. (Cursor "launches" don't stay
-  // in the active set, so they're unaffected.)
+  // another multi-GB worktree racing the same agent.
   if (hasActiveRunForAgent(agentId)) {
     throw new Error(
       `Agent "${agent.name || agentId}" already has a run in progress. ` +
@@ -317,10 +316,15 @@ export async function startRunServer(
   // OAuth token that can't be decrypted). Since the run record already exists,
   // an unhandled throw here would leave it orphaned as "running" forever with no
   // log — so on failure we mark it failed, record why in its log, and surface it.
+  // Skipped for cursor: cursor-agent has no --mcp-config flag (it loads MCPs from
+  // the workspace's .cursor/mcp.json and the user's global Cursor config), so
+  // Conduit-managed MCP injection doesn't apply to that runner.
   const actingUserId = startedBy ?? agent.ownerId ?? DEV_USER_ID
-  let mcpConfigPath: string
+  let mcpConfigPath: string | undefined
   try {
-    mcpConfigPath = await writeMcpConfig(runId, agent.mcpConfig, actingUserId)
+    if (agent.runner !== 'cursor') {
+      mcpConfigPath = await writeMcpConfig(runId, agent.mcpConfig, actingUserId)
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     appendRunLog(runId, `Failed to prepare run: ${msg}`)
@@ -453,53 +457,27 @@ export async function startRunServer(
     )
   }
 
-  // 6. Spawn process based on runner type
-  if (agent.runner === 'cursor') {
-    // Cursor: open workspace folder, no streaming
-    let child: ChildProcess
-    try {
-      child = spawn('cursor', buildCursorArgs(workspacePath), {
-        detached: true,
-        stdio: 'ignore',
-        env: await buildRunnerEnv(agent, startedBy, pushToken),
-      })
-      child.unref()
-    } catch (err) {
-      // Rethrown to the caller (WS 'runs:start' handler / triggerService), which
-      // reports it — capturing here too would double-report.
-      cleanupRun(runId, workspacePath, isEphemeral, worktreeClonePath)
-      logStream.end()
-      await updateRun(runId, { status: 'failed', endedAt: Date.now() })
-      broadcast('run:statusChange', { runId, status: 'failed' })
-      throw err
-    }
-
-    emitSystemMessage(CURSOR_NOTICE)
-
-    // Mark as launched (not completed — it's a GUI app)
-    activeProcesses.delete(runId)
-    cleanupRun(runId, workspacePath, isEphemeral, worktreeClonePath)
-    logStream.end()
-
-    const endedAt = Date.now()
-    const durationMs = endedAt - run.startedAt
-
-    const launchedRun = await updateRun(runId, { status: 'launched', endedAt, durationMs })
-
-    broadcast('run:statusChange', { runId, status: 'launched', endedAt, durationMs })
-
-    return launchedRun
+  // 6. Spawn process based on runner type (all runners are headless CLIs).
+  // Cursor runs cursor-agent in "Run Everything" mode (--force / --yolo) — see
+  // buildCursorArgs — so the agent executes commands and edits without approval.
+  if (agent.runner === 'cursor' && Object.keys(agent.mcpConfig?.mcpServers ?? {}).length > 0) {
+    emitSystemMessage(
+      `[Conduit: cursor-agent has no --mcp-config flag, so this agent's configured MCP ` +
+        `servers are not injected. Cursor loads MCPs from the workspace .cursor/mcp.json ` +
+        `and the user's global Cursor config.]`
+    )
   }
 
-  // claude or amp
   let child: ChildProcess
   try {
     const cliArgs =
       agent.runner === 'amp'
-        ? buildAmpArgs(mcpConfigPath)
-        : buildClaudeArgs(mcpConfigPath, agent.effort, !agent.enableRepoMcps)
+        ? buildAmpArgs(mcpConfigPath!)
+        : agent.runner === 'cursor'
+        ? buildCursorArgs({ model: agent.model, effort: agent.effort })
+        : buildClaudeArgs(mcpConfigPath!, agent.effort, !agent.enableRepoMcps)
 
-    const binary = agent.runner === 'amp' ? 'amp' : 'claude'
+    const binary = agent.runner === 'amp' ? 'amp' : agent.runner === 'cursor' ? 'cursor-agent' : 'claude'
 
     const runnerEnv = await buildRunnerEnv(agent, startedBy, pushToken)
     if (agent.runner === 'claude') {
@@ -549,7 +527,12 @@ export async function startRunServer(
   })
 
   // Readline on stdout for NDJSON parsing → structured events.
-  const parseEvents = agent.runner === 'amp' ? parseAmpEvents : parseClaudeEvents
+  const parseEvents =
+    agent.runner === 'amp'
+      ? parseAmpEvents
+      : agent.runner === 'cursor'
+      ? parseCursorEvents
+      : parseClaudeEvents
 
   if (child.stdout) {
     const rl = createInterface({ input: child.stdout, crlfDelay: Infinity })

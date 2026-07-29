@@ -12,7 +12,7 @@ import { DEV_USER_ID } from '../../server/auth/config'
 import { LOGS_DIR } from '../utils/paths'
 import { buildClaudeArgs, parseClaudeOutput } from './adapters/claude'
 import { buildAmpArgs, parseAmpOutput } from './adapters/amp'
-import { buildCursorArgs, CURSOR_NOTICE } from './adapters/cursor'
+import { buildCursorArgs } from './adapters/cursor'
 
 interface ActiveRun {
   child: ChildProcess
@@ -193,7 +193,8 @@ export async function startRun(
     // Cursor: open workspace folder, no streaming
     let child: ChildProcess
     try {
-      child = spawn('cursor', buildCursorArgs(workspacePath), {
+      child = spawn('cursor-agent', buildCursorArgs({ model: agent.model, effort: agent.effort }), {
+        cwd: workspacePath,
         detached: true,
         stdio: 'ignore',
       })
@@ -208,9 +209,9 @@ export async function startRun(
       throw err
     }
 
-    emitSystemMessage(CURSOR_NOTICE)
+    emitSystemMessage('[cursor-agent launched. This legacy path is unmaintained — see src/server/runner.ts.]\r\n')
 
-    // Mark as launched (not completed — it's a GUI app)
+    // Mark as launched (no streaming on this legacy path)
     activeProcesses.delete(runId)
     cleanupRun(runId, workspacePath)
     logStream.end()

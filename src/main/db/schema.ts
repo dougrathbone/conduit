@@ -136,6 +136,7 @@ export const agents = pgTable('agents', {
   publishTargetIds: text('publish_target_ids'),
   repositoryId: text('repository_id'),
   effort: text('effort'),
+  model: text('model'),
   bgTaskTimeoutSeconds: bigint('bg_task_timeout_seconds', { mode: 'number' }),
   enableRepoMcps: boolean('enable_repo_mcps').notNull().default(false),
   ownerId: text('owner_id'),

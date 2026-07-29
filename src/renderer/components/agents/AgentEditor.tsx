@@ -45,6 +45,59 @@ const RUNNER_OPTIONS: { value: RunnerType; label: string; description: string }[
   { value: 'cursor', label: 'Cursor',      description: 'Anysphere' },
 ]
 
+/** Common Cursor base model slugs — free text is allowed; this is a convenience
+ * datalist. The full list comes from `cursor-agent models`. */
+const CURSOR_MODEL_SUGGESTIONS = [
+  'auto',
+  'composer-2.5',
+  'claude-opus-5',
+  'claude-opus-4-8',
+  'claude-sonnet-5',
+  'gpt-5.6-sol',
+  'gpt-5.5',
+  'kimi-k3',
+]
+
+function EffortPicker({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: RunnerEffort | undefined
+  onChange: (level: RunnerEffort | undefined) => void
+  disabled?: boolean
+}) {
+  return (
+    <div
+      className={cn(
+        'flex gap-1 p-0.5 rounded-md bg-[var(--bg-primary)] border border-[var(--border)]',
+        disabled && 'opacity-50 pointer-events-none'
+      )}
+      aria-disabled={disabled}
+    >
+      {([undefined, 'low', 'medium', 'high', 'xhigh', 'max'] as (RunnerEffort | undefined)[]).map((level) => {
+        const active = (value ?? undefined) === level
+        return (
+          <button
+            key={level ?? 'default'}
+            type="button"
+            disabled={disabled}
+            onClick={() => onChange(level)}
+            className={cn(
+              'flex-1 text-xs py-1.5 rounded-md transition-colors font-medium capitalize',
+              active
+                ? 'bg-[var(--bg-secondary)] text-[var(--text-primary)] shadow-sm'
+                : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+            )}
+          >
+            {level ?? 'Default'}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 function RunnerPicker({
   value,
   onChange,
@@ -146,6 +199,7 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
         publishTargetIds: agent.publishTargetIds,
         repositoryId: agent.repositoryId,
         effort: agent.effort,
+        model: agent.model,
         bgTaskTimeoutSeconds: agent.bgTaskTimeoutSeconds,
         enableRepoMcps: agent.enableRepoMcps ?? false,
       })
@@ -208,8 +262,8 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
       clearTimeout(debounceRef.current)
       debounceRef.current = null
     }
-    const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps } = draft
-    await save({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps })
+    const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, enableRepoMcps } = draft
+    await save({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, enableRepoMcps })
   }, [draft, save])
 
   useImperativeHandle(ref, () => ({
@@ -227,8 +281,8 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
     (field: keyof typeof draft, value: unknown) => {
       const updated = { ...draft, [field]: value }
       setDraft(updated)
-      const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps } = updated
-      scheduleSave({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, bgTaskTimeoutSeconds, enableRepoMcps })
+      const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, enableRepoMcps } = updated
+      scheduleSave({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, enableRepoMcps })
     },
     [draft, scheduleSave]
   )
@@ -325,30 +379,58 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
               <label className="block text-xs font-medium text-[var(--text-secondary)]">
                 Reasoning Effort
               </label>
-              <div className="flex gap-1 p-0.5 rounded-md bg-[var(--bg-primary)] border border-[var(--border)]">
-                {([undefined, 'low', 'medium', 'high', 'xhigh', 'max'] as (RunnerEffort | undefined)[]).map((level) => {
-                  const active = (draft.effort ?? undefined) === level
-                  return (
-                    <button
-                      key={level ?? 'default'}
-                      type="button"
-                      onClick={() => handleChange('effort', level)}
-                      className={cn(
-                        'flex-1 text-xs py-1.5 rounded-md transition-colors font-medium capitalize',
-                        active
-                          ? 'bg-[var(--bg-secondary)] text-[var(--text-primary)] shadow-sm'
-                          : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
-                      )}
-                    >
-                      {level ?? 'Default'}
-                    </button>
-                  )
-                })}
-              </div>
+              <EffortPicker
+                value={draft.effort}
+                onChange={(level) => handleChange('effort', level)}
+              />
               <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
                 Higher effort lets Claude reason longer. Default uses the CLI's built-in setting.
               </p>
             </div>
+          )}
+
+          {/* Model + effort — Cursor only (maps to `cursor-agent --model <slug>-<effort>`) */}
+          {(draft.runner ?? 'claude') === 'cursor' && (
+            <>
+              <div className="space-y-1.5">
+                <label className="block text-xs font-medium text-[var(--text-secondary)]">
+                  Model
+                </label>
+                <Input
+                  value={draft.model ?? ''}
+                  onChange={(e) => handleChange('model', e.target.value || undefined)}
+                  placeholder="auto"
+                  list="cursor-model-suggestions"
+                  spellCheck={false}
+                />
+                <datalist id="cursor-model-suggestions">
+                  {CURSOR_MODEL_SUGGESTIONS.map((m) => (
+                    <option key={m} value={m} />
+                  ))}
+                </datalist>
+                <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
+                  Base model slug passed to <code>cursor-agent --model</code>. Empty uses the CLI
+                  default (<code>auto</code>). Run <code>cursor-agent models</code> for the full list.
+                </p>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-xs font-medium text-[var(--text-secondary)]">
+                  Reasoning Effort
+                </label>
+                <EffortPicker
+                  value={draft.effort}
+                  onChange={(level) => handleChange('effort', level)}
+                  disabled={!(draft.model ?? '').trim()}
+                />
+                <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
+                  Cursor encodes effort in the model slug — e.g. <code>claude-opus-4-8</code> + high
+                  runs as <code>claude-opus-4-8-high</code>. Requires a model to be set. Runs in
+                  "Run Everything" mode (<code>--force</code>): commands and edits execute without
+                  approval.
+                </p>
+              </div>
+            </>
           )}
         </CollapsibleSection>
 

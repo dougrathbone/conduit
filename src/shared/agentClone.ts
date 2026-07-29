@@ -28,6 +28,7 @@ export function buildCloneInput(
     publishTargetIds: agent.publishTargetIds ? [...agent.publishTargetIds] : undefined,
     repositoryId: agent.repositoryId,
     effort: agent.effort,
+    model: agent.model,
     enableRepoMcps: agent.enableRepoMcps ?? false,
   }
 }

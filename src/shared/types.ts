@@ -215,8 +215,19 @@ export interface AgentConfig {
   publishTargetIds?: string[]
   /** ID of a managed repository to use as the workspace */
   repositoryId?: string
-  /** Reasoning effort for the Claude runner. Ignored by other runners; unset uses the CLI default. */
+  /**
+   * Reasoning effort. Claude: maps to `claude --effort <level>`. Cursor: selects
+   * the model's `-<effort>` variant (requires `model` to be set). Unset uses the
+   * CLI default.
+   */
   effort?: RunnerEffort
+  /**
+   * Base model slug for the Cursor runner (`cursor-agent --model`), e.g.
+   * 'claude-opus-4-8'. Combined with `effort` into the full slug
+   * (`claude-opus-4-8-high`). Ignored by other runners; unset uses the CLI
+   * default ('auto').
+   */
+  model?: string
   /**
    * Per-agent background-task timeout in seconds (0 = run indefinitely). Overrides
    * the user's per-provider Settings value; unset inherits it. Currently only the
