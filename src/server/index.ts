@@ -624,7 +624,7 @@ const handlers: Record<string, HandlerFn> = {
     return Promise.resolve(null)
   },
   'prefs:set': () => {
-    throw new Error(
+    throw new ClientError(
       'prefs:set is disabled in server mode — configure secrets via environment variables (e.g. via ESO + AWS Secrets Manager).'
     )
   },
