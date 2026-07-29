@@ -10,6 +10,7 @@ import { generatePkce, buildAuthorizationUrl, exchangeCode } from './flow'
 import { putPending, takePending } from './state'
 import { auditMcpOAuth } from './audit'
 import { isUrlMcpServer } from '../../shared/mcp'
+import { ClientError } from '../errors'
 
 const GLOBAL_OWNER = '__global__'
 
@@ -60,7 +61,7 @@ export async function resolveServerTarget(serverId: string, isGlobal: boolean, u
 
 async function assertAccess(t: ServerTarget, userId: string, userGroupIds: string[]): Promise<void> {
   if (!(await canAccessEntity(t.parentEntityType, t.parentEntityId, userId, userGroupIds))) {
-    throw new Error('Access denied')
+    throw new ClientError('Access denied')
   }
 }
 

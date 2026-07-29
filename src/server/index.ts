@@ -252,7 +252,7 @@ const handlers: Record<string, HandlerFn> = {
     Promise.resolve(createAgent(data as Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>, ctx.userId)),
   'agents:update': async ([id, data], _ws, ctx) => {
     if (!(await canAccessEntity('agent', id as string, ctx.userId, ctx.userGroupIds))) {
-      throw new Error('Access denied')
+      throw new ClientError('Access denied')
     }
     return Promise.resolve(
       updateAgent(
@@ -449,7 +449,7 @@ const handlers: Record<string, HandlerFn> = {
   },
   'repos:update': async ([id, data], _ws, ctx) => {
     if (!(await canAccessEntity('repository', id as string, ctx.userId, ctx.userGroupIds))) {
-      throw new Error('Access denied')
+      throw new ClientError('Access denied')
     }
     // GitHub App credentials are sensitive secrets — only the owner may set or
     // change them, even though shared users can edit other repo fields.
@@ -502,7 +502,7 @@ const handlers: Record<string, HandlerFn> = {
     ),
   'publishTargets:update': async ([id, data], _ws, ctx) => {
     if (!(await canAccessEntity('publishTarget', id as string, ctx.userId, ctx.userGroupIds))) {
-      throw new Error('Access denied')
+      throw new ClientError('Access denied')
     }
     return Promise.resolve(
       updatePublishTarget(
@@ -532,7 +532,7 @@ const handlers: Record<string, HandlerFn> = {
   // Triggers
   'triggers:list': async ([agentId], _ws, ctx) => {
     if (!(await canAccessEntity('agent', agentId as string, ctx.userId, ctx.userGroupIds))) {
-      throw new Error('Access denied')
+      throw new ClientError('Access denied')
     }
     return Promise.resolve(listTriggers(agentId as string))
   },
@@ -540,7 +540,7 @@ const handlers: Record<string, HandlerFn> = {
   'triggers:create': async ([data], _ws, ctx) => {
     const triggerData = data as Omit<Trigger, 'id' | 'createdAt' | 'updatedAt'>
     if (!(await canAccessEntity('agent', triggerData.agentId, ctx.userId, ctx.userGroupIds))) {
-      throw new Error('Access denied')
+      throw new ClientError('Access denied')
     }
     const trigger = await createTrigger(triggerData)
     triggerService.registerTrigger(trigger)
@@ -667,7 +667,7 @@ const handlers: Record<string, HandlerFn> = {
   // Shares
   'shares:list': async ([entityType, entityId], _ws, ctx) => {
     if (!(await canAccessEntity(entityType as ShareableEntityType, entityId as string, ctx.userId, ctx.userGroupIds))) {
-      throw new Error('Access denied')
+      throw new ClientError('Access denied')
     }
     return Promise.resolve(listShares(entityType as ShareableEntityType, entityId as string))
   },
