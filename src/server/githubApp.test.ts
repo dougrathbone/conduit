@@ -23,8 +23,11 @@ import {
   resolveRepoToken,
   resolvePushCredential,
   githubTokenEnvEntry,
+  isTransientGithubError,
+  withTransientGithubRetry,
   GH_TOKEN_ENV_VAR,
 } from './githubApp'
+import { createAppAuth } from '@octokit/auth-app'
 import { getRepositoryCredentials } from '../main/db/queries/repositories'
 import { decryptSecret } from './crypto'
 
@@ -49,6 +52,7 @@ describe('parseGithubOwnerRepo', () => {
 describe('mintInstallationToken', () => {
   const realFetch = global.fetch
   afterEach(() => {
+    vi.useRealTimers()
     global.fetch = realFetch
     vi.restoreAllMocks()
   })
@@ -94,6 +98,153 @@ describe('mintInstallationToken', () => {
     await expect(
       mintInstallationToken({ appId: '123', privateKey: 'PEM', repoUrl: 'https://github.com/acme/widgets' })
     ).rejects.toThrow(/unexpected response/i)
+  })
+
+  it('retries a transient 5xx discovering the installation, then succeeds', async () => {
+    vi.useFakeTimers()
+    global.fetch = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 502, text: async () => 'Bad Gateway' })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ id: 7 }) }) as unknown as typeof fetch
+
+    const promise = mintInstallationToken({
+      appId: '123',
+      privateKey: 'PEM',
+      repoUrl: 'https://github.com/acme/widgets',
+    })
+    await vi.runAllTimersAsync()
+
+    await expect(promise).resolves.toBe('ghs_inst_7')
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not retry a 4xx discovering the installation', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: false,
+      status: 404,
+      text: async () => 'Not Found',
+    })) as unknown as typeof fetch
+
+    await expect(
+      mintInstallationToken({ appId: '123', privateKey: 'PEM', repoUrl: 'https://github.com/acme/widgets' })
+    ).rejects.toThrow(/not installed/i)
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries GitHub\'s "couldn\'t respond in time" minting the installation token', async () => {
+    vi.useFakeTimers()
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 555 }),
+    })) as unknown as typeof fetch
+
+    // The Sentry CONDUIT-J failure: the POST minting the installation token
+    // intermittently dies on GitHub's edge with this message.
+    const installationAuth = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(
+          new Error(
+            "We couldn't respond to your request in time. Sorry about that. " +
+              'Please try resubmitting your request and contact us if the problem persists.'
+          ),
+          { status: 502 }
+        )
+      )
+      .mockResolvedValueOnce({ token: 'ghs_inst_555' })
+    vi.mocked(createAppAuth).mockImplementationOnce(
+      () => async (opts: { type: string; installationId?: number }) =>
+        opts.type === 'app' ? { token: 'app-jwt' } : installationAuth(opts.installationId)
+    )
+
+    const promise = mintInstallationToken({
+      appId: '123',
+      privateKey: 'PEM',
+      repoUrl: 'https://github.com/acme/widgets',
+    })
+    await vi.runAllTimersAsync()
+
+    await expect(promise).resolves.toBe('ghs_inst_555')
+    expect(installationAuth).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not retry a 4xx minting the installation token', async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ id: 555 }),
+    })) as unknown as typeof fetch
+
+    const installationAuth = vi
+      .fn()
+      .mockRejectedValue(Object.assign(new Error('Bad credentials'), { status: 401 }))
+    vi.mocked(createAppAuth).mockImplementationOnce(
+      () => async (opts: { type: string; installationId?: number }) =>
+        opts.type === 'app' ? { token: 'app-jwt' } : installationAuth(opts.installationId)
+    )
+
+    await expect(
+      mintInstallationToken({ appId: '123', privateKey: 'PEM', repoUrl: 'https://github.com/acme/widgets' })
+    ).rejects.toThrow(/Bad credentials/)
+    expect(installationAuth).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('isTransientGithubError', () => {
+  it('treats 5xx statuses as transient', () => {
+    expect(isTransientGithubError(Object.assign(new Error('boom'), { status: 500 }))).toBe(true)
+    expect(isTransientGithubError(Object.assign(new Error('boom'), { status: 502 }))).toBe(true)
+  })
+
+  it('treats the "couldn\'t respond in time" message as transient even with a 4xx status', () => {
+    const err = Object.assign(new Error("We couldn't respond to your request in time."), {
+      status: 403,
+    })
+    expect(isTransientGithubError(err)).toBe(true)
+  })
+
+  it('treats network-level failures as transient', () => {
+    expect(isTransientGithubError(new TypeError('fetch failed'))).toBe(true)
+    expect(isTransientGithubError(Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }))).toBe(true)
+    expect(isTransientGithubError(Object.assign(new Error('reset'), { code: 'ECONNRESET' }))).toBe(true)
+  })
+
+  it('fails fast on 4xx auth/config errors', () => {
+    expect(isTransientGithubError(Object.assign(new Error('Bad credentials'), { status: 401 }))).toBe(false)
+    expect(isTransientGithubError(Object.assign(new Error('Not Found'), { status: 404 }))).toBe(false)
+  })
+
+  it('does not classify non-Error throws as transient', () => {
+    expect(isTransientGithubError('boom')).toBe(false)
+    expect(isTransientGithubError(undefined)).toBe(false)
+  })
+})
+
+describe('withTransientGithubRetry', () => {
+  it('retries a transient failure until it succeeds', async () => {
+    const fn = vi
+      .fn()
+      .mockRejectedValueOnce(Object.assign(new Error('boom'), { status: 503 }))
+      .mockRejectedValueOnce(Object.assign(new Error('boom'), { status: 502 }))
+      .mockResolvedValueOnce('ok')
+
+    await expect(withTransientGithubRetry(fn, { baseDelayMs: 0 })).resolves.toBe('ok')
+    expect(fn).toHaveBeenCalledTimes(3)
+  })
+
+  it('does not retry 4xx errors', async () => {
+    const fn = vi.fn().mockRejectedValue(Object.assign(new Error('nope'), { status: 404 }))
+
+    await expect(withTransientGithubRetry(fn, { baseDelayMs: 0 })).rejects.toThrow('nope')
+    expect(fn).toHaveBeenCalledTimes(1)
+  })
+
+  it('gives up after the attempt budget and rethrows the last error', async () => {
+    const fn = vi.fn().mockRejectedValue(Object.assign(new Error('still down'), { status: 500 }))
+
+    await expect(withTransientGithubRetry(fn, { attempts: 3, baseDelayMs: 0 })).rejects.toThrow('still down')
+    expect(fn).toHaveBeenCalledTimes(3)
   })
 })
 
