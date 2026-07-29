@@ -5,10 +5,12 @@ import * as os from 'os'
 import * as path from 'path'
 
 // Mock git: `worktree list --porcelain` and `count-objects -v` return canned
-// stdout; everything else exits 0. Lets us test the parsing helpers without git.
+// stdout; `gc` can be made to fail via gcFailure; everything else exits 0.
+// Lets us test the parsing helpers without git.
 const spawnCalls: string[][] = []
 let worktreeListStdout = ''
 let countObjectsStdout = ''
+let gcFailure: { code: number; stderr: string } | null = null
 
 vi.mock('child_process', () => ({
   spawn: vi.fn((_cmd: string, args: string[]) => {
@@ -23,6 +25,9 @@ vi.mock('child_process', () => ({
       } else if (args[0] === 'count-objects') {
         child.stdout.emit('data', Buffer.from(countObjectsStdout))
         child.emit('close', 0)
+      } else if (args[0] === 'gc' && gcFailure) {
+        child.stderr.emit('data', Buffer.from(gcFailure.stderr))
+        child.emit('close', gcFailure.code)
       } else {
         child.emit('close', 0)
       }
@@ -35,6 +40,7 @@ import { listWorktrees, getGcStats, gcBareClone } from './gitOps'
 
 beforeEach(() => {
   spawnCalls.length = 0
+  gcFailure = null
 })
 
 describe('gcBareClone', () => {
@@ -52,11 +58,49 @@ describe('gcBareClone', () => {
     const threeHoursAgo = Date.now() / 1000 - 3 * 3600
     fs.utimesSync(stale, threeHoursAgo, threeHoursAgo)
     try {
-      await gcBareClone(base)
+      expect(await gcBareClone(base)).toBe(true) // gc ran
       expect(fs.existsSync(stale)).toBe(false) // removed — git gc leaves it, we don't
       expect(fs.existsSync(fresh)).toBe(true) // spared — could be an in-flight fetch's temp
       expect(fs.existsSync(realPack)).toBe(true) // never touched — not a tmp_ file
       expect(spawnCalls.some((a) => a[0] === 'gc')).toBe(true) // did run git gc
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  it('treats a "gc is already running" failure as a benign skip, not an error', async () => {
+    // The exact failure git produces when another gc holds the gc.pid lock
+    // (e.g. a previous sweep's gc still running, or git's own auto-gc).
+    gcFailure = {
+      code: 128,
+      stderr: "fatal: gc is already running on machine 'pod-1a2b3c' pid 68 (use --force if not)",
+    }
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-test-'))
+    try {
+      await expect(gcBareClone(base)).resolves.toBe(false) // skipped, never throws
+      expect(spawnCalls.some((a) => a[0] === 'gc')).toBe(true) // gc was attempted
+      expect(spawnCalls.some((a) => a.includes('--force'))).toBe(false) // never forced
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  it('skips gc without spawning git when a gc.pid lock file exists', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-test-'))
+    fs.writeFileSync(path.join(base, 'gc.pid'), '68 pod-1a2b3c\n')
+    try {
+      await expect(gcBareClone(base)).resolves.toBe(false)
+      expect(spawnCalls.some((a) => a[0] === 'gc')).toBe(false) // didn't even try
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true })
+    }
+  })
+
+  it('still throws a genuine gc failure so the caller can report it', async () => {
+    gcFailure = { code: 128, stderr: 'fatal: unable to read abc123: corrupt object' }
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'gc-test-'))
+    try {
+      await expect(gcBareClone(base)).rejects.toThrow('corrupt object')
     } finally {
       fs.rmSync(base, { recursive: true, force: true })
     }

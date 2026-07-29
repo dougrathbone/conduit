@@ -176,6 +176,13 @@ export function isDiskFullError(message: string): boolean {
   return /no space left on device|\bENOSPC\b/i.test(message)
 }
 
+/** True when a git error is `git gc` refusing to run because another gc holds
+ *  the repo's `gc.pid` lock (exit 128, "gc is already running on machine …").
+ *  Benign and self-healing: the other gc is already doing the compaction. */
+export function isGcAlreadyRunningError(message: string): boolean {
+  return /gc is already running/i.test(message)
+}
+
 /**
  * Create a git worktree from a bare clone for an isolated run workspace.
  *
@@ -403,16 +410,38 @@ const GC_TMP_MAX_AGE_MS = 60 * 60 * 1000 // 1 h
  *  - leftover git "garbage" temp packs (`objects/pack/tmp_*` from a crashed or
  *    timed-out fetch) → git gc does NOT remove these, so we delete the old ones
  *    ourselves (sparing any young enough to belong to a live operation).
- * Bounded by a timeout; throws on gc failure so the caller can report it.
+ * Bounded by a timeout; throws on gc failure so the caller can report it —
+ * with one exception. A gc that can't start because another gc holds the
+ * repo's `gc.pid` lock ("gc is already running", e.g. a previous sweep's gc
+ * still running or git's own auto-gc) is benign and self-healing: the other gc
+ * is already doing the compaction. That case is skipped quietly — never
+ * `--force`, which can corrupt the repo if gc genuinely is running — and the
+ * boolean return tells the caller gc didn't happen this cycle (it retries on
+ * the next sweep). Returns true when gc actually ran.
  */
-export async function gcBareClone(clonePath: string): Promise<void> {
-  await runGit(['gc'], { cwd: clonePath, timeoutMs: GC_TIMEOUT_MS })
+export async function gcBareClone(clonePath: string): Promise<boolean> {
+  // Cheap pre-check: `git gc` refuses to run while a `gc.pid` lock exists
+  // (even a stale one), so don't spawn a doomed git. The catch below covers
+  // the race — the lock appearing between this check and git's own attempt.
+  if (fs.existsSync(path.join(clonePath, 'gc.pid'))) {
+    console.log(`[gitOps] gc skipped for ${clonePath}: gc.pid lock present (another gc is running)`)
+    return false
+  }
+  try {
+    await runGit(['gc'], { cwd: clonePath, timeoutMs: GC_TIMEOUT_MS })
+  } catch (err) {
+    if (err instanceof Error && isGcAlreadyRunningError(err.message)) {
+      console.log(`[gitOps] gc skipped for ${clonePath}: ${err.message}`)
+      return false
+    }
+    throw err
+  }
   const packDir = path.join(clonePath, 'objects', 'pack')
   let entries: fs.Dirent[]
   try {
     entries = fs.readdirSync(packDir, { withFileTypes: true })
   } catch {
-    return // no pack dir / unreadable — nothing to prune
+    return true // gc ran; no pack dir / unreadable — nothing to prune
   }
   const cutoff = Date.now() - GC_TMP_MAX_AGE_MS
   for (const e of entries) {
@@ -424,4 +453,5 @@ export async function gcBareClone(clonePath: string): Promise<void> {
       /* best-effort: a file that vanished or is unreadable isn't our problem */
     }
   }
+  return true
 }

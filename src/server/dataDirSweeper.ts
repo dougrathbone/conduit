@@ -464,8 +464,9 @@ async function runSweep(now: number): Promise<SweepResult> {
     try {
       const stats = await getGcStats(clonePath)
       if (stats.hasGarbage || stats.packs >= GC_PACK_THRESHOLD) {
-        await gcBareClone(clonePath)
-        result.reposCompacted++
+        // False when another gc holds the repo's lock — a benign skip, not a
+        // compaction (and nothing to report; the next sweep retries).
+        if (await gcBareClone(clonePath)) result.reposCompacted++
       }
     } catch (err) {
       reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'gc' } })
