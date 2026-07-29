@@ -11,6 +11,8 @@ import {
   memoryFraction,
   shouldEscalate,
   measureMemoryPressure,
+  parseMemoryStat,
+  workingSetBytes,
 } from './memoryPressure'
 
 describe('classifyMemoryUsage', () => {
@@ -51,6 +53,35 @@ describe('shouldEscalate', () => {
     expect(shouldEscalate('critical', 'critical')).toBe(false)
     expect(shouldEscalate('critical', 'warning')).toBe(false)
     expect(shouldEscalate('warning', 'ok')).toBe(false)
+  })
+})
+
+describe('parseMemoryStat', () => {
+  const stat = 'anon 1234\nfile 987654321\ninactive_file 5678\nactive_file 90\n'
+
+  it('extracts a numeric field by key', () => {
+    expect(parseMemoryStat(stat, 'inactive_file')).toBe(5678)
+    expect(parseMemoryStat(stat, 'anon')).toBe(1234)
+  })
+
+  it('returns null for a missing or non-numeric field', () => {
+    expect(parseMemoryStat(stat, 'total_inactive_file')).toBeNull()
+    expect(parseMemoryStat('inactive_file banana\n', 'inactive_file')).toBeNull()
+    expect(parseMemoryStat('', 'inactive_file')).toBeNull()
+  })
+})
+
+describe('workingSetBytes', () => {
+  it('subtracts reclaimable page cache from the raw cgroup usage', () => {
+    expect(workingSetBytes(8589602816, 8400000000)).toBe(189602816)
+  })
+
+  it('clamps at zero when the cache exceeds current (skewed sample)', () => {
+    expect(workingSetBytes(100, 250)).toBe(0)
+  })
+
+  it('falls back to raw usage when the cgroup stat is unreadable', () => {
+    expect(workingSetBytes(12345, null)).toBe(12345)
   })
 })
 

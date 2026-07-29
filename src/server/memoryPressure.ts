@@ -55,6 +55,8 @@ export interface MemoryPressure {
   usedBytes: number
   usedFraction: number
   source: 'cgroup-v2' | 'cgroup-v1' | 'os'
+  /** Reclaimable page cache excluded from `usedBytes`, when the cgroup reported it. */
+  pageCacheBytes?: number
 }
 
 function readNum(path: string): number | null {
@@ -66,9 +68,44 @@ function readNum(path: string): number | null {
   }
 }
 
+/** Parse a numeric field from cgroup memory.stat content (`key value` lines). */
+export function parseMemoryStat(content: string, key: string): number | null {
+  for (const line of content.split('\n')) {
+    const [k, v] = line.trim().split(/\s+/)
+    if (k === key) {
+      const n = Number(v)
+      return Number.isFinite(n) ? n : null
+    }
+  }
+  return null
+}
+
+function readStatField(path: string, key: string): number | null {
+  try {
+    return parseMemoryStat(fs.readFileSync(path, 'utf8'), key)
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The OOM killer charges reclaimable page cache against the cgroup, but the
+ * kernel frees it under pressure before killing anything — so raw
+ * `memory.current` permanently pins at ~100% on a host that reads gigabytes of
+ * git data through the page cache, a false positive (CONDUIT-E). Kubernetes'
+ * own working-set formula is `current - inactive_file`; match it. Without stat
+ * data, fall back to the raw current rather than disabling the monitor.
+ */
+export function workingSetBytes(currentBytes: number, pageCacheBytes: number | null): number {
+  if (pageCacheBytes == null) return currentBytes
+  return Math.max(0, currentBytes - pageCacheBytes)
+}
+
 /**
  * Real memory usage of the container/host, preferring the cgroup limit (the
- * number the OOM killer actually enforces) over host totals. cgroup v2 first
+ * number the OOM killer actually enforces) over host totals. Usage is the
+ * working set — raw usage minus reclaimable page cache (see {@link
+ * workingSetBytes}). cgroup v2 first
  * (`memory.max` / `memory.current`), then v1
  * (`memory.limit_in_bytes` / `memory.usage_in_bytes`), then the OS as a fallback.
  * A cgroup limit of `max` / an unset sentinel (larger than host RAM) means
@@ -86,14 +123,18 @@ export async function measureMemoryPressure(): Promise<MemoryPressure> {
   const v2Max = readNum('/sys/fs/cgroup/memory.max')
   const v2Cur = readNum('/sys/fs/cgroup/memory.current')
   if (isRealLimit(v2Max) && v2Cur != null) {
-    return { limitBytes: v2Max, usedBytes: v2Cur, usedFraction: memoryFraction(v2Cur, v2Max), source: 'cgroup-v2' }
+    const cache = readStatField('/sys/fs/cgroup/memory.stat', 'inactive_file')
+    const used = workingSetBytes(v2Cur, cache)
+    return { limitBytes: v2Max, usedBytes: used, usedFraction: memoryFraction(used, v2Max), source: 'cgroup-v2', pageCacheBytes: cache ?? undefined }
   }
 
   // cgroup v1
   const v1Max = readNum('/sys/fs/cgroup/memory/memory.limit_in_bytes')
   const v1Cur = readNum('/sys/fs/cgroup/memory/memory.usage_in_bytes')
   if (isRealLimit(v1Max) && v1Cur != null) {
-    return { limitBytes: v1Max, usedBytes: v1Cur, usedFraction: memoryFraction(v1Cur, v1Max), source: 'cgroup-v1' }
+    const cache = readStatField('/sys/fs/cgroup/memory/memory.stat', 'total_inactive_file')
+    const used = workingSetBytes(v1Cur, cache)
+    return { limitBytes: v1Max, usedBytes: used, usedFraction: memoryFraction(used, v1Max), source: 'cgroup-v1', pageCacheBytes: cache ?? undefined }
   }
 
   // OS fallback (host RAM) — less accurate under a cgroup limit, but always available.
