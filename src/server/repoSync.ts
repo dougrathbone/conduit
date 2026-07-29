@@ -110,6 +110,8 @@ export class RepoSyncService {
       // be cloned unauthenticated: git then fails every attempt with "could not
       // read Username", which (before backoff) hammered GitHub and flooded Sentry
       // with hundreds of identical errors. Fail fast with an actionable reason.
+      // This is an expected user misconfiguration, not an app bug — mark it
+      // expected so it's recorded against the repo but not reported as an error.
       if (
         !token &&
         repo.url.startsWith('https://') &&
@@ -124,7 +126,8 @@ export class RepoSyncService {
               : 'No GitHub App token could be minted for this HTTPS repo. ' +
                 'Check the App is installed on the repository and its App ID + private key are configured.'
           ),
-          'auth'
+          'auth',
+          { expected: true }
         )
         return
       }
@@ -169,14 +172,28 @@ export class RepoSyncService {
    * Advance the backoff streak, persist the error, and report to Sentry ONLY on
    * the first failure of a streak — a persistently-broken repo then produces one
    * event, not one every cycle. The DB `syncError` still reflects each attempt.
+   *
+   * `expected` failures are user-fixable misconfigurations (e.g. a PAT-auth repo
+   * with no global PAT configured): the owner sees them via `syncError`, so they
+   * go out as a warning-level message instead of an error-level exception.
    */
-  private async recordSyncFailure(repoId: string, err: unknown, op: string): Promise<void> {
+  private async recordSyncFailure(
+    repoId: string,
+    err: unknown,
+    op: string,
+    opts?: { expected?: boolean }
+  ): Promise<void> {
     const prev = this.failures.get(repoId)
     this.failures.set(repoId, nextSyncBackoff(prev, Date.now()))
-    if (!prev) {
-      reporter.captureException(err, { tags: { component: 'repoSync', repoId, op } })
-    }
     const message = err instanceof Error ? err.message : String(err)
+    if (!prev) {
+      const tags = { component: 'repoSync', repoId, op }
+      if (opts?.expected) {
+        reporter.captureMessage(message, 'warning', { tags })
+      } else {
+        reporter.captureException(err, { tags })
+      }
+    }
     await updateRepository(repoId, { syncStatus: 'error', syncError: message })
     await this.broadcastStatus(repoId)
   }
