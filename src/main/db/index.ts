@@ -235,6 +235,7 @@ export async function initDb(): Promise<void> {
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS effort TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS model TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS bg_task_timeout_seconds BIGINT;
+    ALTER TABLE agents ADD COLUMN IF NOT EXISTS memory_cap_mb BIGINT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS enable_repo_mcps BOOLEAN NOT NULL DEFAULT false;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS description TEXT;
     ALTER TABLE agents ADD COLUMN IF NOT EXISTS deleted_at BIGINT;

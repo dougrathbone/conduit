@@ -138,6 +138,7 @@ export const agents = pgTable('agents', {
   effort: text('effort'),
   model: text('model'),
   bgTaskTimeoutSeconds: bigint('bg_task_timeout_seconds', { mode: 'number' }),
+  memoryCapMb: bigint('memory_cap_mb', { mode: 'number' }),
   enableRepoMcps: boolean('enable_repo_mcps').notNull().default(false),
   ownerId: text('owner_id'),
   // Soft-delete tombstone: unix ms when the agent was deleted, else null. We never

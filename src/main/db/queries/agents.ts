@@ -32,6 +32,7 @@ function rowToAgentConfig(row: typeof agents.$inferSelect): AgentConfig {
     effort: (row.effort ?? undefined) as AgentConfig['effort'],
     model: row.model ?? undefined,
     bgTaskTimeoutSeconds: row.bgTaskTimeoutSeconds ?? undefined,
+    memoryCapMb: row.memoryCapMb ?? undefined,
     enableRepoMcps: row.enableRepoMcps ?? false,
     ownerId: row.ownerId ?? undefined,
     createdAt: row.createdAt,
@@ -82,6 +83,7 @@ export async function createAgent(
     effort: data.effort ?? null,
     model: data.model ?? null,
     bgTaskTimeoutSeconds: data.bgTaskTimeoutSeconds ?? null,
+    memoryCapMb: data.memoryCapMb ?? null,
     enableRepoMcps: data.enableRepoMcps ?? false,
     ownerId,
     createdAt: now,
@@ -118,6 +120,7 @@ export async function updateAgent(
   if ('effort' in data) updateValues.effort = data.effort ?? null
   if ('model' in data) updateValues.model = data.model ?? null
   if ('bgTaskTimeoutSeconds' in data) updateValues.bgTaskTimeoutSeconds = data.bgTaskTimeoutSeconds ?? null
+  if ('memoryCapMb' in data) updateValues.memoryCapMb = data.memoryCapMb ?? null
   if ('enableRepoMcps' in data) updateValues.enableRepoMcps = data.enableRepoMcps ?? false
 
   await getDb().update(agents).set(updateValues).where(eq(agents.id, id))

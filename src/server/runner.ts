@@ -10,6 +10,7 @@ import { getRepository } from '../main/db/queries/repositories'
 import { getCredentialValue } from '../main/db/queries/agentCredentials'
 import { getRunnerTimeout } from '../main/db/queries/runnerSettings'
 import { resolveBgTaskTimeoutSeconds, bgTaskTimeoutEnvEntry } from './runnerTimeout'
+import { resolveMemoryCapMb, memoryCapEnvEntry } from './runnerMemory'
 import { createWorkspace, deleteWorkspace } from '../main/execution/workspace'
 import { writeMcpConfig, deleteMcpConfig } from '../main/utils/mcp'
 import { writeClaudeConfig, deleteClaudeConfig } from '../main/utils/claudeConfig'
@@ -44,7 +45,7 @@ const RUNNER_ENV_VAR: Record<string, string> = {
  * per-agent envVar always wins over every injected value.
  */
 async function buildRunnerEnv(
-  agent: { runner: string; envVars?: Record<string, string>; ownerId?: string; bgTaskTimeoutSeconds?: number },
+  agent: { runner: string; envVars?: Record<string, string>; ownerId?: string; bgTaskTimeoutSeconds?: number; memoryCapMb?: number },
   startedBy?: string,
   githubToken?: string
 ): Promise<NodeJS.ProcessEnv> {
@@ -74,6 +75,17 @@ async function buildRunnerEnv(
     Object.assign(env, bgTaskTimeoutEnvEntry(agent.runner, effective, agent.envVars))
   } catch (err) {
     console.error(`[server/runner] Failed to resolve bg-task timeout for ${ownerId}:`, err)
+  }
+
+  // Per-process Node heap cap: agent override → server-wide default → 0
+  // (uncapped). Merges into NODE_OPTIONS without clobbering flags already
+  // assembled from the host env or the agent's own envVars. Keeps run child
+  // processes from filling the pod cgroup and OOM-killing Conduit mid-run.
+  try {
+    const effectiveMb = resolveMemoryCapMb(agent.memoryCapMb)
+    Object.assign(env, memoryCapEnvEntry(effectiveMb, env.NODE_OPTIONS))
+  } catch (err) {
+    console.error(`[server/runner] Failed to resolve memory cap for ${ownerId}:`, err)
   }
 
   return env

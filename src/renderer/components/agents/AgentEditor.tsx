@@ -201,6 +201,7 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
         effort: agent.effort,
         model: agent.model,
         bgTaskTimeoutSeconds: agent.bgTaskTimeoutSeconds,
+        memoryCapMb: agent.memoryCapMb,
         enableRepoMcps: agent.enableRepoMcps ?? false,
       })
     }
@@ -262,8 +263,8 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
       clearTimeout(debounceRef.current)
       debounceRef.current = null
     }
-    const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, enableRepoMcps } = draft
-    await save({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, enableRepoMcps })
+    const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, memoryCapMb, enableRepoMcps } = draft
+    await save({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, memoryCapMb, enableRepoMcps })
   }, [draft, save])
 
   useImperativeHandle(ref, () => ({
@@ -281,8 +282,8 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
     (field: keyof typeof draft, value: unknown) => {
       const updated = { ...draft, [field]: value }
       setDraft(updated)
-      const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, enableRepoMcps } = updated
-      scheduleSave({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, enableRepoMcps })
+      const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, memoryCapMb, enableRepoMcps } = updated
+      scheduleSave({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, memoryCapMb, enableRepoMcps })
     },
     [draft, scheduleSave]
   )
@@ -319,7 +320,8 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
     : 'ephemeral'
   const timeoutLabel =
     draft.bgTaskTimeoutSeconds != null ? `timeout ${draft.bgTaskTimeoutSeconds}s` : 'default timeout'
-  const workspaceSummary = `${workspaceLabel} · ${timeoutLabel} · repo MCPs ${draft.enableRepoMcps ? 'on' : 'off'}`
+  const capLabel = draft.memoryCapMb != null ? `cap ${draft.memoryCapMb}MB` : 'default cap'
+  const workspaceSummary = `${workspaceLabel} · ${timeoutLabel} · ${capLabel} · repo MCPs ${draft.enableRepoMcps ? 'on' : 'off'}`
 
   const mcpCount = Object.keys(draft.mcpConfig?.mcpServers ?? {}).length
   const envCount = Object.keys(draft.envVars ?? {}).length
@@ -534,6 +536,31 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
               How long to wait for background tasks before terminating them. 0 waits indefinitely.
               Leave blank to inherit your per-provider default from Settings.
               {(draft.runner ?? 'claude') !== 'claude' && ' Currently only the Claude runner acts on this.'}
+            </p>
+          </div>
+
+          {/* Memory cap — per-agent Node heap ceiling (0 = uncapped) */}
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[var(--text-secondary)]">
+              Memory Cap (MB per Node process)
+            </label>
+            <Input
+              type="number"
+              min={0}
+              value={draft.memoryCapMb ?? ''}
+              onChange={(e) => {
+                const raw = e.target.value.trim()
+                handleChange(
+                  'memoryCapMb',
+                  raw === '' ? undefined : Math.max(0, Math.floor(Number(raw) || 0))
+                )
+              }}
+              placeholder="Inherit server default (0 = uncapped)"
+            />
+            <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
+              Heap ceiling injected as --max-old-space-size for every Node process the run spawns
+              (agent CLI, tsc, test workers). Caps each process, not the whole run. 0 is uncapped.
+              Leave blank to inherit the server-wide default.
             </p>
           </div>
 

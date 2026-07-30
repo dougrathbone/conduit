@@ -235,6 +235,15 @@ export interface AgentConfig {
    */
   bgTaskTimeoutSeconds?: number
   /**
+   * Per-agent Node heap cap in MB (0 = uncapped). Injected as
+   * `--max-old-space-size` via NODE_OPTIONS so every Node child of the run
+   * (agent CLI, tsc, vite, test workers) caps its own heap — a runaway
+   * toolchain otherwise fills the pod cgroup and the kernel OOM-kills Conduit
+   * mid-run (the run then dies silently). Overrides the server-wide
+   * `CONDUIT_RUN_MEMORY_CAP_MB` default; unset inherits it.
+   */
+  memoryCapMb?: number
+  /**
    * When true, MCP servers configured in the repository (its `.mcp.json`) and the
    * host's personal connectors load alongside Conduit's managed MCPs. When false
    * (default), only Conduit's global + agent MCPs are used (`--strict-mcp-config`).
