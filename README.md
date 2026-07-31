@@ -28,6 +28,107 @@ A self-hosted web application for managing and running AI CLI agents (Claude Cod
 | State | Zustand + TanStack Query |
 | Prompt editor | CodeMirror 6 |
 
+## Architecture
+
+Conduit is split into two planes with a hard boundary between them:
+
+- **Orchestration** (always in the server process) — run records, log persistence, browser broadcasts, credential/env resolution, publishing, and post-run cleanup. This is `src/server/runner.ts`.
+- **Execution** (pluggable) — workspace materialization, CLI spawn, event streaming, and cancellation, delegated to a `WorkerFactory`. The orchestrator hands the factory a **`RunSpec`**: a fully self-contained, serializable job description (prompt, resolved env overlay, materialized MCP config content, workspace spec). Events stream back through a `WorkerEventSink` (`onEvent` / `onExit` / `onError`).
+
+Because the `RunSpec` carries everything a run needs, execution can happen in the server process, in a separate process on another host, or in ephemeral cloud compute — with no code changes to the orchestrator.
+
+```mermaid
+flowchart LR
+    subgraph Browser
+        UI["React SPA"]
+    end
+    subgraph Server["Conduit Server"]
+        API["Express + /ws JSON-RPC"]
+        ORCH["Run Orchestrator<br/>server/runner.ts"]
+        REG["WorkerFactory registry<br/>CONDUIT_WORKER_FACTORY"]
+        CP["Worker Control Plane<br/>/ws/worker (WSS + Bearer)"]
+        DB[("SQLite, logs, repos<br/>~/.conduit")]
+    end
+    subgraph Exec["Execution (pluggable)"]
+        LOCAL["LocalWorkerFactory<br/>in-process spawn"]
+        REMOTE["conduit-worker<br/>processes"]
+        EKS["EKS Jobs<br/>1 per run"]
+        FARG["Fargate tasks<br/>1 per run"]
+    end
+    UI <-->|"/ws JSON-RPC + push events"| API
+    API --> ORCH
+    ORCH --> REG
+    ORCH --> DB
+    REG --> LOCAL
+    REG --> CP
+    CP <-->|"WSS + Bearer token"| REMOTE
+    CP <-->|"WSS + Bearer token"| EKS
+    CP <-->|"WSS + Bearer token"| FARG
+```
+
+### Worker factories
+
+`CONDUIT_WORKER_FACTORY` selects the execution backend (registry in `src/server/workers/index.ts`):
+
+| Value | Execution | Notes |
+|-------|-----------|-------|
+| `local` *(default)* | In-process spawn | Identical to the original single-process behavior; zero config |
+| `remote` | Pooled `conduit-worker` processes | Workers run on any host and dial back over the control plane |
+| `eks` | One Kubernetes Job per run | Pod dials back; Job deleted on exit, TTL self-cleans |
+| `fargate` | One ECS task per run | Task dials back; task stopped on exit |
+
+`eks` and `fargate` create **one ephemeral unit of compute per run** running the conduit-worker image with a deterministic worker ID (`eks-<runId>` / `fargate-<runId>`). The unit connects *outbound* to the server's control plane; the factory then dispatches the `RunSpec` to that exact worker. Secrets only ever travel over the authenticated WSS channel — never through Job specs or task definitions.
+
+### Worker control plane
+
+Remote execution uses a dedicated WebSocket endpoint, **`GET /ws/worker`**, kept separate from the browser `/ws` socket: worker connections authenticate with `Authorization: Bearer <CONDUIT_WORKER_TOKEN>` at upgrade time and never join the browser broadcast set (no log leakage, no RPC access). Use `wss://` outside localhost — `RunSpec`s carry resolved secrets.
+
+```mermaid
+sequenceDiagram
+    participant W as conduit-worker
+    participant C as Control Plane (server)
+    W->>C: WSS upgrade + Bearer token (401 if wrong)
+    W->>C: worker:hello (capabilities, activeRunIds)
+    loop every 30s
+        W->>C: worker:heartbeat (activeRunIds)
+    end
+    C->>W: run:assign (RunSpec)
+    W->>C: run:started (workspacePath)
+    W->>C: run:event (batched stdout/stderr)
+    W->>C: run:exit (status, exitCode)
+    Note over C: socket close or 75s without a heartbeat<br/>= dead worker: synthesize a failed exit<br/>into each of its runs' sinks
+```
+
+Lease semantics: 75 seconds without a heartbeat (2.5 missed beats) declares the worker dead. Its runs are failed via a synthesized exit, so the orchestrator's normal finalize path (log, broadcast, publish, sweep) still runs — runs can never be stuck in `running` forever.
+
+### Run lifecycle
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant O as Orchestrator
+    participant F as WorkerFactory
+    participant W as Worker (any kind)
+    B->>O: run:start
+    O->>O: create run record, build RunSpec<br/>(prompt, env, MCP config, workspace)
+    O->>F: startRun(spec, sink)
+    alt local
+        F->>W: materialize workspace, spawn CLI
+    else remote / eks / fargate
+        F->>W: provision / dispatch via control plane
+    end
+    W-->>F: output events
+    F-->>O: sink.onEvent
+    O-->>B: broadcast (log events)
+    O->>O: append to logs/runId.jsonl
+    W-->>F: exit
+    F-->>O: sink.onExit (status, exitCode)
+    O->>O: finalize: status, publish targets, workspace sweep
+    O-->>B: broadcast (run:statusChange)
+```
+
+Repo-backed agents on remote factories use a `repo-clone` workspace: the worker shallow-clones straight from the remote with the run's short-lived token, so there's no dependency on the server's bare clone. Repo-less runs use an ephemeral temp workspace; `fixedDir` agents are rejected on remote factories since the path only exists on the server host.
+
 ## Getting started
 
 ### Prerequisites
@@ -79,6 +180,9 @@ All configuration is via environment variables.
 | `CONDUIT_DATA_DIR` | `~/.conduit` | Database and log storage directory |
 | `CONDUIT_ALLOWED_IPS` | *(open)* | Comma-separated CIDR allowlist, e.g. `10.0.0.0/8,127.0.0.1/32` |
 | `CONDUIT_SECRET_KEY` | *(none)* | Hex-encoded 32-byte key (64 hex chars) for encrypting repository GitHub App private keys at rest. Required when any repository uses GitHub App auth — see below. Generate with `openssl rand -hex 32`. |
+| `CONDUIT_WORKER_FACTORY` | `local` | Execution backend: `local`, `remote`, `eks`, or `fargate` — see [Architecture](#architecture) |
+| `CONDUIT_WORKER_TOKEN` | *(none)* | Shared secret authenticating workers on `/ws/worker`. Required for `remote`/`eks`/`fargate` factories |
+| `CONDUIT_SERVER_URL` | *(none)* | `ws(s)://<host>/ws/worker` URL workers dial to reach the control plane (set on the worker/Job/task side) |
 
 Environment variables referenced in MCP server configs (e.g. `${SENTRY_ACCESS_TOKEN}`) are expanded at run time from the server's process environment.
 
@@ -103,11 +207,16 @@ The PEM is encrypted with AES-256-GCM before it touches the database and is neve
 src/
 ├── server/              # Express + WebSocket server
 │   ├── index.ts         # Entry point, all IPC channel handlers
-│   ├── runner.ts        # Spawn CLI, stream output, manage workspaces
+│   ├── runner.ts        # Run orchestrator: records, logs, broadcasts, finalize
+│   ├── workerControl.ts # /ws/worker control plane (registry, leases, assignment)
+│   ├── workers/         # WorkerFactory impls: local, remote, eks, fargate
 │   ├── promptChatServer.ts  # AI-assisted prompt crafting (Anthropic SDK)
 │   ├── store.ts         # Preferences (GitHub PAT, etc.)
 │   ├── utils.ts         # Log file reader
 │   └── ipRestrictions.ts
+│
+├── worker/              # conduit-worker: standalone execution agent
+│   └── index.ts         # Control-plane client + LocalWorkerFactory executor
 │
 ├── main/                # Shared business logic
 │   ├── db/              # Schema, initDb, per-table queries
@@ -117,6 +226,7 @@ src/
 │   │   └── workspace.ts # mkdtemp / rm ephemeral dirs
 │   └── utils/
 │       ├── mcp.ts       # MCP config merge, env var expansion, OAuth token injection
+│       ├── mcpConfigFile.ts  # MCP config file write/delete (worker-safe, DB-free)
 │       └── paths.ts     # DATA_DIR, LOGS_DIR, DB_PATH
 │
 ├── renderer/            # React SPA
@@ -131,14 +241,17 @@ src/
 │       ├── ipc.ts       # window.conduit accessor
 │       └── ws-client.ts # ConduitAPI implemented over WebSocket
 │
-└── shared/types.ts      # All shared TypeScript interfaces
+└── shared/              # Types-only contracts
+    ├── types.ts         # All shared TypeScript interfaces
+    ├── worker.ts        # RunSpec, WorkerHandle, WorkerFactory
+    └── workerControl.ts # Control-plane protocol + lease constants
 ```
 
 ## Data model
 
 **`agents`** — id, name, runner, prompt, envVars (JSON), mcpConfig (JSON), gistId, workingDir, createdAt, updatedAt
 
-**`runs`** — id, agentId, status (`running|completed|failed|stopped|launched`), startedAt, endedAt, durationMs, workspacePath, logPath, exitCode
+**`runs`** — id, agentId, status (`running|completed|failed|stopped|launched`), startedAt, endedAt, durationMs, workspacePath, logPath, exitCode, workerKind (`local|remote|eks|fargate`), workerId
 
 **`global_mcp_servers`** — id, name, serverKey, serverConfig (JSON), enabled, createdAt, updatedAt
 
