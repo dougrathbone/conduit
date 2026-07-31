@@ -10,7 +10,7 @@ import {
   useGroups,
   useUsers,
 } from '@renderer/hooks/useShares'
-import type { ShareableEntityType, Share } from '@shared/types'
+import type { ShareableEntityType, ResolvedShare } from '@shared/types'
 
 interface ShareDialogProps {
   entityType: ShareableEntityType
@@ -66,7 +66,8 @@ export function ShareDialog({ entityType, entityId, isOpen, onClose }: ShareDial
     (g) => !sharedTargetIds.has(g.id) && (groupQuery === '' || g.name.toLowerCase().includes(groupQuery))
   )
 
-  function getShareTargetName(share: Share): string {
+  function getShareTargetName(share: ResolvedShare): string {
+    if (share.targetName) return share.targetName
     if (share.targetType === 'everyone') return 'Everyone'
     if (share.targetType === 'user' && share.targetId) {
       return userMap.get(share.targetId) ?? 'Unknown user'
@@ -77,9 +78,9 @@ export function ShareDialog({ entityType, entityId, isOpen, onClose }: ShareDial
     return 'Unknown'
   }
 
-  function getShareTargetLabel(share: Share): string {
+  function getShareTargetLabel(share: ResolvedShare): string {
     if (share.targetType === 'everyone') return 'Everyone'
-    if (share.targetType === 'user') return 'User'
+    if (share.targetType === 'user') return share.targetEmail ?? 'User'
     if (share.targetType === 'group') return 'Group'
     return ''
   }

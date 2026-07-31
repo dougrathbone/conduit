@@ -20,6 +20,7 @@ import type {
   RunnerType,
   SlackPublishConfig,
   Share,
+  ResolvedShare,
   ShareableEntityType,
   User,
   Group,
@@ -349,7 +350,7 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
 
     shares: {
       list: (entityType: ShareableEntityType, entityId: string) =>
-        invoke<Share[]>('shares:list', entityType, entityId),
+        invoke<ResolvedShare[]>('shares:list', entityType, entityId),
       create: (data: { entityType: ShareableEntityType; entityId: string; targetType: 'user' | 'group' | 'everyone'; targetId?: string }) =>
         invoke<Share>('shares:create', data),
       delete: (shareId: string) => invoke<void>('shares:delete', shareId),

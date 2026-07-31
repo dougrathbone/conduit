@@ -100,6 +100,14 @@ export interface Share {
   createdAt: number
 }
 
+/** A Share enriched server-side with the friendly display name of its target. */
+export interface ResolvedShare extends Share {
+  /** Friendly name of the share target (user display name or group name); null when unresolved. */
+  targetName: string | null
+  /** Email of a user share target; null for group/everyone shares or when unresolved. */
+  targetEmail: string | null
+}
+
 export interface RequestContext {
   userId: string
   userGroupIds: string[]
@@ -653,7 +661,7 @@ export interface ConduitAPI {
   onPromptChatDone: (cb: (payload: { sessionId: string; extractedPrompt?: string }) => void) => () => void
   onPromptChatError: (cb: (payload: { sessionId: string; error: string }) => void) => () => void
   shares: {
-    list: (entityType: ShareableEntityType, entityId: string) => Promise<Share[]>
+    list: (entityType: ShareableEntityType, entityId: string) => Promise<ResolvedShare[]>
     create: (data: { entityType: ShareableEntityType; entityId: string; targetType: 'user' | 'group' | 'everyone'; targetId?: string }) => Promise<Share>
     delete: (shareId: string) => Promise<void>
   }

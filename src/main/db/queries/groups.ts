@@ -53,6 +53,12 @@ export async function getUserGroupIds(userId: string): Promise<string[]> {
   return rows.map((r) => r.groupId)
 }
 
+export async function getGroup(id: string): Promise<Group | null> {
+  const rows = await getDb().select().from(groups).where(eq(groups.id, id))
+  if (rows.length === 0) return null
+  return rowToGroup(rows[0])
+}
+
 export async function listGroups(): Promise<Group[]> {
   const rows = await getDb().select().from(groups)
   return rows.map(rowToGroup)

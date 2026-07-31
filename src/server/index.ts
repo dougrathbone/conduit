@@ -70,6 +70,7 @@ import { deleteClient as deleteMcpOAuthClient } from '../main/db/queries/mcpOAut
 import { deleteToken as deleteMcpOAuthToken } from '../main/db/queries/oauthTokens'
 import { auditMcpOAuth } from './mcpOAuth/audit'
 import { getShare, listShares, createShare, deleteShare } from '../main/db/queries/shares'
+import { resolveShareNames } from './shareNames'
 import { listUsers, searchUsers } from '../main/db/queries/users'
 import { listGroups, getUserGroupIds } from '../main/db/queries/groups'
 import { getCredentialStatus, setCredential } from '../main/db/queries/agentCredentials'
@@ -669,7 +670,8 @@ const handlers: Record<string, HandlerFn> = {
     if (!(await canAccessEntity(entityType as ShareableEntityType, entityId as string, ctx.userId, ctx.userGroupIds))) {
       throw new ClientError('Access denied')
     }
-    return Promise.resolve(listShares(entityType as ShareableEntityType, entityId as string))
+    const shares = await listShares(entityType as ShareableEntityType, entityId as string)
+    return resolveShareNames(shares)
   },
   'shares:create': async ([data], _ws, ctx) => {
     const { entityType, entityId, targetType, targetId } = data as {
