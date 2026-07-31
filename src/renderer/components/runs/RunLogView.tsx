@@ -172,7 +172,8 @@ export function RunLogView({ runId, live = false, startedAt }: RunLogViewProps) 
   const toggle = (key: string) =>
     setExpanded((prev) => {
       const next = new Set(prev)
-      next.has(key) ? next.delete(key) : next.add(key)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
 

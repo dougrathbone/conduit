@@ -9,7 +9,7 @@
 // codes — only non-secret identifiers (userId, serverUrl, clientId, redirectUri,
 // outcome, error message).
 export function auditMcpOAuth(event: string, fields: Record<string, unknown> = {}): void {
-  let detail = ''
+  let detail: string
   try {
     detail = JSON.stringify(fields)
   } catch {

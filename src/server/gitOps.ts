@@ -211,7 +211,8 @@ export async function createWorktree(
     if (isDiskFullError(message)) {
       throw new Error(
         'Not enough disk space to create a worktree for this repository. ' +
-        'Free space on the Conduit server or increase its data volume, then retry.'
+        'Free space on the Conduit server or increase its data volume, then retry.',
+        { cause: err }
       )
     }
     throw err instanceof Error ? err : new Error(message)

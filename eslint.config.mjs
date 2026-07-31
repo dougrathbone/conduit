@@ -4,7 +4,7 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import globals from 'globals'
 
 /**
- * Flat ESLint config (ESLint v9). Lints the TypeScript/React sources without
+ * Flat ESLint config (ESLint v10). Lints the TypeScript/React sources without
  * type-checking (fast, no tsconfig project needed) — `npm run typecheck` covers
  * type correctness. Rules are kept pragmatic so the check is a useful signal on
  * this codebase rather than a wall of stylistic noise.
