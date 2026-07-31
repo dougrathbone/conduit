@@ -290,7 +290,7 @@ export async function publishRunResult(
   const agent = await getAgent(agentId)
   if (!agent?.publishTargetIds?.length) return
 
-  let fullStdout = ''
+  let fullStdout: string
   try {
     fullStdout = readRunOutputText(run.id)
   } catch {
