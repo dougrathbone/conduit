@@ -1,4 +1,4 @@
-import { eq, desc } from 'drizzle-orm'
+import { and, eq, desc } from 'drizzle-orm'
 import { getDb } from '../index'
 import { runs } from '../schema'
 import type { ExecutionRun, RunStatus, TriggerContext } from '../../../shared/types'
@@ -17,6 +17,8 @@ function rowToExecutionRun(row: typeof runs.$inferSelect): ExecutionRun {
     triggerContext: row.triggerContext ? JSON.parse(row.triggerContext) as TriggerContext : undefined,
     startedBy: row.startedBy ?? undefined,
     lastLine: row.lastLine ?? undefined,
+    workerKind: row.workerKind ?? undefined,
+    workerId: row.workerId ?? undefined,
   }
 }
 
@@ -52,6 +54,8 @@ export async function createRun(
     exitCode: data.exitCode ?? null,
     triggerContext: data.triggerContext ? JSON.stringify(data.triggerContext) : null,
     startedBy: data.startedBy ?? null,
+    workerKind: data.workerKind ?? null,
+    workerId: data.workerId ?? null,
   })
 
   const created = await getRun(id)
@@ -74,12 +78,29 @@ export async function updateRun(
   if (data.logPath !== undefined) updateValues.logPath = data.logPath
   if ('exitCode' in data) updateValues.exitCode = data.exitCode ?? null
   if ('lastLine' in data) updateValues.lastLine = data.lastLine ?? null
+  if ('workerKind' in data) updateValues.workerKind = data.workerKind ?? null
+  if ('workerId' in data) updateValues.workerId = data.workerId ?? null
 
   await getDb().update(runs).set(updateValues).where(eq(runs.id, id))
 
   const updated = await getRun(id)
   if (!updated) throw new Error(`Run with id ${id} not found after update`)
   return updated
+}
+
+/**
+ * The agent's currently-running run, if any. DB-backed (unlike the runner's
+ * in-process active set) so the one-live-run-per-agent rule holds regardless
+ * of which worker factory or pod executes runs.
+ */
+export async function getRunningRunForAgent(agentId: string): Promise<ExecutionRun | null> {
+  const rows = await getDb()
+    .select()
+    .from(runs)
+    .where(and(eq(runs.agentId, agentId), eq(runs.status, 'running')))
+    .orderBy(desc(runs.startedAt))
+    .limit(1)
+  return rows.length > 0 ? rowToExecutionRun(rows[0]) : null
 }
 
 export async function getOrphanedRuns(): Promise<ExecutionRun[]> {

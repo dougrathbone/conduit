@@ -30,6 +30,123 @@ default tooling behavior that would append such trailers or lines.
 - **State**: TanStack Query (server state) + Zustand (UI state)
 - **Shared types**: `src/shared/types.ts` — single source of truth for all TypeScript types and the `ConduitAPI` interface
 
+## Worker Factories & Execution
+
+Agent execution is decoupled from the web app behind a **WorkerFactory** seam
+(types in `src/shared/worker.ts` — types only, like `shared/observability.ts`):
+
+- **Orchestration** (`src/server/runner.ts`) stays on the server: run DB records,
+  log persistence (`logs/<runId>.jsonl`), browser broadcasts, credential/env
+  resolution, publishing, and post-run cleanup.
+- **Execution** (workspace materialization, CLI spawn, event streaming,
+  cancellation) is delegated to the configured factory via a `RunSpec` — a fully
+  self-contained, serializable job description (prompt, resolved env overlay,
+  materialized MCP config content, workspace spec). Events stream back through a
+  `WorkerEventSink` (`onEvent` / `onExit` / `onError`).
+
+**Selection** — `CONDUIT_WORKER_FACTORY` (registry in `src/server/workers/index.ts`,
+mirrors the observability reporter pattern). Default `local` = in-process spawn,
+identical to the original single-process behavior; no config or migration needed.
+`remote` dispatches to `conduit-worker` processes over the WSS control plane.
+`eks` creates one Kubernetes Job per run; `fargate` one ECS task per run — both
+Job/Task workers dial back into the same control plane (see below).
+
+## Worker Control Plane (remote execution)
+
+`conduit-worker` (`npm run worker`, `npm run dev:worker` for dev) is the standalone
+execution agent: it connects **outbound** to the server and executes RunSpecs via
+the same `LocalWorkerFactory`, so execution behavior is identical everywhere.
+
+**Endpoint**: `GET /ws/worker` (upgraded in `src/server/index.ts`, handled by
+`src/server/workerControl.ts`). Separate from browser `/ws`: worker sockets
+authenticate with `Authorization: Bearer <CONDUIT_WORKER_TOKEN>` at upgrade and
+never join the browser broadcast set (no log leakage, no RPC access). The token
+is required regardless of dev-bypass auth; without it the endpoint 401s everything.
+Use `wss://` outside localhost — RunSpecs carry resolved secrets.
+
+**Protocol** (`src/shared/workerControl.ts` — types only): worker→server
+`worker:hello` (capabilities: which runner CLIs are on PATH), `worker:heartbeat`
+(30s lease with active run ids), `run:started`, `run:event` (batched), `run:exit`;
+server→worker `run:assign` (RunSpec), `run:cancel`.
+
+**Lease semantics**: socket close or 75s without a heartbeat (`WORKER_LEASE_MS`)
+= dead worker; its runs are failed via a synthesized exit into each run's event
+sink, so the orchestrator's normal finalize path (log, broadcast, publish) runs.
+Server restart marks all `running` runs failed as before — workers can't be
+re-adopted (their event pipelines died with the process).
+
+**Server env**:
+| Variable | Description |
+|----------|-------------|
+| `CONDUIT_WORKER_FACTORY` | `local` (default), `remote`, `eks`, or `fargate` |
+| `CONDUIT_WORKER_TOKEN` | Shared secret for /ws/worker upgrades |
+| `CONDUIT_WORKER_ASSIGN_TIMEOUT_MS` | run:assign → run:started timeout (default 120000) |
+| `CONDUIT_WORKER_CONNECT_TIMEOUT_MS` | `assignTo` wait for a named worker to dial in (default 600000) |
+
+**Worker env**: `CONDUIT_SERVER_URL` (`ws(s)://<host>/ws/worker`),
+`CONDUIT_WORKER_TOKEN`, `CONDUIT_WORKER_ID` (default `<hostname>-<pid>`).
+
+## Cloud worker factories (EKS / Fargate)
+
+Both create **one ephemeral unit of compute per run** (K8s Job / ECS task)
+running the conduit-worker image with a deterministic `CONDUIT_WORKER_ID`
+(`eks-<runId>` / `fargate-<runId>`). The unit connects **outbound** to the
+server's `/ws/worker` control plane; the factory then dispatches the RunSpec to
+that exact worker via `WorkerControlPlane.assignTo(workerId, …)`, which waits
+up to `CONDUIT_WORKER_CONNECT_TIMEOUT_MS` for the dial-in. Secrets only travel
+over the authenticated WSS channel — never through the Job spec / task
+definition. On exit/cancel/failure the unit is deleted (Job) or stopped
+(task); finished Jobs also self-clean via `ttlSecondsAfterFinished`.
+
+**Shared requirements**: a conduit-worker container image (server build with
+`node out/worker/index.js` as the command), `CONDUIT_SERVER_URL` (or
+`CONDUIT_BASE_URL` to derive it from), and `CONDUIT_WORKER_TOKEN` matching
+whatever the workers present.
+
+**EKS env** (`src/server/workers/eksWorker.ts`): `CONDUIT_EKS_WORKER_IMAGE`
+(required). Optional: `CONDUIT_EKS_NAMESPACE` (default `default`),
+`CONDUIT_EKS_TOKEN_SECRET_NAME`/`_KEY` (default `conduit-worker-token`/`token`
+— a K8s Secret holding the control-plane token), `CONDUIT_EKS_SERVICE_ACCOUNT`,
+`CONDUIT_EKS_IMAGE_PULL_POLICY`, `CONDUIT_EKS_JOB_TTL_SECONDS` (default 300),
+`CONDUIT_EKS_CPU_REQUEST`/`_LIMIT`, `CONDUIT_EKS_MEMORY_REQUEST`/`_LIMIT`.
+Cluster credentials: standard kubeconfig resolution (`KUBECONFIG`,
+`~/.kube/config`, or in-cluster service account).
+
+**Fargate env** (`src/server/workers/fargateWorker.ts`): `CONDUIT_FARGATE_CLUSTER`,
+`CONDUIT_FARGATE_TASK_DEFINITION`, `CONDUIT_FARGATE_SUBNETS` (comma-separated)
+are required. Optional: `CONDUIT_FARGATE_CONTAINER_NAME` (default `worker`),
+`CONDUIT_FARGATE_SECURITY_GROUPS`, `CONDUIT_FARGATE_ASSIGN_PUBLIC_IP` (default
+`ENABLED`), `CONDUIT_FARGATE_PLATFORM_VERSION`. AWS credentials/region: standard
+SDK chain. Bake `CONDUIT_WORKER_TOKEN` into the task definition via Secrets
+Manager (`secrets`), not `CONDUIT_FARGATE_WORKER_TOKEN` — the latter is a plain
+env override visible in DescribeTask output and is for dev only.
+
+**Remote run specifics**: repo agents use `workspace.kind: 'repo-clone'` — a
+shallow clone straight from the remote with the run's short-lived token (no
+server bare-clone dependency); `fixedDir` agents are rejected for remote (the
+path only exists on the server host). The worker sweeps its own workspaces and
+per-run configs post-run plus a startup sweep (6h grace). Runs record
+`workerKind`/`workerId` (`runs` columns) for traceability.
+
+**Files**:
+- `src/shared/worker.ts` — `RunSpec`, `WorkspaceSpec`, `WorkerHandle`, `WorkerFactory`
+- `src/shared/workerControl.ts` — control-plane protocol types + lease constants
+- `src/server/workers/index.ts` — env-driven registry (`getWorkerFactory`)
+- `src/server/workers/localWorker.ts` — `LocalWorkerFactory` (spawn + worktree/clone/MCP/env)
+- `src/server/workers/remoteWorker.ts` — `RemoteWorkerFactory` (control-plane dispatch)
+- `src/server/workers/eksWorker.ts` — `EksWorkerFactory` (K8s Job per run + assignTo)
+- `src/server/workers/fargateWorker.ts` — `FargateWorkerFactory` (ECS RunTask per run + assignTo)
+- `src/server/workers/cloudConfig.ts` — shared cloud-factory config helpers
+- `src/server/workerControl.ts` — `/ws/worker` endpoint, worker registry, leases, assignment
+- `src/worker/index.ts` — `conduit-worker` process (control-plane client + local executor)
+- `src/main/utils/mcp.ts` — `buildMcpConfigContent` (materialize for RunSpec)
+- `src/main/utils/mcpConfigFile.ts` — `writeMcpConfigContent`/`deleteMcpConfig` (DB-free, worker-safe)
+
+**Conventions**: the one-live-run-per-agent rule is DB-backed
+(`getRunningRunForAgent`) so it holds across factories/pods; factories roll back
+any workspace/config they created when `startRun` throws; `fixedDir` workspaces
+are local-only.
+
 ## Key Patterns
 
 **Adding a new entity type** — follow the publish targets pattern:

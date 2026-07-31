@@ -1,6 +1,3 @@
-import * as fs from 'fs'
-import * as path from 'path'
-import * as os from 'os'
 import type { McpServersConfig, McpServerEntry, OAuthToken } from '../../shared/types'
 import { listEnabledGlobalMcps } from '../db/queries/globalMcps'
 import { getToken, saveToken } from '../db/queries/oauthTokens'
@@ -88,17 +85,36 @@ export async function injectOAuthTokens(
   return { mcpServers: updated }
 }
 
-export async function writeMcpConfig(
-  runId: string,
+import { writeMcpConfigContent } from './mcpConfigFile'
+
+// Re-exported so existing callers (orchestrator, legacy Electron runner) keep
+// their single import site; the implementations live in mcpConfigFile.ts,
+// which is DB-free so the standalone conduit-worker can import it.
+export { writeMcpConfigContent, deleteMcpConfig } from './mcpConfigFile'
+
+/**
+ * Materialize the run's merged MCP config (global servers + agent servers,
+ * OAuth tokens injected, env vars expanded) as serialized JSON — without
+ * writing it anywhere. The orchestrator uses this to build the RunSpec so the
+ * config can travel to whatever worker executes the run.
+ */
+export async function buildMcpConfigContent(
   agentMcpConfig: McpServersConfig,
   actingUserId: string
 ): Promise<string> {
   const { config, globalUrls } = await buildMergedMcpConfig(agentMcpConfig, actingUserId)
   const withTokens = await injectOAuthTokens(config, actingUserId, globalUrls)
   const withEnv = resolveAllEnvVars(withTokens)
-  const filePath = path.join(os.tmpdir(), `conduit-mcp-${runId}.json`)
-  fs.writeFileSync(filePath, JSON.stringify(withEnv, null, 2), 'utf8')
-  return filePath
+  return JSON.stringify(withEnv, null, 2)
+}
+
+export async function writeMcpConfig(
+  runId: string,
+  agentMcpConfig: McpServersConfig,
+  actingUserId: string
+): Promise<string> {
+  const content = await buildMcpConfigContent(agentMcpConfig, actingUserId)
+  return writeMcpConfigContent(runId, content)
 }
 
 function expandEnvVars(value: string): string {
@@ -123,14 +139,5 @@ function resolveAllEnvVars(config: McpServersConfig): McpServersConfig {
     mcpServers: Object.fromEntries(
       Object.entries(config.mcpServers).map(([key, entry]) => [key, resolveServerEnv(entry)])
     ),
-  }
-}
-
-export function deleteMcpConfig(runId: string): void {
-  const filePath = path.join(os.tmpdir(), `conduit-mcp-${runId}.json`)
-  try {
-    fs.unlinkSync(filePath)
-  } catch {
-    // Ignore — file may have already been deleted or never created
   }
 }

@@ -276,6 +276,10 @@ export interface ExecutionRun {
   startedBy?: string
   /** Last non-empty output line of the run (ANSI-stripped), for a list excerpt. */
   lastLine?: string
+  /** Which worker factory executed the run ('local', 'remote', 'eks', 'fargate'). */
+  workerKind?: string
+  /** Control-plane identity of the worker that ran it (remote factories only). */
+  workerId?: string
 }
 
 export interface LogEntry {

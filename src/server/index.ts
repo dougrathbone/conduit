@@ -13,6 +13,8 @@ import { initDb } from '../main/db/index'
 import { listAgents, getAgent, createAgent, updateAgent, deleteAgent } from '../main/db/queries/agents'
 import { listRuns, updateRun, getOrphanedRuns } from '../main/db/queries/runs'
 import { startRunServer, stopRun, setRunFinalizedHook, appendRunLog } from './runner'
+import { getWorkerControlPlane, WorkerControlPlane } from './workerControl'
+import { getWorkerFactory } from './workers'
 import { startMemoryMonitor } from './memoryPressure'
 import {
   listGlobalMcps,
@@ -805,8 +807,25 @@ wss.on('connection', (ws, req) => {
   })
 })
 
-// Only upgrade /ws path to WebSocket — leave all other HTTP routes alone
+// Upgrade /ws (browser RPC) and /ws/worker (worker control plane) to
+// WebSocket — leave all other HTTP routes alone. The two endpoints are fully
+// separate: worker sockets authenticate with a Bearer token and never join the
+// browser broadcast set.
 httpServer.on('upgrade', async (req, socket, head) => {
+  if (req.url === '/ws/worker') {
+    const clientIp = extractClientIp(
+      req.socket.remoteAddress,
+      req.headers as Record<string, string | string[] | undefined>
+    )
+    if (!isIpAllowed(clientIp, ipConfig)) {
+      console.warn(`[conduit] Blocked worker WebSocket from ${clientIp}`)
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
+      socket.destroy()
+      return
+    }
+    getWorkerControlPlane().handleUpgrade(req, socket, head)
+    return
+  }
   if (req.url === '/ws') {
     const clientIp = extractClientIp(
       req.socket.remoteAddress,
@@ -874,6 +893,18 @@ const dataDirSweeper = new DataDirSweeper()
 async function start(): Promise<void> {
   // Initialise the Postgres database (creates tables if they don't exist)
   await initDb()
+
+  // Validate the worker factory selection up front so a misconfigured
+  // CONDUIT_WORKER_FACTORY fails at boot, not at the first run. Also surface
+  // the remote worker endpoint state (token required for workers to connect).
+  const factory = getWorkerFactory()
+  console.log(`[server] Worker factory: ${factory.kind}`)
+  if (factory.kind !== 'local' && !WorkerControlPlane.token()) {
+    console.warn(
+      '[server] CONDUIT_WORKER_TOKEN is not set — remote workers cannot authenticate ' +
+        'to /ws/worker; remote runs will fail with "No connected worker".'
+    )
+  }
 
   // Ensure dev user exists for FK integrity
   if (!isAuthEnabled()) {

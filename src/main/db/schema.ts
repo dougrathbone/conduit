@@ -219,4 +219,6 @@ export const runs = pgTable('runs', {
   triggerContext: text('trigger_context'),
   startedBy: text('started_by'),
   lastLine: text('last_line'),
+  workerKind: text('worker_kind'),
+  workerId: text('worker_id'),
 })
