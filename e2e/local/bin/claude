@@ -1,0 +1,27 @@
+#!/usr/bin/env node
+/**
+ * Stub `claude` CLI for e2e testing — emits stream-json NDJSON like the real
+ * CLI's `-p --output-format stream-json`, with zero API calls.
+ * A prompt containing "E2E_LONG" makes it stream one line then run until killed
+ * (exercises the stop path); anything else completes immediately.
+ */
+let prompt = ''
+process.stdin.setEncoding('utf8')
+process.stdin.on('data', (c) => (prompt += c))
+process.stdin.on('end', () => {
+  const say = (text) =>
+    console.log(
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } })
+    )
+  say(`stub-claude received prompt: ${prompt.trim().slice(0, 80)}`)
+  if (prompt.includes('E2E_LONG')) {
+    const timer = setInterval(() => say('still working…'), 2000)
+    process.on('SIGTERM', () => {
+      clearInterval(timer)
+      process.exit(143)
+    })
+    return
+  }
+  console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done' }))
+  process.exit(0)
+})
