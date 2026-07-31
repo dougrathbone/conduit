@@ -401,4 +401,10 @@ npx tsc --noEmit                          # Type-check all configs
 npx tsc --noEmit --project tsconfig.web.json    # Frontend only
 npx tsc --noEmit --project tsconfig.server.json # Server only
 npm run build                             # Full production build
+npm run e2e:local   # E2E: in-process factory (needs build + Postgres via npm run db:up)
+npm run e2e:remote  # E2E: remote factory incl. worker-death + reconnect (same reqs)
 ```
+
+E2E suites live in `e2e/` — `e2e/lib/` holds the shared stub `claude` CLI,
+WS driver (`EXPECT_WORKER_KIND`, `E2E_MODE=quick|full`), and process/db
+harness; `e2e/local/` and `e2e/remote/` are the orchestrators.

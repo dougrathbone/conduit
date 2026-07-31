@@ -170,6 +170,27 @@ docker run -p 7456:7456 \
   conduit
 ```
 
+To try the **remote worker factory** locally, use the `worker` compose profile
+(uncomment `CONDUIT_WORKER_FACTORY`/`CONDUIT_WORKER_TOKEN` on the `conduit`
+service first):
+
+```bash
+docker compose --profile worker up
+```
+
+## End-to-end tests
+
+Committed e2e suites drive a real server over its WebSocket API with a stub
+`claude` CLI (real stream-json output, zero API calls). Both require a build
+(`npm run build`) and a reachable Postgres (`npm run db:up`); they provision
+their own database, server port, and data dir, and clean up afterwards.
+
+```bash
+npm run e2e:local   # in-process factory: run/stop/log/concurrency guard
+npm run e2e:remote  # remote factory: control-plane assign/stream/stop,
+                    # worker SIGKILL mid-run (lease fails the run), reconnect
+```
+
 ## Configuration
 
 All configuration is via environment variables.
@@ -314,3 +335,25 @@ Set the corresponding environment variables before starting the server:
 - **WebSocket protocol** — all frontend↔backend communication uses a single `/ws` WebSocket connection with a simple `{type, id, channel, args}` invoke/response protocol plus server-push events.
 - **Theme** — dark/light/system, persisted in `localStorage`. The `dark` class on `<html>` is set at module load time to prevent flash.
 - **URL routing** — implemented via `History.pushState` without a router library. `readUrlState()` in `store/ui.ts` initialises Zustand from `window.location.pathname` on load.
+
+## Testing
+
+```bash
+npm test            # vitest unit + component suites
+npm run typecheck   # all tsconfigs
+```
+
+End-to-end harnesses (require Postgres via `npm run db:up` and a current `npm run build`; each spins up the real server on a dedicated port with a stub `claude` CLI — no API keys needed):
+
+```bash
+npm run e2e:local    # in-process factory: run/stop/log/concurrency over /ws
+npm run e2e:remote   # decoupled mode: server + standalone conduit-worker over the
+                     # /ws/worker control plane, plus worker-death (SIGKILL mid-run
+                     # → run fails, never stuck) and worker-reconnect scenarios
+```
+
+To run a local worker against the compose stack (remote factory mode), uncomment `CONDUIT_WORKER_FACTORY`/`CONDUIT_WORKER_TOKEN` on the `conduit` service in `docker-compose.yml` and:
+
+```bash
+docker compose --profile worker up
+```

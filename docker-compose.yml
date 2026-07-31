@@ -42,8 +42,29 @@ services:
       # SLACK_SIGNING_SECRET: xxx
       # SENTRY_DSN: https://xxx@sentry.io/yyy
       # CONDUIT_ALLOWED_IPS: 127.0.0.1,10.0.0.0/8
+      # Remote worker mode — uncomment BOTH lines when using the `worker`
+      # profile below (token must match the worker's):
+      # CONDUIT_WORKER_FACTORY: remote
+      # CONDUIT_WORKER_TOKEN: dev-worker-token
     volumes:
       - conduit-data:/data
+
+  # Standalone execution worker (remote factory mode). Not started by default;
+  # bring the stack up with:
+  #   docker compose --profile worker up
+  # and uncomment CONDUIT_WORKER_FACTORY/CONDUIT_WORKER_TOKEN on the conduit
+  # service above. Same image, worker entrypoint — execution happens in this
+  # container; the server only orchestrates. Scale out with more replicas or
+  # additional hosts pointing CONDUIT_SERVER_URL at the server.
+  worker:
+    profiles: ["worker"]
+    build: .
+    depends_on:
+      - conduit
+    entrypoint: ["node", "out/worker/index.js"]
+    environment:
+      CONDUIT_SERVER_URL: ws://conduit:7456/ws/worker
+      CONDUIT_WORKER_TOKEN: dev-worker-token
 
 volumes:
   conduit-pg-data:
