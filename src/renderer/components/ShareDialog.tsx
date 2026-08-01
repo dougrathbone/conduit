@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react'
-import { X, Users, Search, Trash2, Globe } from 'lucide-react'
+import { Users, Search, Trash2, Globe } from 'lucide-react'
 import { Dialog } from '@renderer/components/ui/dialog'
 import { Input } from '@renderer/components/ui/input'
 import {

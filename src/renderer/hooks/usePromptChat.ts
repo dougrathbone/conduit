@@ -64,7 +64,6 @@ export function usePromptChat(agentId: string, runner: RunnerType): UsePromptCha
       unsubDone()
       unsubError()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   const startSession = useCallback(async () => {

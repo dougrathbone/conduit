@@ -59,7 +59,6 @@ const GREEN = '\x1b[32m'
 const RED = '\x1b[31m'
 const GRAY = '\x1b[90m'
 const WHITE = '\x1b[37m'
-const BG_GRAY = '\x1b[48;5;236m'
 
 const MAX_RESULT_LINES = 20
 const MAX_RESULT_CHARS = 2000
@@ -139,11 +138,9 @@ function formatToolResult(text: string): string | null {
   const exitMatch = text.match(/^Exit code (\d+)$/m)
 
   const lines = text.split('\n')
-  let truncated = false
   let display: string[]
 
   if (lines.length > MAX_RESULT_LINES || text.length > MAX_RESULT_CHARS) {
-    truncated = true
     // Show first and last few lines
     const headCount = Math.min(8, Math.floor(MAX_RESULT_LINES / 2))
     const tailCount = Math.min(5, MAX_RESULT_LINES - headCount - 1)

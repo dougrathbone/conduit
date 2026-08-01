@@ -18,7 +18,6 @@ function resolveDataDir(): string {
   if (isElectron) {
     // Dynamic require — kept as `unknown` so this file compiles cleanly
     // in both Electron and plain-Node (server) TypeScript projects.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any
     const electronModule = require('electron') as any
     return (electronModule.app as { getPath(name: string): string }).getPath('userData')
   }

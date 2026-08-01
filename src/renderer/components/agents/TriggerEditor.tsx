@@ -333,7 +333,6 @@ function InlineForm({ initial, onSave, onCancel, saving, existingId }: InlineFor
                 <label className="block text-xs text-[var(--text-secondary)]">Quick presets</label>
                 <div className="flex flex-wrap gap-1.5">
                   {SCHEDULE_PRESETS.map(preset => {
-                    const parsed = parseCronSchedule(preset.cron)
                     const currentCron = buildCronFromSchedule(form.scheduleHour, form.scheduleMinute, form.scheduleDays)
                     const isActive = preset.cron === currentCron
                     return (

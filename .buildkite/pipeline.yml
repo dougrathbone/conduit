@@ -1,13 +1,9 @@
 # Buildkite pipeline for Conduit.
 #
-# Triggered on every push to master. Runs the typecheck + unit-test gate,
-# then builds the linux/amd64 Docker image, pushes it to ECR with both the
-# git SHA and `:master` as tags, then rolls the Kubernetes deployment in the
-# target cluster. A failed gate skips the build/deploy (Buildkite default).
-#
-# Note: `npm run lint` is intentionally NOT part of the gate yet — the repo
-# carries pre-existing lint debt (mostly a no-undef/TS config mismatch).
-# Add it to the test step's command once that backlog is cleaned up.
+# Triggered on every push to master. Runs the lint + typecheck + unit-test
+# gate, then builds the linux/amd64 Docker image, pushes it to ECR with both
+# the git SHA and `:master` as tags, then rolls the Kubernetes deployment in
+# the target cluster. A failed gate skips the build/deploy (Buildkite default).
 #
 # Infrastructure identifiers are provided via Buildkite pipeline-level env
 # vars (set in the BK pipeline UI), not committed here:
@@ -44,12 +40,13 @@ steps:
   # Unit suites are DB-free (verified: full pass with Postgres stopped), so
   # no services are needed. node:22-bookworm (not -slim) keeps a C toolchain
   # available for any npm dep with a native build step.
-  - label: ":test_tube: typecheck + unit tests"
+  - label: ":test_tube: lint + typecheck + unit tests"
     key: test
     agents:
       queue: "$BUILD_QUEUE"
     command:
       - npm ci
+      - npm run lint
       - npm run typecheck
       - npm test
     plugins:

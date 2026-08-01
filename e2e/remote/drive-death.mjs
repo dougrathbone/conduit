@@ -38,7 +38,8 @@ ws.on('message', (data) => {
     const p = pending.get(msg.id)
     if (p) {
       pending.delete(msg.id)
-      msg.type === 'error' ? p.reject(new Error(msg.error)) : p.resolve(msg.result)
+      if (msg.type === 'error') p.reject(new Error(msg.error))
+      else p.resolve(msg.result)
     }
   } else if (msg.type === 'event') {
     if (msg.channel === 'run:statusChange') {

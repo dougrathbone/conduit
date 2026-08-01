@@ -78,7 +78,10 @@ export function useRunEvents(runId: string, opts?: { live?: boolean }) {
     return () => unsub()
   }, [runId, live])
 
-  const snapshotEvents = log?.format === 'events' ? log.events : []
+  const snapshotEvents = useMemo(
+    () => (log?.format === 'events' ? log.events : []),
+    [log]
+  )
   const snapshotMaxT = useMemo(
     () => snapshotEvents.reduce((m, e) => Math.max(m, e.t), 0),
     [snapshotEvents]

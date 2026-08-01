@@ -145,21 +145,12 @@ async function listToolsUrl(config: McpServerEntry): Promise<McpToolsResult> {
     }
 
     // Check if response is SSE or JSON
-    const contentType = initRes.headers.get('content-type') ?? ''
-
     // Look for Mcp-Session-Id header
     const sessionId = initRes.headers.get('mcp-session-id') ?? undefined
 
-    if (contentType.includes('text/event-stream')) {
-      // Parse SSE response for initialize result
-      const text = await initRes.text()
-      // SSE format: "event: message\ndata: {...}\n\n"
-      const dataLines = text.split('\n').filter(l => l.startsWith('data: ')).map(l => l.slice(6))
-      // We don't strictly need to parse the init response, just proceed
-    } else {
-      // JSON response — read it
-      await initRes.text()
-    }
+    // Consume the body — we don't strictly need to parse the init response
+    // (SSE or JSON), just proceed to the initialized notification.
+    await initRes.text()
 
     // Send initialized notification
     const notifHeaders = { ...headers }

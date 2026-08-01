@@ -18,7 +18,6 @@ import type {
   McpOAuthProbeResult,
   McpServerEntry,
   RunnerType,
-  SlackPublishConfig,
   Share,
   ResolvedShare,
   ShareableEntityType,

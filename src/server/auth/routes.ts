@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import type { Request, Response } from 'express'
 import { isAuthEnabled, getOktaConfig } from './config'
-import { getDevContext, DEV_USER } from './devBypass'
+import { DEV_USER } from './devBypass'
 import { getUser } from '../../main/db/queries/users'
 import { upsertUser } from '../../main/db/queries/users'
 import { getUserGroupIds, listGroups, upsertGroup, syncUserGroups } from '../../main/db/queries/groups'

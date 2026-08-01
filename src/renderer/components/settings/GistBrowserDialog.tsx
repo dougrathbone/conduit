@@ -56,11 +56,6 @@ export function GistBrowserDialog({ open, onClose, onSelect }: GistBrowserDialog
   const handleLoad = async () => {
     if (!selected) return
     const gistId = selected.id
-    // Load prompt.md if it exists, else the first file
-    const targetFile = selected.isConduitPrompt
-      ? 'prompt.md'
-      : Object.keys(selected.files)[0]
-
     // We use the existing load handler which fetches prompt.md
     try {
       const content = await loadGist.mutateAsync(gistId)

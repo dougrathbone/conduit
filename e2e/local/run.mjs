@@ -44,7 +44,7 @@ async function main() {
     },
   })
 
-  let exitCode = 1
+  let exitCode
   try {
     await waitForOutput(server, 'running at')
     console.log(`[e2e] Server up on port ${PORT} (data dir ${dataDir})`)
@@ -57,7 +57,7 @@ async function main() {
     await stopProcess(server)
     fs.rmSync(dataDir, { recursive: true, force: true })
   }
-  process.exit(exitCode)
+  process.exit(exitCode ?? 1)
 }
 
 main().catch((err) => {

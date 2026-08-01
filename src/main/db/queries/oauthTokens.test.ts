@@ -16,7 +16,7 @@ vi.mock('../index', () => ({
   }),
 }))
 vi.mock('../schema', () => ({ oauthTokens: { serverUrl: 'server_url', tokenOwner: 'token_owner' } }))
-vi.mock('drizzle-orm', () => ({ eq: () => ({}), and: (...cs: any[]) => ({ a: '__a', b: '__b' }) }))
+vi.mock('drizzle-orm', () => ({ eq: () => ({}), and: () => ({ a: '__a', b: '__b' }) }))
 vi.mock('../../../server/crypto', () => ({
   encryptSecret: (s: string) => `enc:${s}`,
   decryptSecret: (s: string) => s.replace(/^enc:/, ''),
@@ -24,7 +24,7 @@ vi.mock('../../../server/crypto', () => ({
 vi.mock('./users', () => ({ getUser: vi.fn(async (id: string) => ({ id, name: 'Ada', email: 'ada@x' })) }))
 
 // NOTE: the `and()` mock returns fixed keys so the fake matches on serverUrl/tokenOwner.
-import { saveToken, getToken, getTokenStatus } from './oauthTokens'
+import { saveToken, getToken } from './oauthTokens'
 
 const baseToken = { serverUrl: 'https://m', accessToken: 'AT', refreshToken: 'RT', tokenType: 'Bearer', expiresAt: 123 }
 

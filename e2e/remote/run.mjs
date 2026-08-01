@@ -36,7 +36,7 @@ const DB_NAME = process.env.CONDUIT_E2E_DB || 'conduit_e2e_remote'
 const TOKEN = 'e2e-worker-token'
 const SERVER_URL = `ws://localhost:${PORT}/ws/worker`
 
-function startWorker(dataDirIndependentPath) {
+function startWorker() {
   return startProcess('worker', 'node', [path.join(repoRoot, 'out/worker/index.js')], {
     env: {
       PATH: `${stubBinDir}${path.delimiter}${process.env.PATH}`,
@@ -70,7 +70,7 @@ async function main() {
   const drivePath = path.join(repoRoot, 'e2e/lib/drive.mjs')
   let worker1
   let worker2
-  let exitCode = 1
+  let exitCode
 
   try {
     await waitForOutput(server, 'running at')
@@ -103,7 +103,7 @@ async function main() {
     await stopProcess(server)
     fs.rmSync(dataDir, { recursive: true, force: true })
   }
-  process.exit(exitCode)
+  process.exit(exitCode ?? 1)
 }
 
 main().catch((err) => {
