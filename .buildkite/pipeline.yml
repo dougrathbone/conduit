@@ -1,8 +1,13 @@
 # Buildkite pipeline for Conduit.
 #
-# Triggered on every push to master. Builds the linux/amd64 Docker image,
-# pushes it to ECR with both the git SHA and `:master` as tags, then rolls
-# the Kubernetes deployment in the target cluster.
+# Triggered on every push to master. Runs the typecheck + unit-test gate,
+# then builds the linux/amd64 Docker image, pushes it to ECR with both the
+# git SHA and `:master` as tags, then rolls the Kubernetes deployment in the
+# target cluster. A failed gate skips the build/deploy (Buildkite default).
+#
+# Note: `npm run lint` is intentionally NOT part of the gate yet — the repo
+# carries pre-existing lint debt (mostly a no-undef/TS config mismatch).
+# Add it to the test step's command once that backlog is cleaned up.
 #
 # Infrastructure identifiers are provided via Buildkite pipeline-level env
 # vars (set in the BK pipeline UI), not committed here:
@@ -35,6 +40,25 @@ env:
   SENTRY_PROJECT: "conduit"
 
 steps:
+  # ── Test gate — must pass before any image is built or deployed ─────────
+  # Unit suites are DB-free (verified: full pass with Postgres stopped), so
+  # no services are needed. node:22-bookworm (not -slim) keeps a C toolchain
+  # available for any npm dep with a native build step.
+  - label: ":test_tube: typecheck + unit tests"
+    key: test
+    agents:
+      queue: "$BUILD_QUEUE"
+    command:
+      - npm ci
+      - npm run typecheck
+      - npm test
+    plugins:
+      - docker#v5.12.0:
+          platform: linux/arm64
+          image: "node:22-bookworm"
+          workdir: /app
+    timeout_in_minutes: 10
+
   # ── Build + push image ─────────────────────────────────────────────────────
   - label: ":docker: build and push :ecr:"
     key: build

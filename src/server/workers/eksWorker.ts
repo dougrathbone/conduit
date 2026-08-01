@@ -119,7 +119,8 @@ export class EksWorkerFactory implements WorkerFactory {
     } catch (err) {
       throw new Error(
         `Failed to create Kubernetes Job ${jobName} in namespace ${this.config.namespace}: ` +
-          (err instanceof Error ? err.message : String(err))
+          (err instanceof Error ? err.message : String(err)),
+        { cause: err }
       )
     }
 

@@ -128,7 +128,8 @@ export class FargateWorkerFactory implements WorkerFactory {
     } catch (err) {
       throw new Error(
         `Failed to start Fargate task for run ${runId}: ` +
-          (err instanceof Error ? err.message : String(err))
+          (err instanceof Error ? err.message : String(err)),
+        { cause: err }
       )
     }
 
