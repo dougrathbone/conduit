@@ -14,6 +14,10 @@ process.stdin.on('end', () => {
       JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text }] } })
     )
   say(`stub-claude received prompt: ${prompt.trim().slice(0, 80)}`)
+  if (prompt.includes('E2E_FAIL')) {
+    console.log(JSON.stringify({ type: 'result', subtype: 'error', result: 'stub-claude failed as requested' }))
+    process.exit(1)
+  }
   if (prompt.includes('E2E_LONG')) {
     const timer = setInterval(() => say('still working…'), 2000)
     process.on('SIGTERM', () => {

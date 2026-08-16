@@ -31,6 +31,9 @@
  * reach the internet without NAT), CONDUIT_FARGATE_PLATFORM_VERSION,
  * CONDUIT_WORKER_CONNECT_TIMEOUT_MS (default 600000),
  * CONDUIT_WORKER_ASSIGN_TIMEOUT_MS (default 120000).
+ *
+ * E2E-only: CONDUIT_FARGATE_E2E_FAKE_ECS may point at a module that exports
+ * createFakeEcsClient() (see e2e/fargate/). Never set this in production.
  */
 import {
   DescribeTasksCommand,
@@ -41,6 +44,8 @@ import {
   type RunTaskCommandInput,
   type Task,
 } from '@aws-sdk/client-ecs'
+import { createRequire } from 'node:module'
+import * as path from 'node:path'
 import { fromTemporaryCredentials } from '@aws-sdk/credential-providers'
 import type { RunSpec, WorkerEventSink, WorkerFactory, WorkerHandle } from '../../shared/worker'
 import type { WorkerControlPlane } from '../workerControl'
@@ -159,7 +164,7 @@ export class FargateWorkerFactory implements WorkerFactory {
     private config: FargateWorkerConfig,
     ecs?: ECSClient
   ) {
-    this.ecs = ecs ?? new ECSClient(buildFargateEcsClientConfig(config))
+    this.ecs = ecs ?? tryLoadE2eFakeEcsClient() ?? new ECSClient(buildFargateEcsClientConfig(config))
   }
 
   async startRun(spec: RunSpec, sink: WorkerEventSink): Promise<WorkerHandle> {
@@ -348,6 +353,26 @@ export class FargateWorkerFactory implements WorkerFactory {
     const inflight = [...this.active.entries()]
     await Promise.all(inflight.map(([runId, taskArn]) => this.stopTask(taskArn, runId, 'factory shutdown')))
   }
+}
+
+/**
+ * E2E-only hook: load a duck-typed ECS client from CONDUIT_FARGATE_E2E_FAKE_ECS.
+ * Production never sets this; the default SDK client is used instead.
+ */
+export function tryLoadE2eFakeEcsClient(env: NodeJS.ProcessEnv = process.env): ECSClient | undefined {
+  const spec = env.CONDUIT_FARGATE_E2E_FAKE_ECS?.trim()
+  if (!spec) return undefined
+  const resolved = path.isAbsolute(spec) ? spec : path.resolve(spec)
+  const req = createRequire(path.join(process.cwd(), 'package.json'))
+  const loaded = req(resolved) as { createFakeEcsClient?: () => ECSClient }
+  const client = typeof loaded.createFakeEcsClient === 'function' ? loaded.createFakeEcsClient() : loaded
+  if (!client || typeof (client as { send?: unknown }).send !== 'function') {
+    throw new Error(
+      `CONDUIT_FARGATE_E2E_FAKE_ECS module must export createFakeEcsClient() or a client with send() (${resolved})`
+    )
+  }
+  console.warn(`[workers/fargate] e2e fake ECS loaded from ${resolved}`)
+  return client as ECSClient
 }
 
 function isTaskGone(err: unknown): boolean {

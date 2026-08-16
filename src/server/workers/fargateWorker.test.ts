@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import * as path from 'node:path'
 import type { ECSClient } from '@aws-sdk/client-ecs'
 import type { RunSpec, WorkerEventSink, WorkerHandle } from '../../shared/worker'
 import type { WorkerControlPlane } from '../workerControl'
@@ -8,6 +9,7 @@ import {
   FargateWorkerFactory,
   buildFargateEcsClientConfig,
   resolveFargateConfig,
+  tryLoadE2eFakeEcsClient,
   type FargateWorkerConfig,
 } from './fargateWorker'
 
@@ -134,6 +136,20 @@ describe('resolveFargateConfig', () => {
 
   it('omits roleArn when CONDUIT_FARGATE_ROLE_ARN is unset', () => {
     expect(resolveFargateConfig(BASE_ENV).roleArn).toBeUndefined()
+  })
+})
+
+describe('tryLoadE2eFakeEcsClient', () => {
+  it('is a no-op unless CONDUIT_FARGATE_E2E_FAKE_ECS is set', () => {
+    expect(tryLoadE2eFakeEcsClient({})).toBeUndefined()
+    expect(tryLoadE2eFakeEcsClient({ CONDUIT_FARGATE_E2E_FAKE_ECS: '  ' })).toBeUndefined()
+  })
+
+  it('loads createFakeEcsClient from the e2e module path', () => {
+    const modulePath = path.resolve(process.cwd(), 'e2e/fargate/fakeEcs.cjs')
+    const client = tryLoadE2eFakeEcsClient({ CONDUIT_FARGATE_E2E_FAKE_ECS: modulePath })
+    expect(client).toBeDefined()
+    expect(typeof client?.send).toBe('function')
   })
 })
 
