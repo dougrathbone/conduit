@@ -87,7 +87,8 @@ export function isIpAllowed(ip: string, config: IpRestrictionsConfig): boolean {
   for (const cidr of config.allowedCidrs) {
     const parsed = parseCidr(cidr)
     if (!parsed) continue
-    if ((ipNum & parsed.mask) === parsed.base) return true
+    // >>> 0: JS bitwise ops are signed int32; IPs ≥ 128.x.x.x need unsigned compare
+    if (((ipNum & parsed.mask) >>> 0) === parsed.base) return true
   }
 
   return false
