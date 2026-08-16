@@ -96,7 +96,131 @@ export const WORKER_HEARTBEAT_INTERVAL_MS = 30_000
 /** How long the server tolerates silence before declaring a worker dead
  *  (2.5 missed beats absorbs transient network partitions). */
 export const WORKER_LEASE_MS = 75_000
-/** Reject worker frames larger than this (Task 3 enforces). */
+/** Reject worker frames larger than this. */
 export const WORKER_MAX_MESSAGE_BYTES = 1_048_576
-/** Reject run:event batches larger than this (Task 3 enforces). */
+/** Reject run:event batches larger than this. */
 export const WORKER_MAX_EVENT_BATCH = 256
+
+export type WorkerMessageParseFailure = 'malformed' | 'invalid' | 'oversized-batch'
+
+export type WorkerMessageParseResult =
+  | { ok: true; message: WorkerToServerMessage }
+  | { ok: false; error: WorkerMessageParseFailure }
+
+const EXIT_STATUSES = new Set<WorkerExitStatus>(['completed', 'failed', 'stopped'])
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+}
+
+function isRunEventInit(value: unknown): value is RunEventInit {
+  return isRecord(value) && typeof value.kind === 'string'
+}
+
+/** Parse and structurally validate a worker→server control-plane frame. */
+export function parseWorkerToServerMessage(raw: string): WorkerMessageParseResult {
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    return { ok: false, error: 'malformed' }
+  }
+  if (!isRecord(value) || typeof value.type !== 'string') {
+    return { ok: false, error: 'invalid' }
+  }
+  switch (value.type) {
+    case 'worker:hello': {
+      if (
+        typeof value.workerId !== 'string' ||
+        value.workerId.length === 0 ||
+        !isRecord(value.capabilities) ||
+        !isStringArray(value.capabilities.runners) ||
+        typeof value.capabilities.version !== 'string' ||
+        !isStringArray(value.activeRunIds)
+      ) {
+        return { ok: false, error: 'invalid' }
+      }
+      return {
+        ok: true,
+        message: {
+          type: 'worker:hello',
+          workerId: value.workerId,
+          capabilities: {
+            runners: value.capabilities.runners as WorkerCapabilities['runners'],
+            version: value.capabilities.version,
+          },
+          activeRunIds: value.activeRunIds,
+        },
+      }
+    }
+    case 'worker:heartbeat': {
+      if (typeof value.workerId !== 'string' || value.workerId.length === 0 || !isStringArray(value.activeRunIds)) {
+        return { ok: false, error: 'invalid' }
+      }
+      return {
+        ok: true,
+        message: { type: 'worker:heartbeat', workerId: value.workerId, activeRunIds: value.activeRunIds },
+      }
+    }
+    case 'run:started': {
+      if (typeof value.runId !== 'string' || value.runId.length === 0) {
+        return { ok: false, error: 'invalid' }
+      }
+      if (value.workspacePath !== undefined && typeof value.workspacePath !== 'string') {
+        return { ok: false, error: 'invalid' }
+      }
+      return {
+        ok: true,
+        message: {
+          type: 'run:started',
+          runId: value.runId,
+          workspacePath: value.workspacePath,
+        },
+      }
+    }
+    case 'run:event': {
+      if (typeof value.runId !== 'string' || value.runId.length === 0 || !Array.isArray(value.events)) {
+        return { ok: false, error: 'invalid' }
+      }
+      if (value.events.length > WORKER_MAX_EVENT_BATCH) {
+        return { ok: false, error: 'oversized-batch' }
+      }
+      if (!value.events.every(isRunEventInit)) {
+        return { ok: false, error: 'invalid' }
+      }
+      return { ok: true, message: { type: 'run:event', runId: value.runId, events: value.events } }
+    }
+    case 'run:exit': {
+      if (
+        typeof value.runId !== 'string' ||
+        value.runId.length === 0 ||
+        typeof value.status !== 'string' ||
+        !EXIT_STATUSES.has(value.status as WorkerExitStatus)
+      ) {
+        return { ok: false, error: 'invalid' }
+      }
+      if (
+        value.exitCode !== undefined &&
+        value.exitCode !== null &&
+        typeof value.exitCode !== 'number'
+      ) {
+        return { ok: false, error: 'invalid' }
+      }
+      return {
+        ok: true,
+        message: {
+          type: 'run:exit',
+          runId: value.runId,
+          status: value.status as WorkerExitStatus,
+          exitCode: value.exitCode as number | null | undefined,
+        },
+      }
+    }
+    default:
+      return { ok: false, error: 'invalid' }
+  }
+}
