@@ -3,7 +3,7 @@
  * server, real WebSocket clients standing in for conduit-worker, exercising
  * auth, assign/assignTo, event streaming, cancellation, and exit.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import http from 'http'
 import { AddressInfo } from 'net'
 import WebSocket from 'ws'
@@ -295,9 +295,12 @@ describe('WorkerControlPlane', () => {
     const owner = await connectWorker(ctx, { workerId: 'owner' })
     const stranger = await connectWorker(ctx, { workerId: 'stranger' })
     const events: string[] = []
+    let exit: { status: string; exitCode: number | null | undefined } | undefined
     const handlePromise = ctx.controlPlane.assignTo('owner', SPEC, {
       onEvent: (ev) => events.push(ev.stream),
-      onExit: () => {},
+      onExit: (status, exitCode) => {
+        exit = { status, exitCode }
+      },
     })
     expect(await owner.next()).toEqual({ type: 'run:assign', spec: SPEC })
     owner.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId }))
@@ -315,6 +318,13 @@ describe('WorkerControlPlane', () => {
     )
     await new Promise((r) => setTimeout(r, 50))
     expect(events).toEqual([])
+    expect(exit).toBeUndefined()
+
+    owner.ws.send(JSON.stringify({ type: 'run:exit', runId: SPEC.runId, status: 'completed', exitCode: 0 }))
+    await vi.waitFor(() => {
+      expect(exit).toEqual({ status: 'completed', exitCode: 0 })
+    })
+    expect(events).toEqual([])
   })
 
   it('rejects a second hello that changes worker identity on the same socket', async () => {
@@ -327,8 +337,18 @@ describe('WorkerControlPlane', () => {
         activeRunIds: [],
       })
     )
-    await expect(expectClose(worker.ws)).resolves.toMatchObject({ code: expect.any(Number) })
+    await new Promise((r) => setTimeout(r, 50))
+    // Keep the live w1 session — do not close-and-leak a stale w1 entry.
+    expect(worker.ws.readyState).toBe(WebSocket.OPEN)
     expect(ctx.controlPlane.connectedWorkerCount).toBe(1)
+    await expect(
+      ctx.controlPlane.assignTo('w2', { ...SPEC, runId: 'run-w2' }, { onEvent: () => {}, onExit: () => {} }, 30)
+    ).rejects.toThrow(/did not connect/)
+
+    const handlePromise = ctx.controlPlane.assignTo('w1', SPEC, { onEvent: () => {}, onExit: () => {} })
+    expect(await worker.next()).toEqual({ type: 'run:assign', spec: SPEC })
+    worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId }))
+    await handlePromise
   })
 
   it('closes the previous socket when a duplicate identity connects', async () => {
@@ -354,13 +374,19 @@ describe('WorkerControlPlane', () => {
     const specB = { ...SPEC, runId: 'run-2', agentId: 'agent-2' }
     const eventsA: string[] = []
     const eventsB: string[] = []
+    let exitA: string | undefined
+    let exitB: string | undefined
     const handleA = ctx.controlPlane.assignTo('wa', specA, {
       onEvent: (ev) => eventsA.push(ev.text ?? ev.stream),
-      onExit: () => {},
+      onExit: (status) => {
+        exitA = status
+      },
     })
     const handleB = ctx.controlPlane.assignTo('wb', specB, {
       onEvent: (ev) => eventsB.push(ev.text ?? ev.stream),
-      onExit: () => {},
+      onExit: (status) => {
+        exitB = status
+      },
     })
     expect(await a.next()).toEqual({ type: 'run:assign', spec: specA })
     expect(await b.next()).toEqual({ type: 'run:assign', spec: specB })
@@ -375,6 +401,7 @@ describe('WorkerControlPlane', () => {
         events: [{ kind: 'raw', stream: 'stdout', text: 'cross' }],
       })
     )
+    a.ws.send(JSON.stringify({ type: 'run:exit', runId: specB.runId, status: 'failed', exitCode: 1 }))
     b.ws.send(
       JSON.stringify({
         type: 'run:event',
@@ -385,6 +412,14 @@ describe('WorkerControlPlane', () => {
     await new Promise((r) => setTimeout(r, 50))
     expect(eventsA).toEqual([])
     expect(eventsB).toEqual(['ok-b'])
+    expect(exitA).toBeUndefined()
+    expect(exitB).toBeUndefined()
+
+    b.ws.send(JSON.stringify({ type: 'run:exit', runId: specB.runId, status: 'completed', exitCode: 0 }))
+    await vi.waitFor(() => {
+      expect(exitB).toBe('completed')
+    })
+    expect(exitA).toBeUndefined()
   })
 
   it('uses constructor assignTimeoutMs and drops the assignment so a late run:started is ignored', async () => {
