@@ -5,7 +5,9 @@
  * RunTask records the request, invents a local task ARN, and (unless a skip-
  * spawn sentinel is present) launches `node out/worker/index.js` with the
  * RunTask overrides plus task-definition env (process mode, one-shot, token).
- * StopTask / DescribeTasks track and kill those children.
+ * StopTask / DescribeTasks track and kill the worker process group.
+ * lastStatus becomes STOPPED only when the worker process exits (skip-spawn
+ * tasks with no process are marked STOPPED immediately).
  *
  * State is persisted to CONDUIT_FARGATE_E2E_STATE so the driver can assert
  * cleanup, unique ARNs, and that secrets never appear in RunTask overrides.
@@ -85,22 +87,28 @@ function createFakeEcsClient() {
     persist()
   }
 
-  function killChild(task) {
-    const child = task.child
-    if (!child || child.exitCode !== null || child.signalCode !== null) return
+  /** Kill the worker process group so spawned CLI children (stub claude) die too. */
+  function killProcessGroup(pid, signal) {
     try {
-      child.kill('SIGTERM')
+      process.kill(-pid, signal)
     } catch {
-      // already gone
-    }
-    setTimeout(() => {
-      if (child.exitCode === null && child.signalCode === null) {
-        try {
-          child.kill('SIGKILL')
-        } catch {
-          // already gone
-        }
+      try {
+        process.kill(pid, signal)
+      } catch {
+        // already gone
       }
+    }
+  }
+
+  function killChild(task) {
+    const pid = task.pid
+    if (!pid) return
+    const child = task.child
+    const alreadyDead = !child || child.exitCode !== null || child.signalCode !== null
+    killProcessGroup(pid, alreadyDead ? 'SIGKILL' : 'SIGTERM')
+    if (alreadyDead) return
+    setTimeout(() => {
+      if (task.lastStatus !== 'STOPPED') killProcessGroup(pid, 'SIGKILL')
     }, 2000).unref()
   }
 
@@ -125,6 +133,7 @@ function createFakeEcsClient() {
     const child = spawn(process.execPath, [workerBin()], {
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true,
     })
     const task = tasks.get(arn)
     if (task) {
@@ -176,10 +185,18 @@ function createFakeEcsClient() {
   async function stopTask(input) {
     const arn = input.task
     const task = tasks.get(arn)
-    if (task) {
-      killChild(task)
-      markStopped(arn)
+    if (!task) {
+      return { task: { taskArn: arn, lastStatus: 'STOPPED', desiredStatus: 'STOPPED' } }
     }
+    if (task.lastStatus === 'STOPPED') {
+      return { task: { taskArn: arn, lastStatus: 'STOPPED', desiredStatus: 'STOPPED' } }
+    }
+    if (!task.pid && !task.child) {
+      // skip-spawn: no process to wait for
+      markStopped(arn)
+      return { task: { taskArn: arn, lastStatus: 'STOPPED', desiredStatus: 'STOPPED' } }
+    }
+    killChild(task)
     return { task: { taskArn: arn, lastStatus: 'DEACTIVATING', desiredStatus: 'STOPPED' } }
   }
 

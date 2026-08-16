@@ -8,6 +8,7 @@ import {
   FARGATE_WORKER_MEMORY_MIB,
   FargateWorkerFactory,
   buildFargateEcsClientConfig,
+  isAllowlistedE2eModule,
   resolveFargateConfig,
   tryLoadE2eFakeEcsClient,
   type FargateWorkerConfig,
@@ -140,14 +141,48 @@ describe('resolveFargateConfig', () => {
 })
 
 describe('tryLoadE2eFakeEcsClient', () => {
+  const e2eModule = path.resolve(process.cwd(), 'e2e/fargate/fakeEcs.cjs')
+
   it('is a no-op unless CONDUIT_FARGATE_E2E_FAKE_ECS is set', () => {
     expect(tryLoadE2eFakeEcsClient({})).toBeUndefined()
-    expect(tryLoadE2eFakeEcsClient({ CONDUIT_FARGATE_E2E_FAKE_ECS: '  ' })).toBeUndefined()
+    expect(tryLoadE2eFakeEcsClient({ CONDUIT_E2E: '1', CONDUIT_FARGATE_E2E_FAKE_ECS: '  ' })).toBeUndefined()
   })
 
-  it('loads createFakeEcsClient from the e2e module path', () => {
-    const modulePath = path.resolve(process.cwd(), 'e2e/fargate/fakeEcs.cjs')
-    const client = tryLoadE2eFakeEcsClient({ CONDUIT_FARGATE_E2E_FAKE_ECS: modulePath })
+  it('refuses to load when NODE_ENV=production', () => {
+    expect(() =>
+      tryLoadE2eFakeEcsClient({
+        NODE_ENV: 'production',
+        CONDUIT_E2E: '1',
+        CONDUIT_FARGATE_E2E_FAKE_ECS: e2eModule,
+      })
+    ).toThrow(/NODE_ENV=production/)
+  })
+
+  it('requires CONDUIT_E2E=1', () => {
+    expect(() => tryLoadE2eFakeEcsClient({ CONDUIT_FARGATE_E2E_FAKE_ECS: e2eModule })).toThrow(
+      /CONDUIT_E2E=1/
+    )
+  })
+
+  it('allowlists only paths under e2e/', () => {
+    expect(isAllowlistedE2eModule(e2eModule)).toBe(true)
+    expect(isAllowlistedE2eModule(path.resolve(process.cwd(), 'src/server/workers/fargateWorker.ts'))).toBe(
+      false
+    )
+    expect(isAllowlistedE2eModule(path.resolve(process.cwd(), 'e2e/../package.json'))).toBe(false)
+    expect(() =>
+      tryLoadE2eFakeEcsClient({
+        CONDUIT_E2E: '1',
+        CONDUIT_FARGATE_E2E_FAKE_ECS: path.resolve(process.cwd(), 'package.json'),
+      })
+    ).toThrow(/must resolve under e2e\//)
+  })
+
+  it('loads createFakeEcsClient from the e2e module path when CONDUIT_E2E=1', () => {
+    const client = tryLoadE2eFakeEcsClient({
+      CONDUIT_E2E: '1',
+      CONDUIT_FARGATE_E2E_FAKE_ECS: e2eModule,
+    })
     expect(client).toBeDefined()
     expect(typeof client?.send).toBe('function')
   })

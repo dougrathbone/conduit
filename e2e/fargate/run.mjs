@@ -67,6 +67,7 @@ async function main() {
       CONDUIT_FARGATE_CLUSTER: 'conduit-e2e',
       CONDUIT_FARGATE_TASK_DEFINITION: 'conduit-worker:e2e',
       CONDUIT_FARGATE_SUBNETS: 'subnet-e2e0001,subnet-e2e0002',
+      CONDUIT_E2E: '1',
       CONDUIT_FARGATE_E2E_FAKE_ECS: fakeEcs,
       CONDUIT_FARGATE_E2E_STATE: stateFile,
       CONDUIT_FARGATE_E2E_SKIP_SPAWN: skipSpawn,

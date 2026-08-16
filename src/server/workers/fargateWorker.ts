@@ -32,8 +32,9 @@
  * CONDUIT_WORKER_CONNECT_TIMEOUT_MS (default 600000),
  * CONDUIT_WORKER_ASSIGN_TIMEOUT_MS (default 120000).
  *
- * E2E-only: CONDUIT_FARGATE_E2E_FAKE_ECS may point at a module that exports
- * createFakeEcsClient() (see e2e/fargate/). Never set this in production.
+ * E2E-only: CONDUIT_FARGATE_E2E_FAKE_ECS may point at a module under e2e/
+ * that exports createFakeEcsClient(). Requires CONDUIT_E2E=1 and is forbidden
+ * when NODE_ENV=production.
  */
 import {
   DescribeTasksCommand,
@@ -355,14 +356,36 @@ export class FargateWorkerFactory implements WorkerFactory {
   }
 }
 
+/** True for CONDUIT_E2E=1/true/yes (whitespace/case-tolerant). */
+export function isConduitE2eEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.CONDUIT_E2E?.trim().toLowerCase()
+  return raw === '1' || raw === 'true' || raw === 'yes'
+}
+
+/** Allowlist: resolved module path must sit under <cwd>/e2e/. */
+export function isAllowlistedE2eModule(resolved: string, cwd: string = process.cwd()): boolean {
+  const e2eRoot = path.resolve(cwd, 'e2e')
+  const rel = path.relative(e2eRoot, path.resolve(resolved))
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
+}
+
 /**
  * E2E-only hook: load a duck-typed ECS client from CONDUIT_FARGATE_E2E_FAKE_ECS.
- * Production never sets this; the default SDK client is used instead.
+ * Refuses NODE_ENV=production, requires CONDUIT_E2E=1, and allowlists e2e/.
  */
 export function tryLoadE2eFakeEcsClient(env: NodeJS.ProcessEnv = process.env): ECSClient | undefined {
   const spec = env.CONDUIT_FARGATE_E2E_FAKE_ECS?.trim()
   if (!spec) return undefined
+  if (env.NODE_ENV === 'production') {
+    throw new Error('CONDUIT_FARGATE_E2E_FAKE_ECS is forbidden when NODE_ENV=production')
+  }
+  if (!isConduitE2eEnabled(env)) {
+    throw new Error('CONDUIT_FARGATE_E2E_FAKE_ECS requires CONDUIT_E2E=1')
+  }
   const resolved = path.isAbsolute(spec) ? spec : path.resolve(spec)
+  if (!isAllowlistedE2eModule(resolved)) {
+    throw new Error(`CONDUIT_FARGATE_E2E_FAKE_ECS must resolve under e2e/ (got ${resolved})`)
+  }
   const req = createRequire(path.join(process.cwd(), 'package.json'))
   const loaded = req(resolved) as { createFakeEcsClient?: () => ECSClient }
   const client = typeof loaded.createFakeEcsClient === 'function' ? loaded.createFakeEcsClient() : loaded
