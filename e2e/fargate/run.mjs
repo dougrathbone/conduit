@@ -86,7 +86,6 @@ async function main() {
   }
 
   let exitCode
-  let shutdownPrepared = false
   try {
     await waitForOutput(server, 'running at')
     console.log(`[e2e] Server up on port ${PORT} (fargate factory + fake ECS, data dir ${dataDir})`)
@@ -105,22 +104,19 @@ async function main() {
       throw new Error(`expected a live simulated task before server shutdown, found ${liveBefore}`)
     }
     console.log(`[e2e] ${liveBefore} simulated task(s) running — SIGTERM server`)
-    shutdownPrepared = true
   } finally {
     await stopProcess(server)
   }
 
-  if (shutdownPrepared) {
-    const after = readState(stateFile)
-    const liveAfter = runningCount(after)
-    if (liveAfter !== 0) {
-      console.error(`[e2e] FAIL  shutdown: simulated tasks still running (${liveAfter})`)
-      console.error(JSON.stringify(after, null, 2))
-      fs.rmSync(dataDir, { recursive: true, force: true })
-      process.exit(1)
-    }
-    console.log('[e2e] PASS  shutdown: every started task stopped')
+  const after = readState(stateFile)
+  const liveAfter = runningCount(after)
+  if (liveAfter !== 0) {
+    console.error(`[e2e] FAIL  shutdown: simulated tasks still running (${liveAfter})`)
+    console.error(JSON.stringify(after, null, 2))
+    fs.rmSync(dataDir, { recursive: true, force: true })
+    process.exit(1)
   }
+  console.log('[e2e] PASS  shutdown: every started task stopped')
   fs.rmSync(dataDir, { recursive: true, force: true })
   process.exit(exitCode ?? 1)
 }
