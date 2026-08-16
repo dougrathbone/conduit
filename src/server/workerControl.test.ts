@@ -367,6 +367,56 @@ describe('WorkerControlPlane', () => {
     expect(ctx.controlPlane.connectedWorkerCount).toBe(1)
   })
 
+  it('does not let a duplicate-identity socket inherit or inject into a live assignment', async () => {
+    const owner = await connectWorker(ctx, { workerId: 'fargate-run-1' })
+    const events: string[] = []
+    let exit: { status: string; exitCode: number | null | undefined } | undefined
+    const handlePromise = ctx.controlPlane.assignTo('fargate-run-1', SPEC, {
+      onEvent: (ev) => events.push(ev.text ?? ev.stream),
+      onExit: (status, exitCode) => {
+        exit = { status, exitCode }
+      },
+    })
+    expect(await owner.next()).toEqual({ type: 'run:assign', spec: SPEC })
+    owner.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, workspacePath: '/tmp/owner' }))
+    const handle = await handlePromise
+    expect(handle.workspacePath).toBe('/tmp/owner')
+
+    const impostor = await connectSocket(ctx)
+    const impostorClosed = expectClose(impostor, 500)
+    sendJson(impostor, {
+      type: 'worker:hello',
+      workerId: 'fargate-run-1',
+      capabilities: { runners: ['claude'], version: 'test' },
+      activeRunIds: [],
+    })
+    sendJson(impostor, {
+      type: 'run:event',
+      runId: SPEC.runId,
+      events: [{ kind: 'raw', stream: 'stdout', text: 'injected' }],
+    })
+    sendJson(impostor, { type: 'run:exit', runId: SPEC.runId, status: 'completed', exitCode: 0 })
+
+    await impostorClosed
+    expect(owner.ws.readyState).toBe(WebSocket.OPEN)
+    expect(ctx.controlPlane.connectedWorkerCount).toBe(1)
+    expect(events).toEqual([])
+    expect(exit).toBeUndefined()
+
+    owner.ws.send(
+      JSON.stringify({
+        type: 'run:event',
+        runId: SPEC.runId,
+        events: [{ kind: 'raw', stream: 'stdout', text: 'from-owner' }],
+      })
+    )
+    owner.ws.send(JSON.stringify({ type: 'run:exit', runId: SPEC.runId, status: 'completed', exitCode: 0 }))
+    await vi.waitFor(() => {
+      expect(exit).toEqual({ status: 'completed', exitCode: 0 })
+    })
+    expect(events).toEqual(['from-owner'])
+  })
+
   it('does not deliver events from one run onto another run\'s sink', async () => {
     const a = await connectWorker(ctx, { workerId: 'wa' })
     const b = await connectWorker(ctx, { workerId: 'wb' })
@@ -432,11 +482,30 @@ describe('WorkerControlPlane', () => {
     expect(await worker.next()).toEqual({ type: 'run:cancel', runId: SPEC.runId })
 
     worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, workspacePath: '/tmp/late' }))
+    // Let the late frame land while no assignment exists (a no-op). A retry's
+    // run:started must not be consumed by the timed-out generation's suppressor.
+    await new Promise((r) => setTimeout(r, 20))
     const retry = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })
     expect(await worker.next()).toEqual({ type: 'run:assign', spec: SPEC })
     worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, workspacePath: '/tmp/ok' }))
     const handle = await retry
     expect(handle.workspacePath).toBe('/tmp/ok')
+  }, 400)
+
+  it('does not consume a retry run:started after a timed-out assignment', async () => {
+    await ctx.close()
+    ctx = await startServer({ assignTimeoutMs: 50 })
+    const worker = await connectWorker(ctx)
+    const first = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })
+    await worker.next()
+    await expect(first).rejects.toThrow(/did not start run/)
+    expect(await worker.next()).toEqual({ type: 'run:cancel', runId: SPEC.runId })
+
+    const retry = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })
+    expect(await worker.next()).toEqual({ type: 'run:assign', spec: SPEC })
+    worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, workspacePath: '/tmp/retry' }))
+    const handle = await retry
+    expect(handle.workspacePath).toBe('/tmp/retry')
   }, 400)
 
   it('rejects pending assignTo waiters when the control plane stops', async () => {
