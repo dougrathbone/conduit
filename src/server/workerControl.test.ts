@@ -445,6 +445,27 @@ describe('WorkerControlPlane', () => {
     await expect(pending).rejects.toThrow(/shutting down|stopped/)
   }, 400)
 
+  it('cancelAssignTo rejects the waiter so a late hello does not receive run:assign', async () => {
+    const pending = ctx.controlPlane.assignTo(
+      'fargate-run-1',
+      SPEC,
+      { onEvent: () => {}, onExit: () => {} },
+      2_000
+    )
+    ctx.controlPlane.cancelAssignTo(
+      'fargate-run-1',
+      new Error('Fargate task stopped before the worker connected')
+    )
+    await expect(pending).rejects.toThrow(/stopped before the worker connected/)
+
+    const worker = await connectWorker(ctx, { workerId: 'fargate-run-1' })
+    const assigned = Promise.race([
+      worker.next().then((msg) => msg.type),
+      new Promise<string>((resolve) => setTimeout(() => resolve('none'), 50)),
+    ])
+    await expect(assigned).resolves.toBe('none')
+  }, 400)
+
   it('fails a pending assignment (not yet started) when the worker disconnects', async () => {
     const worker = await connectWorker(ctx)
     const handlePromise = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })

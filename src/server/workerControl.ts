@@ -181,6 +181,19 @@ export class WorkerControlPlane {
     })
   }
 
+  /**
+   * Drop a pending assignTo waiter (and any unstarted assignment) for this
+   * worker so a late hello cannot dispatch a RunSpec the caller already failed.
+   */
+  cancelAssignTo(workerId: string, err: Error): void {
+    this.waiters.get(workerId)?.reject(err)
+    for (const a of [...this.runs.values()]) {
+      if (a.workerId !== workerId || a.started) continue
+      this.sendToWorker(workerId, { type: 'run:cancel', runId: a.spec.runId })
+      a.fail(err)
+    }
+  }
+
   private assignToConnected(
     worker: ConnectedWorker,
     spec: RunSpec,

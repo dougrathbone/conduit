@@ -231,13 +231,27 @@ export class FargateWorkerFactory implements WorkerFactory {
       .finally(() => {
         settled = true
       })
+    // Race losers must not become unhandled rejections when the watcher wins
+    // and cancelAssignTo rejects this promise.
+    void assign.catch(() => {})
 
     const watch = (async () => {
       let delay = WATCH_INITIAL_DELAY_MS
       while (!settled) {
         await sleep(delay)
         if (settled) break
-        const task = await this.describeTask(taskArn)
+        let task: Task | undefined
+        try {
+          task = await this.describeTask(taskArn)
+        } catch (err) {
+          if (settled) break
+          console.error(`[workers/fargate] DescribeTasks failed for ${taskArn} (run ${runId}):`, err)
+          reporter.captureException(err, {
+            tags: { component: 'workers/fargate', op: 'watchTask', runId },
+          })
+          delay = Math.min(delay * 2, BACKOFF_CAP_MS)
+          continue
+        }
         if (settled) break
         if (task?.lastStatus === 'STOPPED') {
           const reason = task.stoppedReason?.trim() || 'STOPPED'
@@ -250,7 +264,13 @@ export class FargateWorkerFactory implements WorkerFactory {
       return new Promise<WorkerHandle>(() => {})
     })()
 
-    return Promise.race([assign, watch])
+    try {
+      return await Promise.race([assign, watch])
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err))
+      this.controlPlane.cancelAssignTo(workerId, error)
+      throw error
+    }
   }
 
   private async describeTask(taskArn: string): Promise<Task | undefined> {

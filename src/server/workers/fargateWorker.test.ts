@@ -74,7 +74,12 @@ function fakeControlPlane(
   over: {
     assignTo?: WorkerControlPlane['assignTo']
   } = {}
-): { plane: WorkerControlPlane; assignTo: ReturnType<typeof vi.fn>; lastSink: () => WorkerEventSink } {
+): {
+  plane: WorkerControlPlane
+  assignTo: ReturnType<typeof vi.fn>
+  cancelAssignTo: ReturnType<typeof vi.fn>
+  lastSink: () => WorkerEventSink
+} {
   let lastSink: WorkerEventSink | undefined
   const assignTo = vi.fn(async (workerId: string, spec: RunSpec, sink: WorkerEventSink) => {
     lastSink = sink
@@ -85,10 +90,12 @@ function fakeControlPlane(
       cancel: vi.fn(async () => {}),
     } satisfies WorkerHandle
   })
+  const cancelAssignTo = vi.fn()
   if (over.assignTo) assignTo.mockImplementation(over.assignTo)
   return {
-    plane: { assignTo } as unknown as WorkerControlPlane,
+    plane: { assignTo, cancelAssignTo } as unknown as WorkerControlPlane,
     assignTo,
+    cancelAssignTo,
     lastSink: () => {
       if (!lastSink) throw new Error('assignTo was not called')
       return lastSink
@@ -256,6 +263,59 @@ describe('FargateWorkerFactory', () => {
       new Promise<string>((resolve) => setTimeout(() => resolve('still-pending'), 200)),
     ])
     await expect(outcome).resolves.toMatch(/CannotPullContainerError|STOPPED|image not found/)
+    expect(cp.cancelAssignTo).toHaveBeenCalledWith(
+      'fargate-run-1',
+      expect.objectContaining({ message: expect.stringMatching(/CannotPullContainerError|STOPPED|image not found/) })
+    )
+  })
+
+  it('does not leave an unhandled rejection when early STOPPED wins the assignTo race', async () => {
+    const rejections: unknown[] = []
+    const onUnhandled = (reason: unknown) => {
+      rejections.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      ecs.describeResponse = {
+        tasks: [{ taskArn: TASK_ARN, lastStatus: 'STOPPED', stoppedReason: 'CannotPullContainerError' }],
+      }
+      let rejectAssign!: (err: Error) => void
+      cp.assignTo.mockImplementation(() => new Promise((_, reject) => { rejectAssign = reject }))
+      await expect(factory.startRun(SPEC, sink)).rejects.toThrow(/CannotPullContainerError|STOPPED/)
+      rejectAssign(new Error('Worker fargate-run-1 did not connect within 5000ms'))
+      await new Promise((r) => setTimeout(r, 20))
+      expect(rejections).toEqual([])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+
+  it('keeps waiting for assignTo when DescribeTasks throws a transient error', async () => {
+    const original = ecs.send.bind(ecs)
+    ecs.send = async (command) => {
+      if (command.constructor.name === 'DescribeTasksCommand') {
+        ecs.calls.push({ name: 'DescribeTasksCommand', input: (command.input ?? {}) as Record<string, unknown> })
+        throw new Error('ThrottlingException')
+      }
+      return original(command)
+    }
+    cp.assignTo.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => {
+            resolve({
+              runId: SPEC.runId,
+              ephemeral: false,
+              workerId: 'fargate-run-1',
+              cancel: vi.fn(async () => {}),
+            } satisfies WorkerHandle)
+          }, 80)
+        })
+    )
+    const handle = await factory.startRun(SPEC, sink)
+    expect(handle.runId).toBe('run-1')
+    expect(ecs.of('DescribeTasksCommand').length).toBeGreaterThan(0)
+    expect(cp.cancelAssignTo).not.toHaveBeenCalled()
   })
 
   it('StopTask on cancel and verifies STOPPED via DescribeTasks', async () => {
