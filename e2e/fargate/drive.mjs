@@ -39,17 +39,21 @@ ws.on('message', (data) => {
       else p.resolve(msg.result)
     }
   } else if (msg.type === 'event') {
+    const payload = msg.payload
+    const runId = payload && typeof payload === 'object' && typeof payload.runId === 'string' ? payload.runId : null
+    if (!runId) return
     if (msg.channel === 'run:statusChange') {
-      const h = statusHistory.get(msg.payload.runId) ?? []
-      h.push(msg.payload)
-      statusHistory.set(msg.payload.runId, h)
-      statusWaiters.get(msg.payload.runId)?.(msg.payload)
+      const h = statusHistory.get(runId) ?? []
+      h.push(payload)
+      statusHistory.set(runId, h)
+      const waiter = statusWaiters.get(runId)
+      if (typeof waiter === 'function') waiter(payload)
     }
     if (msg.channel === 'run:events') {
-      const list = eventsByRun.get(msg.payload.runId) ?? []
-      list.push(...(msg.payload.events ?? []))
-      eventsByRun.set(msg.payload.runId, list)
-      for (const fn of eventListeners) fn(msg.payload)
+      const list = eventsByRun.get(runId) ?? []
+      list.push(...(payload.events ?? []))
+      eventsByRun.set(runId, list)
+      for (const fn of eventListeners) fn(payload)
     }
   }
 })
