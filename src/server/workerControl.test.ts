@@ -429,6 +429,7 @@ describe('WorkerControlPlane', () => {
     const handlePromise = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })
     await worker.next()
     await expect(handlePromise).rejects.toThrow(/did not start run/)
+    expect(await worker.next()).toEqual({ type: 'run:cancel', runId: SPEC.runId })
 
     worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, workspacePath: '/tmp/late' }))
     const retry = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })

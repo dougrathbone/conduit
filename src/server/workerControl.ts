@@ -207,6 +207,7 @@ export class WorkerControlPlane {
           const a = this.runs.get(runId)
           if (a && !a.started) {
             this.ignoreNextStarted.add(runId)
+            this.sendToWorker(a.workerId, { type: 'run:cancel', runId })
             a.fail(
               new Error(
                 `Worker ${a.workerId} did not start run ${runId} within ${this.assignTimeoutMs}ms`
