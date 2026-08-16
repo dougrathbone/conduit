@@ -13,7 +13,7 @@ import { initDb } from '../main/db/index'
 import { listAgents, getAgent, createAgent, updateAgent, deleteAgent } from '../main/db/queries/agents'
 import { listRuns, updateRun, getOrphanedRuns } from '../main/db/queries/runs'
 import { startRunServer, stopRun, setRunFinalizedHook, appendRunLog } from './runner'
-import { getWorkerControlPlane, WorkerControlPlane } from './workerControl'
+import { getWorkerControlPlane, stopWorkerControlPlane, WorkerControlPlane } from './workerControl'
 import { getWorkerFactory } from './workers'
 import { startMemoryMonitor } from './memoryPressure'
 import {
@@ -1021,6 +1021,10 @@ async function start(): Promise<void> {
     repoSyncService.stop()
     dataDirSweeper.stop()
     stopMemoryMonitor()
+    await getWorkerFactory()
+      .shutdown()
+      .catch((err) => console.error('[server] Worker factory shutdown failed:', err))
+    stopWorkerControlPlane()
     // Flush buffered error events so shutdown-time reports are delivered.
     await reporter.flush(2000).catch(() => {})
     // Give in-flight requests up to 10s to finish, then exit.

@@ -33,6 +33,18 @@ export default tseslint.config(
     },
   },
   {
+    // CommonJS e2e helpers (e.g. fake ECS loaded via createRequire).
+    files: ['e2e/**/*.cjs'],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: 'commonjs',
+      globals: globals.node,
+    },
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
+  {
     files: ['**/*.{ts,tsx}'],
     plugins: { 'react-hooks': reactHooks },
     languageOptions: {

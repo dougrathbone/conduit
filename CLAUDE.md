@@ -403,8 +403,9 @@ npx tsc --noEmit --project tsconfig.server.json # Server only
 npm run build                             # Full production build
 npm run e2e:local   # E2E: in-process factory (needs build + Postgres via npm run db:up)
 npm run e2e:remote  # E2E: remote factory incl. worker-death + reconnect (same reqs)
+npm run e2e:fargate # E2E: Fargate factory + fake ECS (same reqs; no real AWS)
 ```
 
 E2E suites live in `e2e/` — `e2e/lib/` holds the shared stub `claude` CLI,
 WS driver (`EXPECT_WORKER_KIND`, `E2E_MODE=quick|full`), and process/db
-harness; `e2e/local/` and `e2e/remote/` are the orchestrators.
+harness; `e2e/local/`, `e2e/remote/`, and `e2e/fargate/` are the orchestrators.

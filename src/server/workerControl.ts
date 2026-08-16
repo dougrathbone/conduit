@@ -16,26 +16,42 @@ import { WebSocketServer, WebSocket } from 'ws'
 import type { IncomingMessage } from 'http'
 import type { Duplex } from 'stream'
 import type { RunSpec, WorkerEventSink, WorkerHandle } from '../shared/worker'
-import type {
-  ServerToWorkerMessage,
-  WorkerCapabilities,
-  WorkerToServerMessage,
+import type { ServerToWorkerMessage, WorkerCapabilities } from '../shared/workerControl'
+import {
+  WORKER_LEASE_MS,
+  WORKER_MAX_MESSAGE_BYTES,
+  parseWorkerToServerMessage,
 } from '../shared/workerControl'
-import { WORKER_LEASE_MS } from '../shared/workerControl'
 import { reporter } from './observability'
 
+const DEFAULT_ASSIGN_TIMEOUT_MS = 120_000
+const DEFAULT_CONNECT_TIMEOUT_MS = 600_000
+
+function parsePositiveMs(raw: string | undefined, fallback: number): number {
+  const n = Number(raw)
+  return Number.isFinite(n) && n > 0 ? n : fallback
+}
+
 /** How long a run:assign waits for the worker's run:started before failing. */
-const ASSIGN_TIMEOUT_MS = (() => {
-  const n = Number(process.env.CONDUIT_WORKER_ASSIGN_TIMEOUT_MS)
-  return Number.isFinite(n) && n > 0 ? n : 120_000
-})()
+export function resolveAssignTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  return parsePositiveMs(env.CONDUIT_WORKER_ASSIGN_TIMEOUT_MS, DEFAULT_ASSIGN_TIMEOUT_MS)
+}
 
 /** Default wait for a named worker to connect (Job/Task-per-run factories:
  *  pod/task startup + image pull can take minutes). */
-export const WORKER_CONNECT_TIMEOUT_MS = (() => {
-  const n = Number(process.env.CONDUIT_WORKER_CONNECT_TIMEOUT_MS)
-  return Number.isFinite(n) && n > 0 ? n : 600_000
-})()
+export function resolveConnectTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  return parsePositiveMs(env.CONDUIT_WORKER_CONNECT_TIMEOUT_MS, DEFAULT_CONNECT_TIMEOUT_MS)
+}
+
+/** Import-time default from process.env — factories that don't pass waitMs. */
+export const WORKER_CONNECT_TIMEOUT_MS = resolveConnectTimeoutMs()
+
+/** Optional constructor injection for timeouts and frame limits. */
+export interface WorkerControlPlaneOptions {
+  assignTimeoutMs?: number
+  connectTimeoutMs?: number
+  maxMessageBytes?: number
+}
 
 interface ConnectedWorker {
   workerId: string
@@ -50,11 +66,23 @@ interface Assignment {
   spec: RunSpec
   sink: WorkerEventSink
   workerId: string
+  /** Socket that received run:assign — the only session allowed to report this run. */
+  ws: WebSocket
+  /** Monotonic id so a timed-out assignment's late run:started cannot settle a retry. */
+  generation: number
+  /** Token sent on run:assign and required on run:started after a retry. */
+  assignId: string
   workspacePath?: string
   started: boolean
   settle: (handle: WorkerHandle) => void
   fail: (err: Error) => void
   timeout: NodeJS.Timeout
+}
+
+interface StartedSuppression {
+  runId: string
+  generation: number
+  ws: WebSocket
 }
 
 export class WorkerControlPlane {
@@ -64,11 +92,24 @@ export class WorkerControlPlane {
   /** Named workers that Job/Task-per-run factories are waiting to connect. */
   private waiters = new Map<
     string,
-    { resolve: (worker: ConnectedWorker) => void; timer: NodeJS.Timeout }
+    {
+      resolve: (worker: ConnectedWorker) => void
+      reject: (err: Error) => void
+      timer: NodeJS.Timeout
+    }
   >()
   private leaseTimer: NodeJS.Timeout
+  private readonly assignTimeoutMs: number
+  private readonly connectTimeoutMs: number
+  private readonly maxMessageBytes: number
+  private nextAssignmentGeneration = 1
+  /** Timed-out assignment identities; a retry on a new generation is not suppressed. */
+  private ignoreNextStarted = new Set<StartedSuppression>()
 
-  constructor() {
+  constructor(options?: WorkerControlPlaneOptions) {
+    this.assignTimeoutMs = options?.assignTimeoutMs ?? resolveAssignTimeoutMs()
+    this.connectTimeoutMs = options?.connectTimeoutMs ?? resolveConnectTimeoutMs()
+    this.maxMessageBytes = options?.maxMessageBytes ?? WORKER_MAX_MESSAGE_BYTES
     this.wss.on('connection', (ws) => this.onConnection(ws))
     this.leaseTimer = setInterval(() => this.checkLeases(), WORKER_LEASE_MS / 3)
     this.leaseTimer.unref()
@@ -127,24 +168,43 @@ export class WorkerControlPlane {
     workerId: string,
     spec: RunSpec,
     sink: WorkerEventSink,
-    waitMs: number = WORKER_CONNECT_TIMEOUT_MS
+    waitMs?: number
   ): Promise<WorkerHandle> {
+    const timeoutMs = waitMs ?? this.connectTimeoutMs
     const existing = this.workers.get(workerId)
     if (existing) return this.assignToConnected(existing, spec, sink)
     return new Promise<WorkerHandle>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.waiters.delete(workerId)
-        reject(new Error(`Worker ${workerId} did not connect within ${waitMs}ms`))
-      }, waitMs)
+        reject(new Error(`Worker ${workerId} did not connect within ${timeoutMs}ms`))
+      }, timeoutMs)
       this.waiters.set(workerId, {
         resolve: (worker) => {
           clearTimeout(timer)
           this.waiters.delete(workerId)
           resolve(this.assignToConnected(worker, spec, sink))
         },
+        reject: (err) => {
+          clearTimeout(timer)
+          this.waiters.delete(workerId)
+          reject(err)
+        },
         timer,
       })
     })
+  }
+
+  /**
+   * Drop a pending assignTo waiter (and any unstarted assignment) for this
+   * worker so a late hello cannot dispatch a RunSpec the caller already failed.
+   */
+  cancelAssignTo(workerId: string, err: Error): void {
+    this.waiters.get(workerId)?.reject(err)
+    for (const a of [...this.runs.values()]) {
+      if (a.workerId !== workerId || a.started) continue
+      this.sendOn(a.ws, { type: 'run:cancel', runId: a.spec.runId })
+      a.fail(err)
+    }
   }
 
   private assignToConnected(
@@ -154,10 +214,15 @@ export class WorkerControlPlane {
   ): Promise<WorkerHandle> {
     const runId = spec.runId
     return new Promise<WorkerHandle>((resolve, reject) => {
+      const generation = this.nextAssignmentGeneration++
+      const assignId = `${generation}`
       const assignment: Assignment = {
         spec,
         sink,
         workerId: worker.workerId,
+        ws: worker.ws,
+        generation,
+        assignId,
         started: false,
         settle: (handle) => {
           assignment.started = true
@@ -171,14 +236,19 @@ export class WorkerControlPlane {
         },
         timeout: setTimeout(() => {
           const a = this.runs.get(runId)
-          if (a && !a.started) {
-            this.sendToWorker(a.workerId, { type: 'run:cancel', runId })
-            a.fail(new Error(`Worker ${a.workerId} did not start run ${runId} within ${ASSIGN_TIMEOUT_MS}ms`))
+          if (a && !a.started && a.generation === assignment.generation) {
+            this.ignoreNextStarted.add({ runId, generation: a.generation, ws: a.ws })
+            this.sendOn(a.ws, { type: 'run:cancel', runId })
+            a.fail(
+              new Error(
+                `Worker ${a.workerId} did not start run ${runId} within ${this.assignTimeoutMs}ms`
+              )
+            )
           }
-        }, ASSIGN_TIMEOUT_MS),
+        }, this.assignTimeoutMs),
       }
       this.runs.set(runId, assignment)
-      this.sendToWorker(worker.workerId, { type: 'run:assign', spec })
+      this.sendOn(worker.ws, { type: 'run:assign', spec, assignId })
     })
   }
 
@@ -198,10 +268,9 @@ export class WorkerControlPlane {
     return best
   }
 
-  private sendToWorker(workerId: string, msg: ServerToWorkerMessage): void {
-    const w = this.workers.get(workerId)
-    if (w && w.ws.readyState === WebSocket.OPEN) {
-      w.ws.send(JSON.stringify(msg))
+  private sendOn(ws: WebSocket, msg: ServerToWorkerMessage): void {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(msg))
     }
   }
 
@@ -215,28 +284,72 @@ export class WorkerControlPlane {
       ephemeral: false,
       workerId: assignment.workerId,
       cancel: async () => {
-        this.sendToWorker(assignment.workerId, { type: 'run:cancel', runId })
+        this.sendOn(assignment.ws, { type: 'run:cancel', runId })
       },
     }
   }
 
   private onConnection(ws: WebSocket): void {
     let workerId: string | undefined
+    let closed = false
+    let protocolClose = false
+
+    const rejectSocket = (code: number, reason: string): void => {
+      if (closed) return
+      closed = true
+      protocolClose = true
+      try {
+        ws.close(code, reason)
+      } catch {
+        // already closing
+      }
+    }
 
     ws.on('message', (data) => {
-      let msg: WorkerToServerMessage
-      try {
-        msg = JSON.parse(data.toString()) as WorkerToServerMessage
-      } catch {
+      if (closed) return
+      if (rawMessageBytes(data) > this.maxMessageBytes) {
+        rejectSocket(1009, 'message too large')
         return
       }
+      const parsed = parseWorkerToServerMessage(data.toString())
+      if (!parsed.ok) {
+        rejectSocket(parsed.error === 'oversized-batch' ? 1009 : 1008, parsed.error)
+        return
+      }
+      const msg = parsed.message
+      if (!workerId && msg.type !== 'worker:hello') {
+        rejectSocket(1008, 'hello required')
+        return
+      }
+
       switch (msg.type) {
         case 'worker:hello': {
-          workerId = msg.workerId
-          const existing = this.workers.get(workerId)
+          if (workerId && msg.workerId !== workerId) {
+            console.warn(
+              `[worker-control] Ignoring identity change on socket ${workerId} → ${msg.workerId}`
+            )
+            break
+          }
+          if (workerId && msg.workerId === workerId) {
+            const current = this.workers.get(workerId)
+            if (current && current.ws === ws) {
+              current.capabilities = msg.capabilities
+              current.lastHeartbeat = Date.now()
+              current.reportedRunIds = new Set(msg.activeRunIds)
+            }
+            break
+          }
+          const existing = this.workers.get(msg.workerId)
           if (existing && existing.ws !== ws) {
+            if (this.hasAssignmentsOn(existing.ws)) {
+              // One-shot / in-flight: the assigning socket keeps ownership.
+              // A duplicate must not inherit or inject into those assignments.
+              rejectSocket(4002, 'duplicate identity with active assignment')
+              break
+            }
             existing.ws.close(4000, 'replaced by new connection')
           }
+          workerId = msg.workerId
           this.workers.set(workerId, {
             workerId,
             ws,
@@ -253,7 +366,7 @@ export class WorkerControlPlane {
           break
         }
         case 'worker:heartbeat': {
-          const w = this.workers.get(msg.workerId)
+          const w = workerId ? this.workers.get(workerId) : undefined
           if (w && w.ws === ws) {
             w.lastHeartbeat = Date.now()
             w.reportedRunIds = new Set(msg.activeRunIds)
@@ -261,22 +374,24 @@ export class WorkerControlPlane {
           break
         }
         case 'run:started': {
-          const a = this.runs.get(msg.runId)
-          if (a && !a.started) {
-            a.workspacePath = msg.workspacePath
-            a.settle(this.buildHandle(msg.runId, a))
-          }
+          const a = this.ownedAssignment(msg.runId, ws)
+          if (!a || a.started) break
+          if (msg.assignId && msg.assignId !== a.assignId) break
+          if (!msg.assignId && this.hasStaleSuppression(msg.runId, ws, a.generation)) break
+          if (this.consumeIgnoredStarted(msg.runId, ws, a.generation)) break
+          a.workspacePath = msg.workspacePath
+          a.settle(this.buildHandle(msg.runId, a))
           break
         }
         case 'run:event': {
-          const a = this.runs.get(msg.runId)
+          const a = this.ownedAssignment(msg.runId, ws)
           if (a) {
             for (const ev of msg.events) a.sink.onEvent(ev)
           }
           break
         }
         case 'run:exit': {
-          const a = this.runs.get(msg.runId)
+          const a = this.ownedAssignment(msg.runId, ws)
           if (!a) break
           if (!a.started) {
             // Execution never went live (prep failed on the worker) — let the
@@ -298,14 +413,52 @@ export class WorkerControlPlane {
     })
 
     ws.on('close', () => {
+      closed = true
       if (!workerId) return
       const w = this.workers.get(workerId)
       if (w?.ws === ws) {
         this.workers.delete(workerId)
-        console.warn(`[worker-control] Worker disconnected: ${workerId}`)
-        this.failRunsOfWorker(workerId, 'disconnected')
+        if (protocolClose) {
+          this.failRunsOfWorker(workerId, 'protocol violation', { systemEvent: false, ws })
+        } else {
+          console.warn(`[worker-control] Worker disconnected: ${workerId}`)
+          this.failRunsOfWorker(workerId, 'disconnected', { ws })
+        }
       }
     })
+  }
+
+  /** Assignment exists and was dispatched on this exact socket. */
+  private ownedAssignment(runId: string, socket: WebSocket): Assignment | undefined {
+    const a = this.runs.get(runId)
+    if (!a || a.ws !== socket) return undefined
+    return a
+  }
+
+  private hasAssignmentsOn(ws: WebSocket): boolean {
+    for (const a of this.runs.values()) {
+      if (a.ws === ws) return true
+    }
+    return false
+  }
+
+  /** True when a prior attempt on this socket timed out (different generation). */
+  private hasStaleSuppression(runId: string, ws: WebSocket, generation: number): boolean {
+    for (const entry of this.ignoreNextStarted) {
+      if (entry.runId === runId && entry.ws === ws && entry.generation !== generation) return true
+    }
+    return false
+  }
+
+  /** True when this frame belongs to a timed-out assignment generation on this socket. */
+  private consumeIgnoredStarted(runId: string, ws: WebSocket, generation?: number): boolean {
+    for (const entry of this.ignoreNextStarted) {
+      if (entry.runId === runId && entry.ws === ws && entry.generation === generation) {
+        this.ignoreNextStarted.delete(entry)
+        return true
+      }
+    }
+    return false
   }
 
   /** Lease enforcement: a worker silent for longer than the lease is dead. */
@@ -320,7 +473,7 @@ export class WorkerControlPlane {
           // already closing
         }
         console.warn(`[worker-control] Worker lease expired: ${w.workerId}`)
-        this.failRunsOfWorker(w.workerId, 'lost contact (lease expired)')
+        this.failRunsOfWorker(w.workerId, 'lost contact (lease expired)', { ws: w.ws })
       }
     }
   }
@@ -330,9 +483,15 @@ export class WorkerControlPlane {
    * orchestrator finalizes them (log, broadcast, publish, cleanup) instead of
    * leaving them "running" forever. Pending assignments reject instead.
    */
-  private failRunsOfWorker(workerId: string, reason: string): void {
+  private failRunsOfWorker(
+    workerId: string,
+    reason: string,
+    opts: { systemEvent?: boolean; ws?: WebSocket } = {}
+  ): void {
+    const systemEvent = opts.systemEvent !== false
     for (const [runId, a] of [...this.runs.entries()]) {
       if (a.workerId !== workerId) continue
+      if (opts.ws && a.ws !== opts.ws) continue
       const err = new Error(`Worker ${workerId} ${reason}`)
       reporter.captureMessage(err.message, 'warning', {
         tags: { component: 'worker-control', workerId, runId },
@@ -342,11 +501,13 @@ export class WorkerControlPlane {
       } else {
         clearTimeout(a.timeout)
         this.runs.delete(runId)
-        a.sink.onEvent({
-          kind: 'raw',
-          stream: 'system',
-          text: `[Conduit: worker ${workerId} ${reason} — failing this run.]`,
-        })
+        if (systemEvent) {
+          a.sink.onEvent({
+            kind: 'raw',
+            stream: 'system',
+            text: `[Conduit: worker ${workerId} ${reason} — failing this run.]`,
+          })
+        }
         a.sink.onExit('failed', null)
       }
     }
@@ -354,6 +515,24 @@ export class WorkerControlPlane {
 
   stop(): void {
     clearInterval(this.leaseTimer)
+    for (const waiter of [...this.waiters.values()]) {
+      waiter.reject(new Error('Worker control plane is shutting down'))
+    }
+    this.waiters.clear()
+    for (const a of [...this.runs.values()]) {
+      if (!a.started) {
+        a.fail(new Error('Worker control plane is shutting down'))
+      } else {
+        clearTimeout(a.timeout)
+        this.runs.delete(a.spec.runId)
+        a.sink.onEvent({
+          kind: 'raw',
+          stream: 'system',
+          text: `[Conduit: worker ${a.workerId} shutting down — failing this run.]`,
+        })
+        a.sink.onExit('failed', null)
+      }
+    }
     for (const w of this.workers.values()) {
       try {
         w.ws.close(1001, 'server shutting down')
@@ -362,7 +541,15 @@ export class WorkerControlPlane {
       }
     }
     this.workers.clear()
+    this.ignoreNextStarted.clear()
   }
+}
+
+function rawMessageBytes(data: Buffer | ArrayBuffer | Buffer[] | string): number {
+  if (typeof data === 'string') return Buffer.byteLength(data)
+  if (Buffer.isBuffer(data)) return data.length
+  if (Array.isArray(data)) return data.reduce((n, chunk) => n + chunk.length, 0)
+  return data.byteLength
 }
 
 let controlPlane: WorkerControlPlane | null = null
@@ -372,4 +559,9 @@ let controlPlane: WorkerControlPlane | null = null
 export function getWorkerControlPlane(): WorkerControlPlane {
   if (!controlPlane) controlPlane = new WorkerControlPlane()
   return controlPlane
+}
+
+/** Best-effort teardown of the process-wide plane (no-op if never created). */
+export function stopWorkerControlPlane(): void {
+  controlPlane?.stop()
 }

@@ -6,29 +6,75 @@
  * overrides (CONDUIT_WORKER_ID=fargate-<runId>, CONDUIT_SERVER_URL). The task
  * connects back to this server's /ws/worker control plane and the factory
  * dispatches the RunSpec to that exact worker via assignTo. When the run exits
- * (or is cancelled/fails) the task is stopped.
+ * (or is cancelled/fails) the task is stopped and DescribeTasks confirms
+ * STOPPED. Factory shutdown stops every in-flight task the same way.
  *
  * CONDUIT_WORKER_TOKEN: prefer baking it into the task definition as a
  * Secrets Manager secret (task def `secrets`), so it never appears in
  * DescribeTask output. CONDUIT_FARGATE_WORKER_TOKEN is available as a plain
  * env override for dev, but leaks into the ECS API — do not use in production.
  *
+ * Worker process mode is also a task-definition concern, not a RunTask
+ * override: the shared image defaults to CONDUIT_PROCESS_MODE=server, so the
+ * worker task def must set CONDUIT_PROCESS_MODE=worker and
+ * CONDUIT_WORKER_ONE_SHOT=true. Overrides stay limited to server URL, worker
+ * id, and the optional dev token so they match the Fargate contracts.
+ *
  * Required env: CONDUIT_FARGATE_CLUSTER, CONDUIT_FARGATE_TASK_DEFINITION,
  * CONDUIT_FARGATE_SUBNETS (comma-separated), CONDUIT_SERVER_URL (or
  * CONDUIT_BASE_URL). AWS credentials/region come from the standard SDK chain
- * (env, shared config, instance/pod role).
+ * (env, shared config, instance/pod role). Optional CONDUIT_FARGATE_ROLE_ARN
+ * is assumed via STS for ECS API calls.
  * Optional env: CONDUIT_FARGATE_CONTAINER_NAME (default "worker"),
  * CONDUIT_FARGATE_SECURITY_GROUPS (comma-separated),
  * CONDUIT_FARGATE_ASSIGN_PUBLIC_IP (default "ENABLED" — needed for the task to
  * reach the internet without NAT), CONDUIT_FARGATE_PLATFORM_VERSION,
- * CONDUIT_WORKER_CONNECT_TIMEOUT_MS (default 600000).
+ * CONDUIT_WORKER_CONNECT_TIMEOUT_MS (default 600000),
+ * CONDUIT_WORKER_ASSIGN_TIMEOUT_MS (default 120000).
+ *
+ * E2E-only: CONDUIT_FARGATE_E2E_FAKE_ECS may point at a module under e2e/
+ * that exports createFakeEcsClient(). Requires CONDUIT_E2E=1 and is forbidden
+ * when NODE_ENV=production.
  */
-import { ECSClient, RunTaskCommand, StopTaskCommand } from '@aws-sdk/client-ecs'
+import {
+  DescribeTasksCommand,
+  ECSClient,
+  RunTaskCommand,
+  StopTaskCommand,
+  type ECSClientConfig,
+  type RunTaskCommandInput,
+  type Task,
+} from '@aws-sdk/client-ecs'
+import { createRequire } from 'node:module'
+import * as path from 'node:path'
+import { fromTemporaryCredentials } from '@aws-sdk/credential-providers'
 import type { RunSpec, WorkerEventSink, WorkerFactory, WorkerHandle } from '../../shared/worker'
 import type { WorkerControlPlane } from '../workerControl'
-import { WORKER_CONNECT_TIMEOUT_MS } from '../workerControl'
+import { resolveAssignTimeoutMs, resolveConnectTimeoutMs } from '../workerControl'
 import { resolveWorkerServerUrl } from './cloudConfig'
 import { reporter } from '../observability'
+
+/** Compatible Fargate allocation: 2 vCPU / 8 GiB. Enforced on every RunTask. */
+export const FARGATE_WORKER_CPU = '2048'
+export const FARGATE_WORKER_MEMORY_MIB = '8192'
+
+const STOP_VERIFY_TIMEOUT_MS = 15_000
+const STOP_ATTEMPTS = 3
+const STOP_BACKOFF_MS = 50
+const UNCLEAN_RETRY_MS = 30_000
+const SHUTDOWN_DEADLINE_MS = 8_000
+const WATCH_INITIAL_DELAY_MS = 25
+const BACKOFF_CAP_MS = 2_000
+
+/** Test-visible stop/verify policy. Production uses the constants above. */
+export interface FargateStopPolicy {
+  stopAttempts?: number
+  stopVerifyTimeoutMs?: number
+  stopBackoffMs?: number
+  /** 0 disables the periodic unclean-task retry timer. */
+  uncleanRetryMs?: number
+  shutdownDeadlineMs?: number
+}
 
 export interface FargateWorkerConfig {
   cluster: string
@@ -41,6 +87,21 @@ export interface FargateWorkerConfig {
   serverUrl: string
   workerToken?: string
   connectTimeoutMs: number
+  assignTimeoutMs?: number
+  roleArn?: string
+}
+
+/** ECS client config: default SDK chain, or STS assume-role when roleArn is set. */
+export function buildFargateEcsClientConfig(config: FargateWorkerConfig): ECSClientConfig {
+  if (!config.roleArn) return {}
+  return {
+    credentials: fromTemporaryCredentials({
+      params: {
+        RoleArn: config.roleArn,
+        RoleSessionName: 'conduit-fargate-launcher',
+      },
+    }),
+  }
 }
 
 export function resolveFargateConfig(env: NodeJS.ProcessEnv = process.env): FargateWorkerConfig {
@@ -65,56 +126,87 @@ export function resolveFargateConfig(env: NodeJS.ProcessEnv = process.env): Farg
     platformVersion: env.CONDUIT_FARGATE_PLATFORM_VERSION?.trim() || undefined,
     serverUrl: resolveWorkerServerUrl(env),
     workerToken: env.CONDUIT_FARGATE_WORKER_TOKEN?.trim() || undefined,
-    connectTimeoutMs: WORKER_CONNECT_TIMEOUT_MS,
+    connectTimeoutMs: resolveConnectTimeoutMs(env),
+    assignTimeoutMs: resolveAssignTimeoutMs(env),
+    roleArn: env.CONDUIT_FARGATE_ROLE_ARN?.trim() || undefined,
+  }
+}
+
+/** Pure RunTask payload: startedBy, tags, 2 vCPU / 8 GiB, no secrets by default. */
+export function buildFargateRunTaskInput(config: FargateWorkerConfig, spec: RunSpec): RunTaskCommandInput {
+  const workerId = `fargate-${spec.runId}`
+  const environment = [
+    { name: 'CONDUIT_SERVER_URL', value: config.serverUrl },
+    { name: 'CONDUIT_WORKER_ID', value: workerId },
+    ...(config.workerToken ? [{ name: 'CONDUIT_WORKER_TOKEN', value: config.workerToken }] : []),
+  ]
+  return {
+    cluster: config.cluster,
+    taskDefinition: config.taskDefinition,
+    launchType: 'FARGATE',
+    startedBy: 'conduit',
+    platformVersion: config.platformVersion,
+    networkConfiguration: {
+      awsvpcConfiguration: {
+        subnets: config.subnets,
+        securityGroups: config.securityGroups.length > 0 ? config.securityGroups : undefined,
+        assignPublicIp: config.assignPublicIp,
+      },
+    },
+    overrides: {
+      cpu: FARGATE_WORKER_CPU,
+      memory: FARGATE_WORKER_MEMORY_MIB,
+      containerOverrides: [{ name: config.containerName, environment }],
+    },
+    tags: [
+      { key: 'conduit:run-id', value: spec.runId },
+      { key: 'conduit:agent-id', value: spec.agentId },
+      { key: 'managed-by', value: 'conduit' },
+    ],
   }
 }
 
 export class FargateWorkerFactory implements WorkerFactory {
   readonly kind = 'fargate'
+  private readonly ecs: ECSClient
+  /** In-flight runId → task ARN. Removed only after STOPPED / not-found. */
+  private readonly active = new Map<string, string>()
+  /** In-flight stop+verify promises, keyed by task ARN (idempotent). */
+  private readonly stopping = new Map<string, Promise<void>>()
+  private readonly stopAttempts: number
+  private readonly stopVerifyTimeoutMs: number
+  private readonly stopBackoffMs: number
+  private readonly uncleanRetryMs: number
+  private readonly shutdownDeadlineMs: number
+  /** Tasks whose last stop attempt failed; retried by the periodic timer. */
+  private readonly failedStops = new Map<string, { taskArn: string; reason: string }>()
+  private uncleanTimer?: NodeJS.Timeout
 
   constructor(
     private controlPlane: WorkerControlPlane,
     private config: FargateWorkerConfig,
-    private ecs: ECSClient = new ECSClient({})
-  ) {}
+    ecs?: ECSClient,
+    stopPolicy?: FargateStopPolicy
+  ) {
+    this.ecs = ecs ?? tryLoadE2eFakeEcsClient() ?? new ECSClient(buildFargateEcsClientConfig(config))
+    this.stopAttempts = stopPolicy?.stopAttempts ?? STOP_ATTEMPTS
+    this.stopVerifyTimeoutMs = stopPolicy?.stopVerifyTimeoutMs ?? STOP_VERIFY_TIMEOUT_MS
+    this.stopBackoffMs = stopPolicy?.stopBackoffMs ?? STOP_BACKOFF_MS
+    this.uncleanRetryMs = stopPolicy?.uncleanRetryMs ?? UNCLEAN_RETRY_MS
+    this.shutdownDeadlineMs = stopPolicy?.shutdownDeadlineMs ?? SHUTDOWN_DEADLINE_MS
+    if (this.uncleanRetryMs > 0) {
+      this.uncleanTimer = setInterval(() => this.retryFailedStops(), this.uncleanRetryMs)
+      this.uncleanTimer.unref()
+    }
+  }
 
   async startRun(spec: RunSpec, sink: WorkerEventSink): Promise<WorkerHandle> {
     const { runId } = spec
     const workerId = `fargate-${runId}`
 
-    const environment = [
-      { name: 'CONDUIT_SERVER_URL', value: this.config.serverUrl },
-      { name: 'CONDUIT_WORKER_ID', value: workerId },
-      ...(this.config.workerToken
-        ? [{ name: 'CONDUIT_WORKER_TOKEN', value: this.config.workerToken }]
-        : []),
-    ]
-
     let taskArn: string
     try {
-      const out = await this.ecs.send(
-        new RunTaskCommand({
-          cluster: this.config.cluster,
-          taskDefinition: this.config.taskDefinition,
-          launchType: 'FARGATE',
-          platformVersion: this.config.platformVersion,
-          networkConfiguration: {
-            awsvpcConfiguration: {
-              subnets: this.config.subnets,
-              securityGroups: this.config.securityGroups.length > 0 ? this.config.securityGroups : undefined,
-              assignPublicIp: this.config.assignPublicIp,
-            },
-          },
-          overrides: {
-            containerOverrides: [{ name: this.config.containerName, environment }],
-          },
-          tags: [
-            { key: 'conduit:run-id', value: runId },
-            { key: 'conduit:agent-id', value: spec.agentId },
-            { key: 'managed-by', value: 'conduit' },
-          ],
-        })
-      )
+      const out = await this.ecs.send(new RunTaskCommand(buildFargateRunTaskInput(this.config, spec)))
       const failures = out.failures ?? []
       const arn = out.tasks?.[0]?.taskArn
       if (!arn) {
@@ -133,17 +225,19 @@ export class FargateWorkerFactory implements WorkerFactory {
       )
     }
 
+    this.active.set(runId, taskArn)
+
     const wrappedSink: WorkerEventSink = {
       onEvent: (ev) => sink.onEvent(ev),
       onError: (err) => sink.onError?.(err),
       onExit: (status, exitCode) => {
         sink.onExit(status, exitCode)
-        void this.stopTask(taskArn, runId, `run exited (${status})`)
+        void this.stopTask(taskArn, runId, `run exited (${status})`).catch(() => {})
       },
     }
 
     try {
-      const handle = await this.controlPlane.assignTo(workerId, spec, wrappedSink, this.config.connectTimeoutMs)
+      const handle = await this.assignWhenConnected(workerId, spec, wrappedSink, taskArn, runId)
       return {
         ...handle,
         cancel: async () => {
@@ -152,32 +246,257 @@ export class FargateWorkerFactory implements WorkerFactory {
         },
       }
     } catch (err) {
-      await this.stopTask(taskArn, runId, 'assignment failed')
+      try {
+        await this.stopTask(taskArn, runId, 'assignment failed')
+      } catch (stopErr) {
+        console.error(`[workers/fargate] Stop after assignment failure also failed (run ${runId}):`, stopErr)
+      }
       throw err
     }
   }
 
-  private async stopTask(taskArn: string, runId: string, reason: string): Promise<void> {
-    try {
-      await this.ecs.send(
-        new StopTaskCommand({
-          cluster: this.config.cluster,
-          task: taskArn,
-          reason: `Conduit run ${runId}: ${reason}`.slice(0, 255),
-        })
-      )
-    } catch (err) {
-      // Stopping an already-stopped task is benign; log other failures since
-      // they leave billable tasks running.
-      console.error(`[workers/fargate] Failed to stop task ${taskArn} (run ${runId}):`, err)
-      reporter.captureException(err, {
-        tags: { component: 'workers/fargate', op: 'stopTask', runId },
+  /**
+   * Wait for assignTo, but fail fast if the task dies before the worker dials in
+   * (image pull errors, capacity, crash-loop). Watcher yields first so a
+   * promptly-settling assignTo wins without an extra DescribeTasks.
+   */
+  private async assignWhenConnected(
+    workerId: string,
+    spec: RunSpec,
+    sink: WorkerEventSink,
+    taskArn: string,
+    runId: string
+  ): Promise<WorkerHandle> {
+    let settled = false
+    const assign = this.controlPlane
+      .assignTo(workerId, spec, sink, this.config.connectTimeoutMs)
+      .finally(() => {
+        settled = true
       })
+    // Race losers must not become unhandled rejections when the watcher wins
+    // and cancelAssignTo rejects this promise.
+    void assign.catch(() => {})
+
+    const watch = (async () => {
+      let delay = WATCH_INITIAL_DELAY_MS
+      while (!settled) {
+        await sleep(delay)
+        if (settled) break
+        let task: Task | undefined
+        try {
+          task = await this.describeTask(taskArn)
+        } catch (err) {
+          if (settled) break
+          console.error(`[workers/fargate] DescribeTasks failed for ${taskArn} (run ${runId}):`, err)
+          reporter.captureException(err, {
+            tags: { component: 'workers/fargate', op: 'watchTask', runId },
+          })
+          delay = Math.min(delay * 2, BACKOFF_CAP_MS)
+          continue
+        }
+        if (settled) break
+        if (task?.lastStatus === 'STOPPED') {
+          const reason = task.stoppedReason?.trim() || 'STOPPED'
+          throw new Error(
+            `Fargate task for run ${runId} stopped before the worker connected: ${reason}`
+          )
+        }
+        delay = Math.min(delay * 2, BACKOFF_CAP_MS)
+      }
+      return new Promise<WorkerHandle>(() => {})
+    })()
+
+    try {
+      return await Promise.race([assign, watch])
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err))
+      this.controlPlane.cancelAssignTo(workerId, error)
+      throw error
+    }
+  }
+
+  private async describeTask(taskArn: string): Promise<Task | undefined> {
+    const out = await this.ecs.send(
+      new DescribeTasksCommand({
+        cluster: this.config.cluster,
+        tasks: [taskArn],
+      })
+    )
+    return out.tasks?.[0]
+  }
+
+  private async stopTask(taskArn: string, runId: string, reason: string): Promise<void> {
+    const existing = this.stopping.get(taskArn)
+    if (existing) return existing
+
+    const work = this.stopTaskWithRetry(taskArn, runId, reason).finally(() => {
+      this.stopping.delete(taskArn)
+    })
+    this.stopping.set(taskArn, work)
+    return work
+  }
+
+  private async stopTaskWithRetry(taskArn: string, runId: string, reason: string): Promise<void> {
+    let delay = this.stopBackoffMs
+    let lastError: unknown
+    for (let attempt = 1; attempt <= this.stopAttempts; attempt++) {
+      try {
+        await this.ecs.send(
+          new StopTaskCommand({
+            cluster: this.config.cluster,
+            task: taskArn,
+            reason: `Conduit run ${runId}: ${reason}`.slice(0, 255),
+          })
+        )
+      } catch (err) {
+        if (isTaskGone(err)) {
+          this.active.delete(runId)
+          this.failedStops.delete(runId)
+          return
+        }
+        lastError = err
+        console.error(
+          `[workers/fargate] Failed to stop task ${taskArn} (run ${runId}, attempt ${attempt}/${this.stopAttempts}):`,
+          err
+        )
+        reporter.captureException(err, {
+          tags: { component: 'workers/fargate', op: 'stopTask', runId },
+          extra: { taskArn, attempt, stopAttempts: this.stopAttempts },
+        })
+        if (attempt < this.stopAttempts) {
+          await sleep(delay)
+          delay = Math.min(delay * 2, BACKOFF_CAP_MS)
+        }
+        continue
+      }
+
+      if (await this.waitUntilStopped(taskArn, runId)) {
+        this.active.delete(runId)
+        this.failedStops.delete(runId)
+        return
+      }
+      lastError = new Error(`Task ${taskArn} did not reach STOPPED`)
+      if (attempt < this.stopAttempts) {
+        await sleep(delay)
+        delay = Math.min(delay * 2, BACKOFF_CAP_MS)
+      }
+    }
+
+    const message =
+      `[workers/fargate] Giving up stopping task ${taskArn} (run ${runId}) after ` +
+      `${this.stopAttempts} attempt(s); remaining tracked for later retry`
+    console.error(message, lastError)
+    reporter.captureMessage(message, 'error', {
+      tags: { component: 'workers/fargate', op: 'stopTask', runId },
+      extra: { taskArn, attempts: this.stopAttempts },
+    })
+    this.failedStops.set(runId, { taskArn, reason })
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`Failed to stop Fargate task ${taskArn} for run ${runId}`)
+  }
+
+  private retryFailedStops(): void {
+    for (const [runId, { taskArn, reason }] of [...this.failedStops]) {
+      if (this.stopping.has(taskArn)) continue
+      void this.stopTask(taskArn, runId, reason).catch(() => {})
+    }
+  }
+
+  private async waitUntilStopped(taskArn: string, runId: string): Promise<boolean> {
+    let delay = 50
+    const deadline = Date.now() + this.stopVerifyTimeoutMs
+    for (;;) {
+      try {
+        const task = await this.describeTask(taskArn)
+        if (!task || task.lastStatus === 'STOPPED') return true
+      } catch (err) {
+        if (isTaskGone(err)) return true
+        console.error(`[workers/fargate] Failed to describe task ${taskArn} (run ${runId}):`, err)
+        reporter.captureException(err, {
+          tags: { component: 'workers/fargate', op: 'describeTask', runId },
+        })
+      }
+      if (Date.now() >= deadline) {
+        const message = `[workers/fargate] Task ${taskArn} (run ${runId}) did not reach STOPPED within ${this.stopVerifyTimeoutMs}ms`
+        console.error(message)
+        reporter.captureMessage(message, 'error', {
+          tags: { component: 'workers/fargate', op: 'waitUntilStopped', runId },
+        })
+        return false
+      }
+      await sleep(delay)
+      delay = Math.min(delay * 2, BACKOFF_CAP_MS)
     }
   }
 
   async shutdown(): Promise<void> {
-    // Tasks are stopped per-run on exit; in-flight tasks self-terminate when
-    // their runs end or their lease expires.
+    if (this.uncleanTimer) {
+      clearInterval(this.uncleanTimer)
+      this.uncleanTimer = undefined
+    }
+    const deadline = Date.now() + this.shutdownDeadlineMs
+    while (this.active.size > 0) {
+      const inflight = [...this.active.entries()]
+      await Promise.allSettled(
+        inflight.map(([runId, taskArn]) => this.stopTask(taskArn, runId, 'factory shutdown'))
+      )
+      if (this.active.size === 0) return
+      if (Date.now() >= deadline) {
+        throw new Error(`Failed to stop ${this.active.size} Fargate task(s) before shutdown deadline`)
+      }
+      await sleep(this.stopBackoffMs)
+    }
   }
+}
+
+/** True for CONDUIT_E2E=1/true/yes (whitespace/case-tolerant). */
+export function isConduitE2eEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.CONDUIT_E2E?.trim().toLowerCase()
+  return raw === '1' || raw === 'true' || raw === 'yes'
+}
+
+/** Allowlist: resolved module path must sit under <cwd>/e2e/. */
+export function isAllowlistedE2eModule(resolved: string, cwd: string = process.cwd()): boolean {
+  const e2eRoot = path.resolve(cwd, 'e2e')
+  const rel = path.relative(e2eRoot, path.resolve(resolved))
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
+}
+
+/**
+ * E2E-only hook: load a duck-typed ECS client from CONDUIT_FARGATE_E2E_FAKE_ECS.
+ * Refuses NODE_ENV=production, requires CONDUIT_E2E=1, and allowlists e2e/.
+ */
+export function tryLoadE2eFakeEcsClient(env: NodeJS.ProcessEnv = process.env): ECSClient | undefined {
+  const spec = env.CONDUIT_FARGATE_E2E_FAKE_ECS?.trim()
+  if (!spec) return undefined
+  if (env.NODE_ENV === 'production') {
+    throw new Error('CONDUIT_FARGATE_E2E_FAKE_ECS is forbidden when NODE_ENV=production')
+  }
+  if (!isConduitE2eEnabled(env)) {
+    throw new Error('CONDUIT_FARGATE_E2E_FAKE_ECS requires CONDUIT_E2E=1')
+  }
+  const resolved = path.isAbsolute(spec) ? spec : path.resolve(spec)
+  if (!isAllowlistedE2eModule(resolved)) {
+    throw new Error(`CONDUIT_FARGATE_E2E_FAKE_ECS must resolve under e2e/ (got ${resolved})`)
+  }
+  const req = createRequire(path.join(process.cwd(), 'package.json'))
+  const loaded = req(resolved) as { createFakeEcsClient?: () => ECSClient }
+  const client = typeof loaded.createFakeEcsClient === 'function' ? loaded.createFakeEcsClient() : loaded
+  if (!client || typeof (client as { send?: unknown }).send !== 'function') {
+    throw new Error(
+      `CONDUIT_FARGATE_E2E_FAKE_ECS module must export createFakeEcsClient() or a client with send() (${resolved})`
+    )
+  }
+  console.warn(`[workers/fargate] e2e fake ECS loaded from ${resolved}`)
+  return client as ECSClient
+}
+
+function isTaskGone(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return /not found|does not exist|unknown task/i.test(msg)
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
