@@ -31,6 +31,7 @@ services:
       DATABASE_SSL: disable
       PORT: "7456"
       CONDUIT_DATA_DIR: /data
+      CONDUIT_PROCESS_MODE: server
       # REQUIRED in any deployment reached via a hostname other than
       # http://localhost:7456 (i.e. all real/prod deployments, esp. multi-pod):
       # the canonical public URL. MCP OAuth redirect URIs are built from this and
@@ -53,16 +54,17 @@ services:
   # bring the stack up with:
   #   docker compose --profile worker up
   # and uncomment CONDUIT_WORKER_FACTORY/CONDUIT_WORKER_TOKEN on the conduit
-  # service above. Same image, worker entrypoint — execution happens in this
-  # container; the server only orchestrates. Scale out with more replicas or
-  # additional hosts pointing CONDUIT_SERVER_URL at the server.
+  # service above. Same image; CONDUIT_PROCESS_MODE selects the worker binary
+  # via the image entrypoint. Execution happens in this container; the server
+  # only orchestrates. Scale out with more replicas or additional hosts
+  # pointing CONDUIT_SERVER_URL at the server.
   worker:
     profiles: ["worker"]
     build: .
     depends_on:
       - conduit
-    entrypoint: ["node", "out/worker/index.js"]
     environment:
+      CONDUIT_PROCESS_MODE: worker
       CONDUIT_SERVER_URL: ws://conduit:7456/ws/worker
       CONDUIT_WORKER_TOKEN: dev-worker-token
 

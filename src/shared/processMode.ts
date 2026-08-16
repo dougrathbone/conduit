@@ -1,10 +1,14 @@
 /**
  * Container process mode — server (orchestrator) vs worker.
- * Task 2 implements parsing and the mode-aware entrypoint.
+ * The image entrypoint (`scripts/container-entrypoint.sh`) honors the same
+ * `CONDUIT_PROCESS_MODE=server|worker` contract (default server, fail closed).
  */
 export type ConduitProcessMode = 'server' | 'worker'
 
-/** Stub: always server so contracts compile. Task 2 honors CONDUIT_PROCESS_MODE. */
-export function resolveProcessMode(_env: NodeJS.ProcessEnv = process.env): ConduitProcessMode {
-  return 'server'
+export function resolveProcessMode(env: NodeJS.ProcessEnv = process.env): ConduitProcessMode {
+  const raw = env.CONDUIT_PROCESS_MODE
+  const normalized = raw?.trim().toLowerCase() ?? ''
+  if (!normalized) return 'server'
+  if (normalized === 'server' || normalized === 'worker') return normalized
+  throw new Error(`CONDUIT_PROCESS_MODE must be "server" or "worker" (got "${raw}")`)
 }

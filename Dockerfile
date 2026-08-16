@@ -56,9 +56,9 @@ WORKDIR /app
 # without it, worktree checkouts contain LFS *pointer* files instead of content,
 # which breaks the agent's `yarn install`/build and stalls the run. `git lfs
 # install --system` registers the smudge/clean filters for every later git op.
-# No PID-1 wrapper (tini/dumb-init): Node 22 receives signals correctly when
-# used as PID 1 with an exec-form ENTRYPOINT, and the server installs its
-# own SIGTERM/SIGINT handlers for graceful shutdown.
+# No PID-1 wrapper (tini/dumb-init): the mode-aware entrypoint exec's node so
+# it remains PID 1 and receives SIGTERM/SIGINT. The server and worker install
+# their own handlers for graceful shutdown.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git git-lfs ca-certificates curl && \
     git lfs install --system && \
@@ -117,6 +117,10 @@ RUN npm ci --omit=dev && npm cache clean --force
 # Compiled JS only — no TS source / tsx runtime in the image.
 COPY --from=builder /app/out ./out
 
+# Same image, two roles: CONDUIT_PROCESS_MODE=server|worker (default server).
+# exec inside the script keeps node as PID 1 so SIGTERM/SIGINT reach it.
+COPY --chmod=755 scripts/container-entrypoint.sh /app/scripts/container-entrypoint.sh
+
 # /data is the persistent volume for run logs and bare git clones.
 # The Postgres database lives in RDS. In production / staging the pod uses
 # IAM auth (DATABASE_USE_RDS_IAM=true + DATABASE_HOST/PORT/NAME/USER); local
@@ -125,6 +129,7 @@ VOLUME /data
 ENV CONDUIT_DATA_DIR=/data
 ENV PORT=7456
 ENV NODE_ENV=production
+ENV CONDUIT_PROCESS_MODE=server
 
 # Baked-in build identifier — used as the Sentry release at runtime so error
 # events match the source maps uploaded for this commit. Empty in local/dev
@@ -137,4 +142,4 @@ EXPOSE 7456
 # Run an unprivileged user. The `node` user is provided by the official image.
 USER node
 
-ENTRYPOINT ["node", "out/server/index.js"]
+ENTRYPOINT ["/app/scripts/container-entrypoint.sh"]

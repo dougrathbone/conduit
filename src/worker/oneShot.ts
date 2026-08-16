@@ -1,13 +1,14 @@
 /**
  * One-shot worker lifecycle — accept a single assigned run, then exit.
- * Task 2 implements CONDUIT_WORKER_ONE_SHOT and wires it into the worker loop.
+ * Honors `CONDUIT_WORKER_ONE_SHOT` (true/1/yes). Unset/false keeps the
+ * reconnecting pooled behavior used by remote workers.
  */
 export type WorkerDisconnectPlan = 'reconnect' | 'exit'
 export type WorkerRunEndPlan = 'idle' | 'exit'
 
-/** Stub: always pooled. Task 2 reads CONDUIT_WORKER_ONE_SHOT. */
-export function isWorkerOneShot(_env: NodeJS.ProcessEnv = process.env): boolean {
-  return false
+export function isWorkerOneShot(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env.CONDUIT_WORKER_ONE_SHOT?.trim().toLowerCase()
+  return raw === 'true' || raw === '1' || raw === 'yes'
 }
 
 export function planAfterDisconnect(env: NodeJS.ProcessEnv = process.env): WorkerDisconnectPlan {

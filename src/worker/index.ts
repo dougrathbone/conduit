@@ -11,7 +11,9 @@
  *   CONDUIT_SERVER_URL    ws(s)://<conduit-host>/ws/worker
  *   CONDUIT_WORKER_TOKEN  shared secret matching the server's token
  * Optional env:
- *   CONDUIT_WORKER_ID     stable identity (default: <hostname>-<pid>)
+ *   CONDUIT_WORKER_ID         stable identity (default: <hostname>-<pid>)
+ *   CONDUIT_WORKER_ONE_SHOT   true/1/yes — accept one assigned run, then exit
+ *                             (Fargate). Unset/false keeps pooled reconnect.
  *
  * Workers are trusted execution environments: RunSpecs carry resolved secrets
  * (API keys, git tokens, MCP OAuth headers), so the channel must be TLS
@@ -35,6 +37,7 @@ import { deleteMcpConfig } from '../main/utils/mcpConfigFile'
 import { deleteClaudeConfig } from '../main/utils/claudeConfig'
 import { deleteWorkspace } from '../main/execution/workspace'
 import { removeWorktree } from '../server/gitOps'
+import { isWorkerOneShot, planAfterDisconnect, planAfterRunExit } from './oneShot'
 
 const SERVER_URL = process.env.CONDUIT_SERVER_URL?.trim()
 const TOKEN = process.env.CONDUIT_WORKER_TOKEN?.trim()
@@ -63,6 +66,9 @@ let ws: WebSocket | null = null
 let heartbeat: NodeJS.Timeout | null = null
 let reconnectDelayMs = 1000
 let shuttingDown = false
+/** Set on the first run:assign. One-shot workers exit after this run (or if
+ *  the socket drops after assignment); pooled workers ignore the flag. */
+let acceptedAssignment = false
 
 function send(msg: WorkerToServerMessage): void {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -172,6 +178,7 @@ async function execute(spec: RunSpec): Promise<void> {
       send({ type: 'run:exit', runId, status, exitCode })
       console.log(`[worker] Run ${runId} exited: ${status} (code ${exitCode ?? 'n/a'})`)
       if (handle) cleanupAfterRun(runId, handle)
+      if (planAfterRunExit() === 'exit') void shutdown()
     },
   }
 
@@ -190,6 +197,7 @@ async function execute(spec: RunSpec): Promise<void> {
       status: 'failed',
       exitCode: null,
     })
+    if (planAfterRunExit() === 'exit') void shutdown()
   }
 }
 
@@ -218,6 +226,13 @@ function connect(): void {
       return
     }
     if (msg.type === 'run:assign') {
+      if (isWorkerOneShot() && acceptedAssignment) {
+        console.warn(
+          `[worker] Ignoring additional run:assign ${msg.spec.runId} — one-shot already assigned`
+        )
+        return
+      }
+      acceptedAssignment = true
       void execute(msg.spec)
     } else if (msg.type === 'run:cancel') {
       console.log(`[worker] Cancel requested for run ${msg.runId}`)
@@ -230,8 +245,16 @@ function connect(): void {
     heartbeat = null
     ws = null
     if (shuttingDown) return
-    // Runs keep executing locally; their events drop while disconnected and
-    // run:exit is delivered on the next connection.
+    // One-shot: exit once a run was assigned so a dropped control plane does
+    // not leave a billed Fargate task reconnecting. Before assignment, keep
+    // reconnecting so startup blips can still complete assignTo.
+    if (planAfterDisconnect() === 'exit' && acceptedAssignment) {
+      console.warn(`[worker] Disconnected (${code} ${reason}) — one-shot worker exiting`)
+      void shutdown()
+      return
+    }
+    // Pooled (and one-shot pre-assignment): runs keep executing locally;
+    // events drop while disconnected and run:exit is delivered on reconnect.
     console.warn(`[worker] Disconnected (${code} ${reason}) — reconnecting in ${reconnectDelayMs}ms`)
     setTimeout(connect, reconnectDelayMs)
     reconnectDelayMs = Math.min(reconnectDelayMs * 2, 30_000)
