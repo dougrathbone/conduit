@@ -497,3 +497,8 @@ export function getWorkerControlPlane(): WorkerControlPlane {
   if (!controlPlane) controlPlane = new WorkerControlPlane()
   return controlPlane
 }
+
+/** Best-effort teardown of the process-wide plane (no-op if never created). */
+export function stopWorkerControlPlane(): void {
+  controlPlane?.stop()
+}
