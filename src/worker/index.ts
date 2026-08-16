@@ -24,7 +24,7 @@ import * as os from 'os'
 import * as fs from 'fs'
 import * as path from 'path'
 import { execFileSync } from 'child_process'
-import type { RunEventInit, RunnerType } from '../shared/types'
+import type { RunnerType } from '../shared/types'
 import type { RunSpec, WorkerEventSink, WorkerHandle } from '../shared/worker'
 import type {
   ServerToWorkerMessage,
@@ -38,7 +38,7 @@ import { deleteClaudeConfig } from '../main/utils/claudeConfig'
 import { deleteWorkspace } from '../main/execution/workspace'
 import { removeWorktree } from '../server/gitOps'
 import { isWorkerOneShot, planAfterDisconnect, planAfterRunExit } from './oneShot'
-import { chunkRunEvents } from './eventBatch'
+import { createEventFlushQueue } from './eventFlush'
 import { createIdempotentShutdown, sendWsJson } from './wsSend'
 
 const SERVER_URL = process.env.CONDUIT_SERVER_URL?.trim()
@@ -145,39 +145,25 @@ function sweepStaleArtifacts(): void {
   }
 }
 
-async function execute(spec: RunSpec): Promise<void> {
+async function execute(spec: RunSpec, assignId?: string): Promise<void> {
   const runId = spec.runId
   console.log(`[worker] Starting run ${runId} (${spec.runner}, workspace: ${spec.workspace.kind})`)
 
-  // Batch events like the server's runner does — chunked to stay under the
-  // server's event-count and encoded-frame limits.
-  const buffer: RunEventInit[] = []
-  let flushScheduled = false
-  async function flush(): Promise<void> {
-    flushScheduled = false
-    if (buffer.length === 0) return
-    const events = buffer.splice(0)
-    for (const frame of chunkRunEvents(runId, events)) {
-      await send(frame)
-    }
-  }
+  const events = createEventFlushQueue({
+    runId,
+    send: (frame) => send(frame),
+  })
 
   const sink: WorkerEventSink = {
     onEvent: (ev) => {
-      buffer.push(ev)
-      if (!flushScheduled) {
-        flushScheduled = true
-        setImmediate(() => {
-          void flush()
-        })
-      }
+      events.push(ev)
     },
     onError: (err) => {
       sink.onEvent({ kind: 'raw', stream: 'system', text: `\n[Error: ${err.message}]\n` })
     },
     onExit: (status, exitCode) => {
       void (async () => {
-        await flush()
+        await events.flush()
         const handle = handles.get(runId)
         handles.delete(runId)
         await send({ type: 'run:exit', runId, status, exitCode })
@@ -191,12 +177,12 @@ async function execute(spec: RunSpec): Promise<void> {
   try {
     const handle = await factory.startRun(spec, sink)
     handles.set(runId, handle)
-    void send({ type: 'run:started', runId, workspacePath: handle.workspacePath })
+    void send({ type: 'run:started', runId, workspacePath: handle.workspacePath, assignId })
   } catch (err) {
     // Prep failed (clone, config write, spawn args) — the factory rolled back
     // its partial work; tell the server so the run is marked failed.
     console.error(`[worker] Failed to start run ${runId}:`, err)
-    await flush()
+    await events.flush()
     await send({
       type: 'run:exit',
       runId,
@@ -239,7 +225,7 @@ function connect(): void {
         return
       }
       acceptedAssignment = true
-      void execute(msg.spec)
+      void execute(msg.spec, msg.assignId)
     } else if (msg.type === 'run:cancel') {
       console.log(`[worker] Cancel requested for run ${msg.runId}`)
       void handles.get(msg.runId)?.cancel()

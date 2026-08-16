@@ -208,7 +208,9 @@ describe('FargateWorkerFactory', () => {
   beforeEach(() => {
     ecs = new FakeEcs()
     cp = fakeControlPlane()
-    factory = new FargateWorkerFactory(cp.plane, baseConfig(), ecs as unknown as ECSClient)
+    factory = new FargateWorkerFactory(cp.plane, baseConfig(), ecs as unknown as ECSClient, {
+      uncleanRetryMs: 0,
+    })
   })
 
   it('sends an exact RunTask shape with startedBy, tags, and 2 vCPU / 8192 MiB', async () => {
@@ -437,15 +439,42 @@ describe('FargateWorkerFactory', () => {
   })
 
   it('keeps a persistently unstoppable task tracked so shutdown retries StopTask', async () => {
+    factory = new FargateWorkerFactory(cp.plane, baseConfig(), ecs as unknown as ECSClient, {
+      stopBackoffMs: 5,
+      shutdownDeadlineMs: 80,
+      uncleanRetryMs: 0,
+    })
     const handle = await factory.startRun(SPEC, sink)
     ecs.stopImpl = async () => {
       throw new Error('ServiceException')
     }
-    await handle.cancel()
+    await expect(handle.cancel()).rejects.toThrow(/stop|STOPPED|ServiceException/i)
     const afterCancel = ecs.of('StopTaskCommand').length
     expect(afterCancel).toBeGreaterThanOrEqual(2)
-    await factory.shutdown()
+    await expect(factory.shutdown()).rejects.toThrow(/Failed to stop|stop/i)
     expect(ecs.of('StopTaskCommand').length).toBeGreaterThan(afterCancel)
+  })
+
+  it('retries unclean tasks on a periodic timer after cancel fails', async () => {
+    factory = new FargateWorkerFactory(cp.plane, baseConfig(), ecs as unknown as ECSClient, {
+      stopAttempts: 1,
+      stopBackoffMs: 1,
+      shutdownDeadlineMs: 20,
+      uncleanRetryMs: 25,
+    })
+    const handle = await factory.startRun(SPEC, sink)
+    ecs.stopImpl = async () => {
+      throw new Error('ServiceException')
+    }
+    await expect(handle.cancel()).rejects.toThrow(/stop|STOPPED|ServiceException/i)
+    const afterCancel = ecs.of('StopTaskCommand').length
+    await vi.waitFor(
+      () => {
+        expect(ecs.of('StopTaskCommand').length).toBeGreaterThan(afterCancel)
+      },
+      { timeout: 200, interval: 10 }
+    )
+    await expect(factory.shutdown()).rejects.toThrow(/Failed to stop|stop/i)
   })
 
   it('shutdown StopTasks every in-flight run and verifies STOPPED', async () => {

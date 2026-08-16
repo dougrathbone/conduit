@@ -169,7 +169,7 @@ describe('WorkerControlPlane', () => {
     })
 
     const assignMsg = await worker.next()
-    expect(assignMsg).toEqual({ type: 'run:assign', spec: SPEC })
+    expect(assignMsg).toMatchObject({ type: 'run:assign', spec: SPEC })
 
     worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, workspacePath: '/tmp/x' }))
     worker.ws.send(
@@ -211,7 +211,7 @@ describe('WorkerControlPlane', () => {
     const handlePromise = ctx.controlPlane.assignTo('late-worker', SPEC, sink)
     // Connect after the waiter is registered.
     const worker = await connectWorker(ctx, { workerId: 'late-worker' })
-    expect(await worker.next()).toEqual({ type: 'run:assign', spec: SPEC })
+    expect(await worker.next()).toMatchObject({ type: 'run:assign', spec: SPEC })
     worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId }))
     const handle = await handlePromise
     expect(handle.runId).toBe(SPEC.runId)
@@ -226,7 +226,7 @@ describe('WorkerControlPlane', () => {
   it('assignTo dispatches immediately when the worker is already connected', async () => {
     const worker = await connectWorker(ctx, { workerId: 'ready' })
     const handlePromise = ctx.controlPlane.assignTo('ready', SPEC, { onEvent: () => {}, onExit: () => {} })
-    expect(await worker.next()).toEqual({ type: 'run:assign', spec: SPEC })
+    expect(await worker.next()).toMatchObject({ type: 'run:assign', spec: SPEC })
     worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId }))
     await handlePromise
   })
@@ -302,7 +302,7 @@ describe('WorkerControlPlane', () => {
         exit = { status, exitCode }
       },
     })
-    expect(await owner.next()).toEqual({ type: 'run:assign', spec: SPEC })
+    expect(await owner.next()).toMatchObject({ type: 'run:assign', spec: SPEC })
     owner.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId }))
     await handlePromise
 
@@ -346,7 +346,7 @@ describe('WorkerControlPlane', () => {
     ).rejects.toThrow(/did not connect/)
 
     const handlePromise = ctx.controlPlane.assignTo('w1', SPEC, { onEvent: () => {}, onExit: () => {} })
-    expect(await worker.next()).toEqual({ type: 'run:assign', spec: SPEC })
+    expect(await worker.next()).toMatchObject({ type: 'run:assign', spec: SPEC })
     worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId }))
     await handlePromise
   })
@@ -377,7 +377,7 @@ describe('WorkerControlPlane', () => {
         exit = { status, exitCode }
       },
     })
-    expect(await owner.next()).toEqual({ type: 'run:assign', spec: SPEC })
+    expect(await owner.next()).toMatchObject({ type: 'run:assign', spec: SPEC })
     owner.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, workspacePath: '/tmp/owner' }))
     const handle = await handlePromise
     expect(handle.workspacePath).toBe('/tmp/owner')
@@ -438,8 +438,8 @@ describe('WorkerControlPlane', () => {
         exitB = status
       },
     })
-    expect(await a.next()).toEqual({ type: 'run:assign', spec: specA })
-    expect(await b.next()).toEqual({ type: 'run:assign', spec: specB })
+    expect(await a.next()).toMatchObject({ type: 'run:assign', spec: specA })
+    expect(await b.next()).toMatchObject({ type: 'run:assign', spec: specB })
     a.ws.send(JSON.stringify({ type: 'run:started', runId: specA.runId }))
     b.ws.send(JSON.stringify({ type: 'run:started', runId: specB.runId }))
     await Promise.all([handleA, handleB])
@@ -486,8 +486,17 @@ describe('WorkerControlPlane', () => {
     // run:started must not be consumed by the timed-out generation's suppressor.
     await new Promise((r) => setTimeout(r, 20))
     const retry = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })
-    expect(await worker.next()).toEqual({ type: 'run:assign', spec: SPEC })
-    worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, workspacePath: '/tmp/ok' }))
+    const retryAssign = await worker.next()
+    expect(retryAssign).toMatchObject({ type: 'run:assign', spec: SPEC })
+    const retryId = retryAssign.type === 'run:assign' ? retryAssign.assignId : undefined
+    worker.ws.send(
+      JSON.stringify({
+        type: 'run:started',
+        runId: SPEC.runId,
+        workspacePath: '/tmp/ok',
+        assignId: retryId,
+      })
+    )
     const handle = await retry
     expect(handle.workspacePath).toBe('/tmp/ok')
   }, 400)
@@ -502,10 +511,63 @@ describe('WorkerControlPlane', () => {
     expect(await worker.next()).toEqual({ type: 'run:cancel', runId: SPEC.runId })
 
     const retry = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })
-    expect(await worker.next()).toEqual({ type: 'run:assign', spec: SPEC })
-    worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, workspacePath: '/tmp/retry' }))
+    const retryAssign = await worker.next()
+    expect(retryAssign).toMatchObject({ type: 'run:assign', spec: SPEC })
+    const retryId = retryAssign.type === 'run:assign' ? retryAssign.assignId : undefined
+    worker.ws.send(
+      JSON.stringify({
+        type: 'run:started',
+        runId: SPEC.runId,
+        workspacePath: '/tmp/retry',
+        assignId: retryId,
+      })
+    )
     const handle = await retry
     expect(handle.workspacePath).toBe('/tmp/retry')
+  }, 400)
+
+  it('does not settle a retry from a late started of the timed-out assignment', async () => {
+    await ctx.close()
+    ctx = await startServer({ assignTimeoutMs: 50 })
+    const worker = await connectWorker(ctx)
+    const first = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })
+    const firstAssign = await worker.next()
+    expect(firstAssign).toMatchObject({ type: 'run:assign', spec: SPEC })
+    const staleId = firstAssign.type === 'run:assign' ? firstAssign.assignId : undefined
+    await expect(first).rejects.toThrow(/did not start run/)
+    expect(await worker.next()).toEqual({ type: 'run:cancel', runId: SPEC.runId })
+
+    const retry = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })
+    const retryAssign = await worker.next()
+    expect(retryAssign).toMatchObject({ type: 'run:assign', spec: SPEC })
+    const freshId = retryAssign.type === 'run:assign' ? retryAssign.assignId : undefined
+    expect(freshId).toBeTruthy()
+    expect(freshId).not.toBe(staleId)
+
+    worker.ws.send(
+      JSON.stringify({
+        type: 'run:started',
+        runId: SPEC.runId,
+        workspacePath: '/tmp/stale',
+        assignId: staleId,
+      })
+    )
+    const raced = await Promise.race([
+      retry.then((h) => h.workspacePath),
+      new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 40)),
+    ])
+    expect(raced).toBe('pending')
+
+    worker.ws.send(
+      JSON.stringify({
+        type: 'run:started',
+        runId: SPEC.runId,
+        workspacePath: '/tmp/fresh',
+        assignId: freshId,
+      })
+    )
+    const handle = await retry
+    expect(handle.workspacePath).toBe('/tmp/fresh')
   }, 400)
 
   it('rejects pending assignTo waiters when the control plane stops', async () => {
@@ -561,8 +623,8 @@ describe('WorkerControlPlane', () => {
         onExit: (status) => resolve(status),
       })
     })
-    expect(await keep.next()).toEqual({ type: 'run:assign', spec: specKeep })
-    expect(await drop.next()).toEqual({ type: 'run:assign', spec: specDrop })
+    expect(await keep.next()).toMatchObject({ type: 'run:assign', spec: specKeep })
+    expect(await drop.next()).toMatchObject({ type: 'run:assign', spec: specDrop })
     keep.ws.send(JSON.stringify({ type: 'run:started', runId: specKeep.runId }))
     drop.ws.send(JSON.stringify({ type: 'run:started', runId: specDrop.runId }))
     await keepHandle

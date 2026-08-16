@@ -61,6 +61,8 @@ export const FARGATE_WORKER_MEMORY_MIB = '8192'
 const STOP_VERIFY_TIMEOUT_MS = 15_000
 const STOP_ATTEMPTS = 3
 const STOP_BACKOFF_MS = 50
+const UNCLEAN_RETRY_MS = 30_000
+const SHUTDOWN_DEADLINE_MS = 8_000
 const WATCH_INITIAL_DELAY_MS = 25
 const BACKOFF_CAP_MS = 2_000
 
@@ -69,6 +71,9 @@ export interface FargateStopPolicy {
   stopAttempts?: number
   stopVerifyTimeoutMs?: number
   stopBackoffMs?: number
+  /** 0 disables the periodic unclean-task retry timer. */
+  uncleanRetryMs?: number
+  shutdownDeadlineMs?: number
 }
 
 export interface FargateWorkerConfig {
@@ -171,6 +176,11 @@ export class FargateWorkerFactory implements WorkerFactory {
   private readonly stopAttempts: number
   private readonly stopVerifyTimeoutMs: number
   private readonly stopBackoffMs: number
+  private readonly uncleanRetryMs: number
+  private readonly shutdownDeadlineMs: number
+  /** Tasks whose last stop attempt failed; retried by the periodic timer. */
+  private readonly failedStops = new Map<string, { taskArn: string; reason: string }>()
+  private uncleanTimer?: NodeJS.Timeout
 
   constructor(
     private controlPlane: WorkerControlPlane,
@@ -182,6 +192,12 @@ export class FargateWorkerFactory implements WorkerFactory {
     this.stopAttempts = stopPolicy?.stopAttempts ?? STOP_ATTEMPTS
     this.stopVerifyTimeoutMs = stopPolicy?.stopVerifyTimeoutMs ?? STOP_VERIFY_TIMEOUT_MS
     this.stopBackoffMs = stopPolicy?.stopBackoffMs ?? STOP_BACKOFF_MS
+    this.uncleanRetryMs = stopPolicy?.uncleanRetryMs ?? UNCLEAN_RETRY_MS
+    this.shutdownDeadlineMs = stopPolicy?.shutdownDeadlineMs ?? SHUTDOWN_DEADLINE_MS
+    if (this.uncleanRetryMs > 0) {
+      this.uncleanTimer = setInterval(() => this.retryFailedStops(), this.uncleanRetryMs)
+      this.uncleanTimer.unref()
+    }
   }
 
   async startRun(spec: RunSpec, sink: WorkerEventSink): Promise<WorkerHandle> {
@@ -216,7 +232,7 @@ export class FargateWorkerFactory implements WorkerFactory {
       onError: (err) => sink.onError?.(err),
       onExit: (status, exitCode) => {
         sink.onExit(status, exitCode)
-        void this.stopTask(taskArn, runId, `run exited (${status})`)
+        void this.stopTask(taskArn, runId, `run exited (${status})`).catch(() => {})
       },
     }
 
@@ -230,7 +246,11 @@ export class FargateWorkerFactory implements WorkerFactory {
         },
       }
     } catch (err) {
-      await this.stopTask(taskArn, runId, 'assignment failed')
+      try {
+        await this.stopTask(taskArn, runId, 'assignment failed')
+      } catch (stopErr) {
+        console.error(`[workers/fargate] Stop after assignment failure also failed (run ${runId}):`, stopErr)
+      }
       throw err
     }
   }
@@ -331,6 +351,7 @@ export class FargateWorkerFactory implements WorkerFactory {
       } catch (err) {
         if (isTaskGone(err)) {
           this.active.delete(runId)
+          this.failedStops.delete(runId)
           return
         }
         lastError = err
@@ -351,6 +372,7 @@ export class FargateWorkerFactory implements WorkerFactory {
 
       if (await this.waitUntilStopped(taskArn, runId)) {
         this.active.delete(runId)
+        this.failedStops.delete(runId)
         return
       }
       lastError = new Error(`Task ${taskArn} did not reach STOPPED`)
@@ -368,6 +390,17 @@ export class FargateWorkerFactory implements WorkerFactory {
       tags: { component: 'workers/fargate', op: 'stopTask', runId },
       extra: { taskArn, attempts: this.stopAttempts },
     })
+    this.failedStops.set(runId, { taskArn, reason })
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`Failed to stop Fargate task ${taskArn} for run ${runId}`)
+  }
+
+  private retryFailedStops(): void {
+    for (const [runId, { taskArn, reason }] of [...this.failedStops]) {
+      if (this.stopping.has(taskArn)) continue
+      void this.stopTask(taskArn, runId, reason).catch(() => {})
+    }
   }
 
   private async waitUntilStopped(taskArn: string, runId: string): Promise<boolean> {
@@ -398,8 +431,22 @@ export class FargateWorkerFactory implements WorkerFactory {
   }
 
   async shutdown(): Promise<void> {
-    const inflight = [...this.active.entries()]
-    await Promise.all(inflight.map(([runId, taskArn]) => this.stopTask(taskArn, runId, 'factory shutdown')))
+    if (this.uncleanTimer) {
+      clearInterval(this.uncleanTimer)
+      this.uncleanTimer = undefined
+    }
+    const deadline = Date.now() + this.shutdownDeadlineMs
+    while (this.active.size > 0) {
+      const inflight = [...this.active.entries()]
+      await Promise.allSettled(
+        inflight.map(([runId, taskArn]) => this.stopTask(taskArn, runId, 'factory shutdown'))
+      )
+      if (this.active.size === 0) return
+      if (Date.now() >= deadline) {
+        throw new Error(`Failed to stop ${this.active.size} Fargate task(s) before shutdown deadline`)
+      }
+      await sleep(this.stopBackoffMs)
+    }
   }
 }
 

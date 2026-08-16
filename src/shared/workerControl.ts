@@ -53,6 +53,8 @@ export interface WorkerRunStartedMessage {
   type: 'run:started'
   runId: string
   workspacePath?: string
+  /** Echo of the assignId from run:assign; rejects stale starts after a retry. */
+  assignId?: string
 }
 
 export interface WorkerRunEventMessage {
@@ -80,6 +82,8 @@ export type WorkerToServerMessage =
 export interface ServerRunAssignMessage {
   type: 'run:assign'
   spec: RunSpec
+  /** Per-assignment token the worker echoes on run:started. */
+  assignId: string
 }
 
 export interface ServerRunCancelMessage {
@@ -173,12 +177,16 @@ export function parseWorkerToServerMessage(raw: string): WorkerMessageParseResul
       if (value.workspacePath !== undefined && typeof value.workspacePath !== 'string') {
         return { ok: false, error: 'invalid' }
       }
+      if (value.assignId !== undefined && (typeof value.assignId !== 'string' || value.assignId.length === 0)) {
+        return { ok: false, error: 'invalid' }
+      }
       return {
         ok: true,
         message: {
           type: 'run:started',
           runId: value.runId,
           workspacePath: value.workspacePath,
+          assignId: value.assignId,
         },
       }
     }

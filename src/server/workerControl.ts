@@ -70,6 +70,8 @@ interface Assignment {
   ws: WebSocket
   /** Monotonic id so a timed-out assignment's late run:started cannot settle a retry. */
   generation: number
+  /** Token sent on run:assign and required on run:started after a retry. */
+  assignId: string
   workspacePath?: string
   started: boolean
   settle: (handle: WorkerHandle) => void
@@ -212,15 +214,15 @@ export class WorkerControlPlane {
   ): Promise<WorkerHandle> {
     const runId = spec.runId
     return new Promise<WorkerHandle>((resolve, reject) => {
-      for (const entry of [...this.ignoreNextStarted]) {
-        if (entry.runId === runId) this.ignoreNextStarted.delete(entry)
-      }
+      const generation = this.nextAssignmentGeneration++
+      const assignId = `${generation}`
       const assignment: Assignment = {
         spec,
         sink,
         workerId: worker.workerId,
         ws: worker.ws,
-        generation: this.nextAssignmentGeneration++,
+        generation,
+        assignId,
         started: false,
         settle: (handle) => {
           assignment.started = true
@@ -246,7 +248,7 @@ export class WorkerControlPlane {
         }, this.assignTimeoutMs),
       }
       this.runs.set(runId, assignment)
-      this.sendOn(worker.ws, { type: 'run:assign', spec })
+      this.sendOn(worker.ws, { type: 'run:assign', spec, assignId })
     })
   }
 
@@ -373,11 +375,12 @@ export class WorkerControlPlane {
         }
         case 'run:started': {
           const a = this.ownedAssignment(msg.runId, ws)
-          if (this.consumeIgnoredStarted(msg.runId, ws, a?.generation)) break
-          if (a && !a.started) {
-            a.workspacePath = msg.workspacePath
-            a.settle(this.buildHandle(msg.runId, a))
-          }
+          if (!a || a.started) break
+          if (msg.assignId && msg.assignId !== a.assignId) break
+          if (!msg.assignId && this.hasStaleSuppression(msg.runId, ws, a.generation)) break
+          if (this.consumeIgnoredStarted(msg.runId, ws, a.generation)) break
+          a.workspacePath = msg.workspacePath
+          a.settle(this.buildHandle(msg.runId, a))
           break
         }
         case 'run:event': {
@@ -435,6 +438,14 @@ export class WorkerControlPlane {
   private hasAssignmentsOn(ws: WebSocket): boolean {
     for (const a of this.runs.values()) {
       if (a.ws === ws) return true
+    }
+    return false
+  }
+
+  /** True when a prior attempt on this socket timed out (different generation). */
+  private hasStaleSuppression(runId: string, ws: WebSocket, generation: number): boolean {
+    for (const entry of this.ignoreNextStarted) {
+      if (entry.runId === runId && entry.ws === ws && entry.generation !== generation) return true
     }
     return false
   }

@@ -27,4 +27,31 @@ describe('chunkRunEvents', () => {
       expect(Buffer.byteLength(JSON.stringify(frame))).toBeLessThanOrEqual(cap)
     }
   })
+
+  it('never emits a single-event frame over the byte cap; splits text instead', () => {
+    const cap = WORKER_MAX_MESSAGE_BYTES - WORKER_EVENT_FRAME_HEADROOM
+    const text = 'x'.repeat(cap + 50_000)
+    const frames = chunkRunEvents('run-1', [raw(text)])
+    expect(frames.length).toBeGreaterThan(1)
+    expect(frames.flatMap((f) => f.events.map((e) => e.text)).join('')).toBe(text)
+    for (const frame of frames) {
+      expect(Buffer.byteLength(JSON.stringify(frame))).toBeLessThanOrEqual(cap)
+    }
+  })
+
+  it('replaces a non-text oversized event with a system marker under the cap', () => {
+    const cap = 2_000
+    const ev: RunEventInit = {
+      kind: 'tool_use',
+      toolName: 'Write',
+      toolInput: { contents: 'y'.repeat(8_000) },
+    }
+    const frames = chunkRunEvents('run-1', [ev], { maxBytes: cap })
+    expect(frames.length).toBeGreaterThanOrEqual(1)
+    for (const frame of frames) {
+      expect(Buffer.byteLength(JSON.stringify(frame))).toBeLessThanOrEqual(cap)
+    }
+    const texts = frames.flatMap((f) => f.events.map((e) => e.text ?? ''))
+    expect(texts.some((t) => t.includes('oversized'))).toBe(true)
+  })
 })
