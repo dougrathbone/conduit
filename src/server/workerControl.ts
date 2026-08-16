@@ -37,6 +37,26 @@ export const WORKER_CONNECT_TIMEOUT_MS = (() => {
   return Number.isFinite(n) && n > 0 ? n : 600_000
 })()
 
+/**
+ * Timeouts must come from the supplied env (tests + Task 3), not the
+ * import-time globals above. Stubs still return those globals so contracts
+ * fail until Task 3 wires parsing.
+ */
+export function resolveAssignTimeoutMs(_env: NodeJS.ProcessEnv = process.env): number {
+  return ASSIGN_TIMEOUT_MS
+}
+
+export function resolveConnectTimeoutMs(_env: NodeJS.ProcessEnv = process.env): number {
+  return WORKER_CONNECT_TIMEOUT_MS
+}
+
+/** Optional constructor injection. Task 3 honors these instead of import-time globals. */
+export interface WorkerControlPlaneOptions {
+  assignTimeoutMs?: number
+  connectTimeoutMs?: number
+  maxMessageBytes?: number
+}
+
 interface ConnectedWorker {
   workerId: string
   ws: WebSocket
@@ -68,7 +88,7 @@ export class WorkerControlPlane {
   >()
   private leaseTimer: NodeJS.Timeout
 
-  constructor() {
+  constructor(_options?: WorkerControlPlaneOptions) {
     this.wss.on('connection', (ws) => this.onConnection(ws))
     this.leaseTimer = setInterval(() => this.checkLeases(), WORKER_LEASE_MS / 3)
     this.leaseTimer.unref()
@@ -362,6 +382,10 @@ export class WorkerControlPlane {
       }
     }
     this.workers.clear()
+    // Stub: drop leaked timers so contract tests can fail fast. Task 3 must
+    // also reject pending assign/assignTo promises on shutdown.
+    for (const a of this.runs.values()) clearTimeout(a.timeout)
+    for (const waiter of this.waiters.values()) clearTimeout(waiter.timer)
   }
 }
 

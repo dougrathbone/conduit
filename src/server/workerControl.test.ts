@@ -7,9 +7,15 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import http from 'http'
 import { AddressInfo } from 'net'
 import WebSocket from 'ws'
-import { WorkerControlPlane } from './workerControl'
+import {
+  WorkerControlPlane,
+  resolveAssignTimeoutMs,
+  resolveConnectTimeoutMs,
+  type WorkerControlPlaneOptions,
+} from './workerControl'
 import type { RunSpec } from '../shared/worker'
 import type { ServerToWorkerMessage } from '../shared/workerControl'
+import { WORKER_MAX_EVENT_BATCH, WORKER_MAX_MESSAGE_BYTES } from '../shared/workerControl'
 
 const TOKEN = 'test-worker-token'
 
@@ -26,24 +32,36 @@ interface TestCtx {
   server: http.Server
   controlPlane: WorkerControlPlane
   url: string
+  sockets: WebSocket[]
   close: () => Promise<void>
 }
 
-function startServer(): Promise<TestCtx> {
+function startServer(options?: WorkerControlPlaneOptions): Promise<TestCtx> {
   process.env.CONDUIT_WORKER_TOKEN = TOKEN
-  const controlPlane = new WorkerControlPlane()
+  const controlPlane = new WorkerControlPlane(options)
   const server = http.createServer()
   server.on('upgrade', (req, socket, head) => controlPlane.handleUpgrade(req, socket, head))
   return new Promise((resolve) => {
     server.listen(0, '127.0.0.1', () => {
       const { port } = server.address() as AddressInfo
+      const sockets: WebSocket[] = []
       resolve({
         server,
         controlPlane,
         url: `ws://127.0.0.1:${port}/ws/worker`,
+        sockets,
         close: () =>
           new Promise<void>((res) => {
+            for (const ws of sockets) {
+              try {
+                ws.terminate()
+              } catch {
+                // already closed
+              }
+            }
+            sockets.length = 0
             controlPlane.stop()
+            server.closeAllConnections()
             server.close(() => res())
           }),
       })
@@ -57,6 +75,7 @@ function connectWorker(
 ): Promise<{ ws: WebSocket; next: () => Promise<ServerToWorkerMessage> }> {
   const before = ctx.controlPlane.connectedWorkerCount
   const ws = new WebSocket(ctx.url, { headers: { authorization: `Bearer ${opts.token ?? TOKEN}` } })
+  ctx.sockets.push(ws)
   const queue: ServerToWorkerMessage[] = []
   const pending: ((m: ServerToWorkerMessage) => void)[] = []
   ws.on('message', (data) => {
@@ -94,6 +113,34 @@ function connectWorker(
     })
     ws.on('error', reject)
   })
+}
+
+function connectSocket(ctx: TestCtx, opts: { token?: string } = {}): Promise<WebSocket> {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(ctx.url, { headers: { authorization: `Bearer ${opts.token ?? TOKEN}` } })
+    ctx.sockets.push(ws)
+    ws.on('open', () => resolve(ws))
+    ws.on('error', reject)
+  })
+}
+
+function expectClose(ws: WebSocket, ms = 200): Promise<{ code: number; reason: string }> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('socket was not closed')), ms)
+    if (ws.readyState === WebSocket.CLOSED) {
+      clearTimeout(timer)
+      resolve({ code: 1006, reason: 'already closed' })
+      return
+    }
+    ws.on('close', (code, reason) => {
+      clearTimeout(timer)
+      resolve({ code, reason: reason.toString() })
+    })
+  })
+}
+
+function sendJson(ws: WebSocket, msg: unknown): void {
+  ws.send(JSON.stringify(msg))
 }
 
 describe('WorkerControlPlane', () => {
@@ -197,4 +244,213 @@ describe('WorkerControlPlane', () => {
     worker.ws.terminate()
     await expect(exited).resolves.toEqual({ status: 'failed' })
   })
+
+  it('rejects messages sent before worker:hello', async () => {
+    const ws = await connectSocket(ctx)
+    sendJson(ws, { type: 'worker:heartbeat', workerId: 'w1', activeRunIds: [] })
+    await expect(expectClose(ws)).resolves.toMatchObject({ code: expect.any(Number) })
+    expect(ctx.controlPlane.connectedWorkerCount).toBe(0)
+  })
+
+  it('rejects malformed JSON', async () => {
+    const ws = await connectSocket(ctx)
+    ws.send('{not-json')
+    await expect(expectClose(ws)).resolves.toMatchObject({ code: expect.any(Number) })
+    expect(ctx.controlPlane.connectedWorkerCount).toBe(0)
+  })
+
+  it('rejects oversized frames', async () => {
+    const ws = await connectSocket(ctx)
+    ws.send('x'.repeat(WORKER_MAX_MESSAGE_BYTES + 1))
+    await expect(expectClose(ws)).resolves.toMatchObject({ code: expect.any(Number) })
+    expect(ctx.controlPlane.connectedWorkerCount).toBe(0)
+  })
+
+  it('rejects run:event batches larger than WORKER_MAX_EVENT_BATCH', async () => {
+    const worker = await connectWorker(ctx)
+    const events: string[] = []
+    const handlePromise = ctx.controlPlane.assign(SPEC, {
+      onEvent: (ev) => events.push(ev.stream),
+      onExit: () => {},
+    })
+    await worker.next()
+    worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId }))
+    await handlePromise
+    worker.ws.send(
+      JSON.stringify({
+        type: 'run:event',
+        runId: SPEC.runId,
+        events: Array.from({ length: WORKER_MAX_EVENT_BATCH + 1 }, () => ({
+          kind: 'raw',
+          stream: 'stdout',
+          text: 'x',
+        })),
+      })
+    )
+    await expect(expectClose(worker.ws)).resolves.toMatchObject({ code: expect.any(Number) })
+    expect(events).toEqual([])
+  })
+
+  it('ignores run events whose assignment.workerId does not match the socket workerId', async () => {
+    const owner = await connectWorker(ctx, { workerId: 'owner' })
+    const stranger = await connectWorker(ctx, { workerId: 'stranger' })
+    const events: string[] = []
+    const handlePromise = ctx.controlPlane.assignTo('owner', SPEC, {
+      onEvent: (ev) => events.push(ev.stream),
+      onExit: () => {},
+    })
+    expect(await owner.next()).toEqual({ type: 'run:assign', spec: SPEC })
+    owner.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId }))
+    await handlePromise
+
+    stranger.ws.send(
+      JSON.stringify({
+        type: 'run:event',
+        runId: SPEC.runId,
+        events: [{ kind: 'raw', stream: 'stdout', text: 'injected' }],
+      })
+    )
+    stranger.ws.send(
+      JSON.stringify({ type: 'run:exit', runId: SPEC.runId, status: 'completed', exitCode: 0 })
+    )
+    await new Promise((r) => setTimeout(r, 50))
+    expect(events).toEqual([])
+  })
+
+  it('rejects a second hello that changes worker identity on the same socket', async () => {
+    const worker = await connectWorker(ctx, { workerId: 'w1' })
+    worker.ws.send(
+      JSON.stringify({
+        type: 'worker:hello',
+        workerId: 'w2',
+        capabilities: { runners: ['claude'], version: 'test' },
+        activeRunIds: [],
+      })
+    )
+    await expect(expectClose(worker.ws)).resolves.toMatchObject({ code: expect.any(Number) })
+    expect(ctx.controlPlane.connectedWorkerCount).toBe(1)
+  })
+
+  it('closes the previous socket when a duplicate identity connects', async () => {
+    const first = await connectWorker(ctx, { workerId: 'w1' })
+    const firstClosed = expectClose(first.ws, 500)
+    const second = await connectSocket(ctx)
+    sendJson(second, {
+      type: 'worker:hello',
+      workerId: 'w1',
+      capabilities: { runners: ['claude'], version: 'test' },
+      activeRunIds: [],
+    })
+    await firstClosed
+    expect(first.ws.readyState).toBe(WebSocket.CLOSED)
+    expect(second.readyState).toBe(WebSocket.OPEN)
+    expect(ctx.controlPlane.connectedWorkerCount).toBe(1)
+  })
+
+  it('does not deliver events from one run onto another run\'s sink', async () => {
+    const a = await connectWorker(ctx, { workerId: 'wa' })
+    const b = await connectWorker(ctx, { workerId: 'wb' })
+    const specA = SPEC
+    const specB = { ...SPEC, runId: 'run-2', agentId: 'agent-2' }
+    const eventsA: string[] = []
+    const eventsB: string[] = []
+    const handleA = ctx.controlPlane.assignTo('wa', specA, {
+      onEvent: (ev) => eventsA.push(ev.text ?? ev.stream),
+      onExit: () => {},
+    })
+    const handleB = ctx.controlPlane.assignTo('wb', specB, {
+      onEvent: (ev) => eventsB.push(ev.text ?? ev.stream),
+      onExit: () => {},
+    })
+    expect(await a.next()).toEqual({ type: 'run:assign', spec: specA })
+    expect(await b.next()).toEqual({ type: 'run:assign', spec: specB })
+    a.ws.send(JSON.stringify({ type: 'run:started', runId: specA.runId }))
+    b.ws.send(JSON.stringify({ type: 'run:started', runId: specB.runId }))
+    await Promise.all([handleA, handleB])
+
+    a.ws.send(
+      JSON.stringify({
+        type: 'run:event',
+        runId: specB.runId,
+        events: [{ kind: 'raw', stream: 'stdout', text: 'cross' }],
+      })
+    )
+    b.ws.send(
+      JSON.stringify({
+        type: 'run:event',
+        runId: specB.runId,
+        events: [{ kind: 'raw', stream: 'stdout', text: 'ok-b' }],
+      })
+    )
+    await new Promise((r) => setTimeout(r, 50))
+    expect(eventsA).toEqual([])
+    expect(eventsB).toEqual(['ok-b'])
+  })
+
+  it('uses constructor assignTimeoutMs and drops the assignment so a late run:started is ignored', async () => {
+    await ctx.close()
+    ctx = await startServer({ assignTimeoutMs: 50 })
+    const worker = await connectWorker(ctx)
+    const handlePromise = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })
+    await worker.next()
+    await expect(handlePromise).rejects.toThrow(/did not start run/)
+
+    worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, workspacePath: '/tmp/late' }))
+    const retry = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })
+    expect(await worker.next()).toEqual({ type: 'run:assign', spec: SPEC })
+    worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, workspacePath: '/tmp/ok' }))
+    const handle = await retry
+    expect(handle.workspacePath).toBe('/tmp/ok')
+  }, 400)
+
+  it('rejects pending assignTo waiters when the control plane stops', async () => {
+    const pending = ctx.controlPlane.assignTo('ghost', SPEC, { onEvent: () => {}, onExit: () => {} }, 2_000)
+    ctx.controlPlane.stop()
+    await expect(pending).rejects.toThrow(/shutting down|stopped/)
+  }, 400)
+
+  it('fails a pending assignment (not yet started) when the worker disconnects', async () => {
+    const worker = await connectWorker(ctx)
+    const handlePromise = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })
+    await worker.next()
+    worker.ws.terminate()
+    await expect(handlePromise).rejects.toThrow(/disconnected/)
+  })
+
+  it('does not fail another worker\'s run when one worker disconnects', async () => {
+    const keep = await connectWorker(ctx, { workerId: 'keep' })
+    const drop = await connectWorker(ctx, { workerId: 'drop' })
+    const specKeep = SPEC
+    const specDrop = { ...SPEC, runId: 'run-drop' }
+    let keepStatus: string | undefined
+    const keepHandle = ctx.controlPlane.assignTo('keep', specKeep, {
+      onEvent: () => {},
+      onExit: (status) => {
+        keepStatus = status
+      },
+    })
+    const dropExited = new Promise<string>((resolve) => {
+      void ctx.controlPlane.assignTo('drop', specDrop, {
+        onEvent: () => {},
+        onExit: (status) => resolve(status),
+      })
+    })
+    expect(await keep.next()).toEqual({ type: 'run:assign', spec: specKeep })
+    expect(await drop.next()).toEqual({ type: 'run:assign', spec: specDrop })
+    keep.ws.send(JSON.stringify({ type: 'run:started', runId: specKeep.runId }))
+    drop.ws.send(JSON.stringify({ type: 'run:started', runId: specDrop.runId }))
+    await keepHandle
+    drop.ws.terminate()
+    await expect(dropExited).resolves.toBe('failed')
+    await new Promise((r) => setTimeout(r, 50))
+    expect(keepStatus).toBeUndefined()
+  })
 })
+
+describe('worker control timeouts from supplied env', () => {
+  it('reads assign and connect timeouts from the supplied env, not import-time globals', () => {
+    expect(resolveAssignTimeoutMs({ CONDUIT_WORKER_ASSIGN_TIMEOUT_MS: '1500' })).toBe(1_500)
+    expect(resolveConnectTimeoutMs({ CONDUIT_WORKER_CONNECT_TIMEOUT_MS: '2000' })).toBe(2_000)
+  })
+})
+

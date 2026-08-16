@@ -30,6 +30,10 @@ import { WORKER_CONNECT_TIMEOUT_MS } from '../workerControl'
 import { resolveWorkerServerUrl } from './cloudConfig'
 import { reporter } from '../observability'
 
+/** Compatible Fargate allocation: 2 vCPU / 8 GiB. Enforced on every RunTask. */
+export const FARGATE_WORKER_CPU = '2048'
+export const FARGATE_WORKER_MEMORY_MIB = '8192'
+
 export interface FargateWorkerConfig {
   cluster: string
   taskDefinition: string
@@ -41,6 +45,16 @@ export interface FargateWorkerConfig {
   serverUrl: string
   workerToken?: string
   connectTimeoutMs: number
+  /** From CONDUIT_WORKER_ASSIGN_TIMEOUT_MS when supplied. Task 4 wires this. */
+  assignTimeoutMs?: number
+  /** From CONDUIT_FARGATE_ROLE_ARN. Task 4 assumes this role for ECS calls. */
+  roleArn?: string
+}
+
+/** Stub: Task 4 returns STS-assumed credentials when `config.roleArn` is set. */
+export function buildFargateEcsClientConfig(config: FargateWorkerConfig): { credentials?: unknown } {
+  void config
+  return {}
 }
 
 export function resolveFargateConfig(env: NodeJS.ProcessEnv = process.env): FargateWorkerConfig {

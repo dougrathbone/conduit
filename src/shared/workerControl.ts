@@ -96,3 +96,7 @@ export const WORKER_HEARTBEAT_INTERVAL_MS = 30_000
 /** How long the server tolerates silence before declaring a worker dead
  *  (2.5 missed beats absorbs transient network partitions). */
 export const WORKER_LEASE_MS = 75_000
+/** Reject worker frames larger than this (Task 3 enforces). */
+export const WORKER_MAX_MESSAGE_BYTES = 1_048_576
+/** Reject run:event batches larger than this (Task 3 enforces). */
+export const WORKER_MAX_EVENT_BATCH = 256
