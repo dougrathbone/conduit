@@ -38,6 +38,8 @@ import { deleteClaudeConfig } from '../main/utils/claudeConfig'
 import { deleteWorkspace } from '../main/execution/workspace'
 import { removeWorktree } from '../server/gitOps'
 import { isWorkerOneShot, planAfterDisconnect, planAfterRunExit } from './oneShot'
+import { chunkRunEvents } from './eventBatch'
+import { createIdempotentShutdown, sendWsJson } from './wsSend'
 
 const SERVER_URL = process.env.CONDUIT_SERVER_URL?.trim()
 const TOKEN = process.env.CONDUIT_WORKER_TOKEN?.trim()
@@ -70,10 +72,8 @@ let shuttingDown = false
  *  the socket drops after assignment); pooled workers ignore the flag. */
 let acceptedAssignment = false
 
-function send(msg: WorkerToServerMessage): void {
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(msg))
-  }
+function send(msg: WorkerToServerMessage, timeoutMs?: number): Promise<void> {
+  return sendWsJson(ws, msg, timeoutMs)
 }
 
 function commandExists(binary: string): boolean {
@@ -149,14 +149,16 @@ async function execute(spec: RunSpec): Promise<void> {
   const runId = spec.runId
   console.log(`[worker] Starting run ${runId} (${spec.runner}, workspace: ${spec.workspace.kind})`)
 
-  // Batch events like the server's runner does — one socket frame per tick
-  // instead of one per parsed line.
+  // Batch events like the server's runner does — chunked to stay under the
+  // server's event-count and encoded-frame limits.
   const buffer: RunEventInit[] = []
   let flushScheduled = false
-  function flush(): void {
+  async function flush(): Promise<void> {
     flushScheduled = false
-    if (buffer.length > 0) {
-      send({ type: 'run:event', runId, events: buffer.splice(0) })
+    if (buffer.length === 0) return
+    const events = buffer.splice(0)
+    for (const frame of chunkRunEvents(runId, events)) {
+      await send(frame)
     }
   }
 
@@ -165,39 +167,43 @@ async function execute(spec: RunSpec): Promise<void> {
       buffer.push(ev)
       if (!flushScheduled) {
         flushScheduled = true
-        setImmediate(flush)
+        setImmediate(() => {
+          void flush()
+        })
       }
     },
     onError: (err) => {
       sink.onEvent({ kind: 'raw', stream: 'system', text: `\n[Error: ${err.message}]\n` })
     },
     onExit: (status, exitCode) => {
-      flush()
-      const handle = handles.get(runId)
-      handles.delete(runId)
-      send({ type: 'run:exit', runId, status, exitCode })
-      console.log(`[worker] Run ${runId} exited: ${status} (code ${exitCode ?? 'n/a'})`)
-      if (handle) cleanupAfterRun(runId, handle)
-      if (planAfterRunExit() === 'exit') void shutdown()
+      void (async () => {
+        await flush()
+        const handle = handles.get(runId)
+        handles.delete(runId)
+        await send({ type: 'run:exit', runId, status, exitCode })
+        console.log(`[worker] Run ${runId} exited: ${status} (code ${exitCode ?? 'n/a'})`)
+        if (handle) cleanupAfterRun(runId, handle)
+        if (planAfterRunExit() === 'exit') await shutdown()
+      })()
     },
   }
 
   try {
     const handle = await factory.startRun(spec, sink)
     handles.set(runId, handle)
-    send({ type: 'run:started', runId, workspacePath: handle.workspacePath })
+    void send({ type: 'run:started', runId, workspacePath: handle.workspacePath })
   } catch (err) {
     // Prep failed (clone, config write, spawn args) — the factory rolled back
     // its partial work; tell the server so the run is marked failed.
     console.error(`[worker] Failed to start run ${runId}:`, err)
-    flush()
-    send({
+    await flush()
+    await send({
       type: 'run:exit',
       runId,
       status: 'failed',
       exitCode: null,
     })
-    if (planAfterRunExit() === 'exit') void shutdown()
+    if (planAfterRunExit() === 'exit') await shutdown()
   }
 }
 
@@ -212,9 +218,9 @@ function connect(): void {
     reconnectDelayMs = 1000
     const caps = detectCapabilities()
     console.log(`[worker] Connected to ${SERVER_URL} as ${WORKER_ID} (runners: ${caps.runners.join(', ') || 'none'})`)
-    send({ type: 'worker:hello', workerId: WORKER_ID, capabilities: caps, activeRunIds: [...handles.keys()] })
+    void send({ type: 'worker:hello', workerId: WORKER_ID, capabilities: caps, activeRunIds: [...handles.keys()] })
     heartbeat = setInterval(() => {
-      send({ type: 'worker:heartbeat', workerId: WORKER_ID, activeRunIds: [...handles.keys()] })
+      void send({ type: 'worker:heartbeat', workerId: WORKER_ID, activeRunIds: [...handles.keys()] })
     }, WORKER_HEARTBEAT_INTERVAL_MS)
   })
 
@@ -265,7 +271,7 @@ function connect(): void {
   })
 }
 
-async function shutdown(): Promise<void> {
+const shutdown = createIdempotentShutdown(async () => {
   shuttingDown = true
   if (heartbeat) clearInterval(heartbeat)
   console.log(`[worker] Shutting down — cancelling ${handles.size} active run(s)`)
@@ -277,8 +283,9 @@ async function shutdown(): Promise<void> {
     // best-effort
   }
   // Give the close frame a moment to flush before exiting.
-  setTimeout(() => process.exit(0), 500)
-}
+  await new Promise<void>((resolve) => setTimeout(resolve, 500))
+  process.exit(0)
+})
 
 process.on('SIGINT', () => void shutdown())
 process.on('SIGTERM', () => void shutdown())

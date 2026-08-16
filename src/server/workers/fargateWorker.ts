@@ -59,8 +59,17 @@ export const FARGATE_WORKER_CPU = '2048'
 export const FARGATE_WORKER_MEMORY_MIB = '8192'
 
 const STOP_VERIFY_TIMEOUT_MS = 15_000
+const STOP_ATTEMPTS = 3
+const STOP_BACKOFF_MS = 50
 const WATCH_INITIAL_DELAY_MS = 25
 const BACKOFF_CAP_MS = 2_000
+
+/** Test-visible stop/verify policy. Production uses the constants above. */
+export interface FargateStopPolicy {
+  stopAttempts?: number
+  stopVerifyTimeoutMs?: number
+  stopBackoffMs?: number
+}
 
 export interface FargateWorkerConfig {
   cluster: string
@@ -155,17 +164,24 @@ export function buildFargateRunTaskInput(config: FargateWorkerConfig, spec: RunS
 export class FargateWorkerFactory implements WorkerFactory {
   readonly kind = 'fargate'
   private readonly ecs: ECSClient
-  /** In-flight runId → task ARN. Removed once StopTask+verify finishes. */
+  /** In-flight runId → task ARN. Removed only after STOPPED / not-found. */
   private readonly active = new Map<string, string>()
   /** In-flight stop+verify promises, keyed by task ARN (idempotent). */
   private readonly stopping = new Map<string, Promise<void>>()
+  private readonly stopAttempts: number
+  private readonly stopVerifyTimeoutMs: number
+  private readonly stopBackoffMs: number
 
   constructor(
     private controlPlane: WorkerControlPlane,
     private config: FargateWorkerConfig,
-    ecs?: ECSClient
+    ecs?: ECSClient,
+    stopPolicy?: FargateStopPolicy
   ) {
     this.ecs = ecs ?? tryLoadE2eFakeEcsClient() ?? new ECSClient(buildFargateEcsClientConfig(config))
+    this.stopAttempts = stopPolicy?.stopAttempts ?? STOP_ATTEMPTS
+    this.stopVerifyTimeoutMs = stopPolicy?.stopVerifyTimeoutMs ?? STOP_VERIFY_TIMEOUT_MS
+    this.stopBackoffMs = stopPolicy?.stopBackoffMs ?? STOP_BACKOFF_MS
   }
 
   async startRun(spec: RunSpec, sink: WorkerEventSink): Promise<WorkerHandle> {
@@ -293,57 +309,88 @@ export class FargateWorkerFactory implements WorkerFactory {
     const existing = this.stopping.get(taskArn)
     if (existing) return existing
 
-    const work = this.stopTaskOnce(taskArn, runId, reason).finally(() => {
+    const work = this.stopTaskWithRetry(taskArn, runId, reason).finally(() => {
       this.stopping.delete(taskArn)
-      this.active.delete(runId)
     })
     this.stopping.set(taskArn, work)
     return work
   }
 
-  private async stopTaskOnce(taskArn: string, runId: string, reason: string): Promise<void> {
-    try {
-      await this.ecs.send(
-        new StopTaskCommand({
-          cluster: this.config.cluster,
-          task: taskArn,
-          reason: `Conduit run ${runId}: ${reason}`.slice(0, 255),
+  private async stopTaskWithRetry(taskArn: string, runId: string, reason: string): Promise<void> {
+    let delay = this.stopBackoffMs
+    let lastError: unknown
+    for (let attempt = 1; attempt <= this.stopAttempts; attempt++) {
+      try {
+        await this.ecs.send(
+          new StopTaskCommand({
+            cluster: this.config.cluster,
+            task: taskArn,
+            reason: `Conduit run ${runId}: ${reason}`.slice(0, 255),
+          })
+        )
+      } catch (err) {
+        if (isTaskGone(err)) {
+          this.active.delete(runId)
+          return
+        }
+        lastError = err
+        console.error(
+          `[workers/fargate] Failed to stop task ${taskArn} (run ${runId}, attempt ${attempt}/${this.stopAttempts}):`,
+          err
+        )
+        reporter.captureException(err, {
+          tags: { component: 'workers/fargate', op: 'stopTask', runId },
+          extra: { taskArn, attempt, stopAttempts: this.stopAttempts },
         })
-      )
-    } catch (err) {
-      if (isTaskGone(err)) return
-      console.error(`[workers/fargate] Failed to stop task ${taskArn} (run ${runId}):`, err)
-      reporter.captureException(err, {
-        tags: { component: 'workers/fargate', op: 'stopTask', runId },
-      })
-      return
+        if (attempt < this.stopAttempts) {
+          await sleep(delay)
+          delay = Math.min(delay * 2, BACKOFF_CAP_MS)
+        }
+        continue
+      }
+
+      if (await this.waitUntilStopped(taskArn, runId)) {
+        this.active.delete(runId)
+        return
+      }
+      lastError = new Error(`Task ${taskArn} did not reach STOPPED`)
+      if (attempt < this.stopAttempts) {
+        await sleep(delay)
+        delay = Math.min(delay * 2, BACKOFF_CAP_MS)
+      }
     }
 
-    await this.waitUntilStopped(taskArn, runId)
+    const message =
+      `[workers/fargate] Giving up stopping task ${taskArn} (run ${runId}) after ` +
+      `${this.stopAttempts} attempt(s); remaining tracked for later retry`
+    console.error(message, lastError)
+    reporter.captureMessage(message, 'error', {
+      tags: { component: 'workers/fargate', op: 'stopTask', runId },
+      extra: { taskArn, attempts: this.stopAttempts },
+    })
   }
 
-  private async waitUntilStopped(taskArn: string, runId: string): Promise<void> {
+  private async waitUntilStopped(taskArn: string, runId: string): Promise<boolean> {
     let delay = 50
-    const deadline = Date.now() + STOP_VERIFY_TIMEOUT_MS
+    const deadline = Date.now() + this.stopVerifyTimeoutMs
     for (;;) {
       try {
         const task = await this.describeTask(taskArn)
-        if (!task || task.lastStatus === 'STOPPED') return
+        if (!task || task.lastStatus === 'STOPPED') return true
       } catch (err) {
-        if (isTaskGone(err)) return
+        if (isTaskGone(err)) return true
         console.error(`[workers/fargate] Failed to describe task ${taskArn} (run ${runId}):`, err)
         reporter.captureException(err, {
           tags: { component: 'workers/fargate', op: 'describeTask', runId },
         })
-        return
       }
       if (Date.now() >= deadline) {
-        const message = `[workers/fargate] Task ${taskArn} (run ${runId}) did not reach STOPPED within ${STOP_VERIFY_TIMEOUT_MS}ms`
+        const message = `[workers/fargate] Task ${taskArn} (run ${runId}) did not reach STOPPED within ${this.stopVerifyTimeoutMs}ms`
         console.error(message)
         reporter.captureMessage(message, 'error', {
           tags: { component: 'workers/fargate', op: 'waitUntilStopped', runId },
         })
-        return
+        return false
       }
       await sleep(delay)
       delay = Math.min(delay * 2, BACKOFF_CAP_MS)

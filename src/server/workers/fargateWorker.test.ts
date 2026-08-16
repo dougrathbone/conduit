@@ -421,6 +421,33 @@ describe('FargateWorkerFactory', () => {
     await expect(handle.cancel()).resolves.toBeUndefined()
   })
 
+  it('retries a transient StopTask failure and then forgets the task', async () => {
+    const handle = await factory.startRun(SPEC, sink)
+    let stops = 0
+    ecs.stopImpl = async () => {
+      stops++
+      if (stops === 1) throw new Error('ThrottlingException')
+      return {}
+    }
+    await handle.cancel()
+    expect(ecs.of('StopTaskCommand').length).toBe(2)
+    const afterCancel = ecs.of('StopTaskCommand').length
+    await factory.shutdown()
+    expect(ecs.of('StopTaskCommand').length).toBe(afterCancel)
+  })
+
+  it('keeps a persistently unstoppable task tracked so shutdown retries StopTask', async () => {
+    const handle = await factory.startRun(SPEC, sink)
+    ecs.stopImpl = async () => {
+      throw new Error('ServiceException')
+    }
+    await handle.cancel()
+    const afterCancel = ecs.of('StopTaskCommand').length
+    expect(afterCancel).toBeGreaterThanOrEqual(2)
+    await factory.shutdown()
+    expect(ecs.of('StopTaskCommand').length).toBeGreaterThan(afterCancel)
+  })
+
   it('shutdown StopTasks every in-flight run and verifies STOPPED', async () => {
     await factory.startRun(SPEC, sink)
     await factory.shutdown()
