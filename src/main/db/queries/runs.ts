@@ -63,10 +63,7 @@ export async function createRun(
   return created
 }
 
-export async function updateRun(
-  id: string,
-  data: Partial<Omit<ExecutionRun, 'id'>>
-): Promise<ExecutionRun> {
+function toUpdateValues(data: Partial<Omit<ExecutionRun, 'id'>>): Partial<typeof runs.$inferInsert> {
   const updateValues: Partial<typeof runs.$inferInsert> = {}
 
   if (data.agentId !== undefined) updateValues.agentId = data.agentId
@@ -81,11 +78,36 @@ export async function updateRun(
   if ('workerKind' in data) updateValues.workerKind = data.workerKind ?? null
   if ('workerId' in data) updateValues.workerId = data.workerId ?? null
 
-  await getDb().update(runs).set(updateValues).where(eq(runs.id, id))
+  return updateValues
+}
+
+export async function updateRun(
+  id: string,
+  data: Partial<Omit<ExecutionRun, 'id'>>
+): Promise<ExecutionRun> {
+  await getDb().update(runs).set(toUpdateValues(data)).where(eq(runs.id, id))
 
   const updated = await getRun(id)
   if (!updated) throw new Error(`Run with id ${id} not found after update`)
   return updated
+}
+
+/**
+ * Persist a terminal update only while the row is still `running`. Replacement-process
+ * replay of an already-finalized matching run resolves as a no-op so publish/finalize
+ * cannot run twice.
+ */
+export async function updateRunIfRunning(
+  id: string,
+  data: Partial<Omit<ExecutionRun, 'id'>>
+): Promise<ExecutionRun | null> {
+  const rows = await getDb()
+    .update(runs)
+    .set(toUpdateValues(data))
+    .where(and(eq(runs.id, id), eq(runs.status, 'running')))
+    .returning()
+  if (rows.length === 0) return null
+  return rowToExecutionRun(rows[0])
 }
 
 /**

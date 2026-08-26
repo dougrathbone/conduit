@@ -11,9 +11,11 @@ import * as fs from 'fs'
 import * as os from 'os'
 import { initDb } from '../main/db/index'
 import { listAgents, getAgent, createAgent, updateAgent, deleteAgent } from '../main/db/queries/agents'
-import { listRuns, updateRun, getOrphanedRuns } from '../main/db/queries/runs'
-import { startRunServer, stopRun, setRunFinalizedHook, appendRunLog } from './runner'
+import { listRuns } from '../main/db/queries/runs'
+import { startRunServer, stopRun, setRunFinalizedHook } from './runner'
 import { getWorkerControlPlane, stopWorkerControlPlane, WorkerControlPlane } from './workerControl'
+import { resolveWorkerReconnectTimeoutMs } from '../shared/workerControl'
+import { recoverRemoteRun, reconcileOrphanedRuns, stopOrphanReconciliation } from './runRecovery'
 import { getWorkerFactory } from './workers'
 import { startMemoryMonitor } from './memoryPressure'
 import {
@@ -893,6 +895,14 @@ async function start(): Promise<void> {
   // Initialise the Postgres database (creates tables if they don't exist)
   await initDb()
 
+  // Install RecoverRun before the factory (and later /ws/worker upgrades) so a
+  // replacement process can reconstruct sinks for still-running remote workers.
+  const reconnectTimeoutMs = resolveWorkerReconnectTimeoutMs()
+  getWorkerControlPlane({
+    recoverRun: (runId, workerId) => recoverRemoteRun(runId, workerId, broadcast),
+    reconnectTimeoutMs,
+  })
+
   // Validate the worker factory selection up front so a misconfigured
   // CONDUIT_WORKER_FACTORY fails at boot, not at the first run. Also surface
   // the remote worker endpoint state (token required for workers to connect).
@@ -919,34 +929,13 @@ async function start(): Promise<void> {
     console.log('[server] Auth enabled — Okta OIDC configured')
   }
 
-  // Mark any runs that were left in "running" state as failed (server restart).
-  // A run in this state means the previous process exited mid-run (deploy, crash,
-  // OOM, or disk-pressure eviction) so its `child.on('close')` handler never ran —
-  // which is exactly why such failures were invisible. Capture it so the operator
-  // gets a signal (with the affected run IDs) instead of a silent DB flip.
-  const orphaned = await getOrphanedRuns()
-  for (const run of orphaned) {
-    await updateRun(run.id, { status: 'failed', endedAt: Date.now() })
-    // Leave a trace in the run's own log so its transcript explains why it
-    // stopped, instead of just ending mid-output (the "quiet death").
-    appendRunLog(
-      run.id,
-      '✗ Run did not finish — the Conduit process exited mid-run (deploy, crash, ' +
-        'out-of-memory, or disk-pressure eviction). Marked failed on restart.'
-    )
-  }
-  if (orphaned.length > 0) {
-    console.log(`[server] Marked ${orphaned.length} orphaned run(s) as failed`)
-    reporter.captureMessage(
-      `Marked ${orphaned.length} orphaned run(s) as failed on startup — the previous Conduit ` +
-        `process exited mid-run (deploy, crash, OOM, or disk-pressure eviction).`,
-      'warning',
-      {
-        tags: { component: 'server', op: 'orphanReconcile' },
-        extra: { count: orphaned.length, runIds: orphaned.map((r) => r.id) },
-      }
-    )
-  }
+  // Local / missing-kind orphans fail immediately. Remote/eks/fargate runs with
+  // a persisted workerId stay running until a matching worker reconnects or the
+  // reconnect window expires.
+  await reconcileOrphanedRuns({
+    reconnectTimeoutMs,
+    broadcast,
+  })
 
   // Start the repository sync service (clones new repos, fetches existing ones)
   repoSyncService.start()
@@ -1021,6 +1010,7 @@ async function start(): Promise<void> {
     repoSyncService.stop()
     dataDirSweeper.stop()
     stopMemoryMonitor()
+    stopOrphanReconciliation()
     await getWorkerFactory()
       .shutdown()
       .catch((err) => console.error('[server] Worker factory shutdown failed:', err))

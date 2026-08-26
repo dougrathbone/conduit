@@ -1,9 +1,9 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import type { ExecutionRun, RunEvent, RunEventInit, TriggerContext, RunnerType } from '../shared/types'
+import type { ExecutionRun, RunEvent, TriggerContext, RunnerType } from '../shared/types'
 import type { RunSpec, WorkspaceSpec, WorkerEventSink, WorkerHandle } from '../shared/worker'
 import { summarizeEvent } from '../shared/runEvents'
-import { createRun, updateRun, getRunningRunForAgent } from '../main/db/queries/runs'
+import { createRun, updateRun, updateRunIfRunning, getRunningRunForAgent } from '../main/db/queries/runs'
 import { getAgent } from '../main/db/queries/agents'
 import { getRepository } from '../main/db/queries/repositories'
 import { getCredentialValue } from '../main/db/queries/agentCredentials'
@@ -133,7 +133,7 @@ let runFinalizedHook: (() => void) | null = null
 export function setRunFinalizedHook(cb: (() => void) | null): void {
   runFinalizedHook = cb
 }
-function notifyRunFinalized(): void {
+export function notifyRunFinalized(): void {
   try {
     runFinalizedHook?.()
   } catch (err) {
@@ -158,10 +158,11 @@ const RUN_LOG_MAX_BYTES = (() => {
 
 /** Append a system event to a run's log file (used after the log stream is
  *  closed, e.g. by the delayed cleanup). Also emits to stdout for log forwarding. */
-export function appendRunLog(runId: string, text: string): void {
+export function appendRunLog(runId: string, text: string, logFilePath?: string): void {
   const event: RunEvent = { t: Date.now(), kind: 'raw', stream: 'system', text }
+  const target = logFilePath ?? path.join(LOGS_DIR, `${runId}.jsonl`)
   try {
-    fs.appendFileSync(path.join(LOGS_DIR, `${runId}.jsonl`), JSON.stringify(event) + '\n')
+    fs.appendFileSync(target, JSON.stringify(event) + '\n')
   } catch (err) {
     console.error(`[runner] Failed to append cleanup log for run ${runId}: ${err}`)
   }
@@ -205,6 +206,177 @@ function cleanupRun(
       }
     })()
   }, WORKSPACE_CLEANUP_DELAY_MS)
+}
+
+export interface RunOrchestration {
+  sink: WorkerEventSink
+  emitSystemMessage: (text: string) => void
+  register: (handle: WorkerHandle) => void
+  abort: () => void
+}
+
+/**
+ * Shared log/broadcast/finalize pipeline for new runs and recovered remote runs.
+ * Opens `run.logPath` in append mode and seeds `lastLine` from the run record.
+ */
+export function createRunOrchestration(opts: {
+  run: ExecutionRun
+  broadcast: BroadcastFn
+  runner: RunnerType
+}): RunOrchestration {
+  const { run, broadcast, runner } = opts
+  const runId = run.id
+  const agentId = run.agentId
+  const logStream = fs.createWriteStream(run.logPath, { flags: 'a', encoding: 'utf8' })
+
+  let logBytesWritten = 0
+  try {
+    logBytesWritten = fs.statSync(run.logPath).size
+  } catch {
+    logBytesWritten = 0
+  }
+  let logCapped = RUN_LOG_MAX_BYTES > 0 && logBytesWritten >= RUN_LOG_MAX_BYTES
+  let lastLine = run.lastLine ?? ''
+
+  const eventBuffer: RunEvent[] = []
+  let flushScheduled = false
+  function scheduleFlush(): void {
+    if (flushScheduled) return
+    flushScheduled = true
+    setImmediate(() => {
+      flushScheduled = false
+      if (eventBuffer.length > 0) {
+        const events = eventBuffer.splice(0)
+        broadcast('run:events', { runId, events })
+      }
+    })
+  }
+
+  function writeRunEvent(event: RunEvent): void {
+    const line = JSON.stringify(event)
+    if (!logCapped) {
+      logStream.write(line + '\n')
+      if (RUN_LOG_MAX_BYTES > 0) {
+        logBytesWritten += Buffer.byteLength(line) + 1
+        if (logBytesWritten >= RUN_LOG_MAX_BYTES) {
+          logCapped = true
+          logStream.write(
+            JSON.stringify({
+              t: Date.now(),
+              kind: 'raw',
+              stream: 'system',
+              text: `[Conduit: run log truncated on disk — exceeded ${RUN_LOG_MAX_BYTES}-byte cap. Live output continues.]`,
+            }) + '\n'
+          )
+        }
+      }
+    }
+    process.stdout.write(JSON.stringify({ runId, agentId, ...event }) + '\n')
+  }
+
+  const eventHandlers = createRunEventHandlers({
+    write: writeRunEvent,
+    live: (event) => {
+      const summary = summarizeEvent(event)
+      if (summary) lastLine = summary.slice(0, 500)
+      eventBuffer.push(event)
+      scheduleFlush()
+    },
+  })
+
+  let finalized = false
+  let workspacePath: string | undefined = run.workspacePath
+  let isEphemeral = false
+  let worktreeClonePath: string | undefined = undefined
+
+  async function finalizeRun(
+    status: 'completed' | 'failed' | 'stopped',
+    exitCode: number | null | undefined
+  ): Promise<void> {
+    if (finalized) return
+    finalized = true
+    activeProcesses.delete(runId)
+    cleanupRun(runId, workspacePath, isEphemeral, worktreeClonePath)
+
+    if (eventBuffer.length > 0) {
+      const events = eventBuffer.splice(0)
+      broadcast('run:events', { runId, events })
+    }
+
+    await new Promise<void>((resolve) => {
+      logStream.end(() => resolve())
+    })
+
+    const endedAt = Date.now()
+    const durationMs = endedAt - run.startedAt
+
+    try {
+      const finalRun = await updateRunIfRunning(runId, {
+        status,
+        endedAt,
+        durationMs,
+        exitCode: exitCode ?? undefined,
+        lastLine: lastLine || undefined,
+      })
+      if (!finalRun) return
+      broadcast('run:statusChange', {
+        runId,
+        status,
+        exitCode: exitCode ?? undefined,
+        endedAt,
+        durationMs,
+      })
+      await publishRunResult(agentId, finalRun)
+    } catch (err) {
+      console.error(`[server/runner] Finalize failed for run ${runId}:`, err)
+    } finally {
+      notifyRunFinalized()
+    }
+  }
+
+  const sink: WorkerEventSink = {
+    onEvent: (init) => {
+      eventHandlers.onEvent(init)
+    },
+    onDurableEvent: eventHandlers.onDurableEvent,
+    onError: (err) => {
+      console.error(`[server/runner] Spawn error for run ${runId}:`, err)
+      reporter.captureException(err, {
+        tags: { component: 'runner', runId, runner },
+      })
+      eventHandlers.onEvent({ kind: 'raw', stream: 'system', text: `\n[Error: ${err.message}]\n` })
+      void finalizeRun('failed', undefined)
+    },
+    onExit: (status, exitCode) => {
+      if (status === 'failed' && !finalized) {
+        const report = buildRunFailureReport({ runId, runner, exitCode, lastLine })
+        reporter.captureMessage(report.message, report.level, report.ctx)
+      }
+      return finalizeRun(status, exitCode)
+    },
+  }
+
+  return {
+    sink,
+    emitSystemMessage: (text) => {
+      eventHandlers.onEvent({ kind: 'raw', stream: 'system', text })
+    },
+    register: (handle) => {
+      workspacePath = handle.workspacePath
+      isEphemeral = handle.ephemeral
+      worktreeClonePath = handle.worktreeClonePath
+      activeProcesses.set(runId, {
+        handle,
+        finalize: finalizeRun,
+        workspacePath: workspacePath ?? '',
+        agentId,
+      })
+    },
+    abort: () => {
+      finalized = true
+      logStream.end()
+    },
+  }
 }
 
 /**
@@ -346,134 +518,13 @@ export async function startRunServer(
     throw err
   }
 
-  // 5. Open log file write stream
-  const logStream = fs.createWriteStream(realLogPath, { flags: 'a', encoding: 'utf8' })
-
-  // Bytes written to the on-disk log so far, and whether the cap has been hit.
-  let logBytesWritten = 0
-  let logCapped = false
-
-  // Persist one structured event to the run's log file (until the per-run size
-  // cap), then forward it to the platform log pipeline. New runs store RunEvents
-  // (one per NDJSON line); old runs' ANSI LogEntry logs still replay via the
-  // format-detecting reader.
-  function writeRunEvent(event: RunEvent): void {
-    const line = JSON.stringify(event)
-    if (!logCapped) {
-      logStream.write(line + '\n')
-      if (RUN_LOG_MAX_BYTES > 0) {
-        logBytesWritten += Buffer.byteLength(line) + 1
-        if (logBytesWritten >= RUN_LOG_MAX_BYTES) {
-          logCapped = true
-          logStream.write(
-            JSON.stringify({
-              t: Date.now(),
-              kind: 'raw',
-              stream: 'system',
-              text: `[Conduit: run log truncated on disk — exceeded ${RUN_LOG_MAX_BYTES}-byte cap. Live output continues.]`,
-            }) + '\n'
-          )
-        }
-      }
-    }
-    // Always emit to stdout so the platform log forwarder (Datadog, etc.) ingests.
-    process.stdout.write(JSON.stringify({ runId, agentId, ...event }) + '\n')
-  }
-
-  // Last meaningful activity (plain text) for the runs-list excerpt / live label.
-  let lastLine = ''
-
-  // Buffer + flush structured events into batched WebSocket broadcasts.
-  const eventBuffer: RunEvent[] = []
-  let flushScheduled = false
-  function scheduleFlush(): void {
-    if (flushScheduled) return
-    flushScheduled = true
-    setImmediate(() => {
-      flushScheduled = false
-      if (eventBuffer.length > 0) {
-        const events = eventBuffer.splice(0)
-        broadcast('run:events', { runId, events })
-      }
-    })
-  }
-
-  const eventHandlers = createRunEventHandlers({
-    write: writeRunEvent,
-    live: (event) => {
-      const summary = summarizeEvent(event)
-      if (summary) lastLine = summary.slice(0, 500)
-      eventBuffer.push(event)
-      scheduleFlush()
-    },
-  })
-
-  // Stamp, persist, summarize (for lastLine), and queue an event for broadcast.
-  function emitEvent(init: RunEventInit): void {
-    eventHandlers.onEvent(init)
-  }
-
-  function emitSystemMessage(text: string): void {
-    emitEvent({ kind: 'raw', stream: 'system', text })
-  }
-
-  // Guard against double-finalization (e.g. stopRun + close event)
-  let finalized = false
-
-  // Workspace facts reported by the worker once execution starts; finalized
-  // runs can only happen after that (events are asynchronous), so these are
-  // always populated by the time finalizeRun runs.
-  let workspacePath: string | undefined = undefined
-  let isEphemeral = false
-  let worktreeClonePath: string | undefined = undefined
-
-  async function finalizeRun(
-    status: 'completed' | 'failed' | 'stopped',
-    exitCode: number | null | undefined
-  ): Promise<void> {
-    if (finalized) return
-    finalized = true
-    activeProcesses.delete(runId)
-    cleanupRun(runId, workspacePath, isEphemeral, worktreeClonePath)
-
-    // Flush any remaining buffered events
-    if (eventBuffer.length > 0) {
-      const events = eventBuffer.splice(0)
-      broadcast('run:events', { runId, events })
-    }
-
-    logStream.end()
-
-    const endedAt = Date.now()
-    const durationMs = endedAt - runRecord.startedAt
-
-    await updateRun(runId, {
-      status,
-      endedAt,
-      durationMs,
-      exitCode: exitCode ?? undefined,
-      lastLine: lastLine || undefined,
-    })
-      .then((finalRun) => {
-        broadcast('run:statusChange', {
-          runId,
-          status,
-          exitCode: exitCode ?? undefined,
-          endedAt,
-          durationMs,
-        })
-        return publishRunResult(agentId, finalRun)
-      })
-      .catch((err) => console.error(`[server/runner] Finalize failed for run ${runId}:`, err))
-
-    // Reclaim disk promptly after every job finishes (see setRunFinalizedHook).
-    notifyRunFinalized()
-  }
+  const run = { ...runRecord, logPath: realLogPath }
+  const orch = createRunOrchestration({ run, broadcast, runner: agent.runner })
 
   // Surface a broken push credential into the run log so it's attributable at a
   // glance, rather than only showing up later as an opaque `git push` failure.
   if (pushCredentialError) {
-    emitSystemMessage(
+    orch.emitSystemMessage(
       `⚠️  Could not obtain GitHub push credentials for this repository: ${pushCredentialError}\n` +
       `   The agent can read the code, but "git push" (and opening PRs) will fail. ` +
       `Check the repository's authentication settings.`
@@ -483,7 +534,7 @@ export async function startRunServer(
   // Cursor loads MCPs from the workspace/user config, not from Conduit's
   // injected config — say so up front rather than silently ignoring them.
   if (agent.runner === 'cursor' && Object.keys(agent.mcpConfig?.mcpServers ?? {}).length > 0) {
-    emitSystemMessage(
+    orch.emitSystemMessage(
       `[Conduit: cursor-agent has no --mcp-config flag, so this agent's configured MCP ` +
         `servers are not injected. Cursor loads MCPs from the workspace .cursor/mcp.json ` +
         `and the user's global Cursor config.]`
@@ -505,60 +556,25 @@ export async function startRunServer(
     workspace: workspaceSpec,
   }
 
-  const sink: WorkerEventSink = {
-    onEvent: (init) => emitEvent(init),
-    onDurableEvent: eventHandlers.onDurableEvent,
-    onError: (err) => {
-      // Spawn-level failure (binary not on PATH, etc.)
-      console.error(`[server/runner] Spawn error for run ${runId}:`, err)
-      reporter.captureException(err, {
-        tags: { component: 'runner', runId, runner: agent.runner },
-      })
-      emitSystemMessage(`\n[Error: ${err.message}]\n`)
-      void finalizeRun('failed', undefined)
-    },
-    onExit: (status, exitCode) => {
-      // Surface failed runs to the error reporter — a non-zero exit (or a
-      // process killed when the disk filled) was previously only written to
-      // the DB and never captured. Skip when already finalized: a spawn error
-      // or an explicit stopRun has its own handling and would double-report.
-      if (status === 'failed' && !finalized) {
-        const report = buildRunFailureReport({ runId, runner: agent.runner, exitCode, lastLine })
-        reporter.captureMessage(report.message, report.level, report.ctx)
-      }
-      return finalizeRun(status, exitCode)
-    },
-  }
-
   let handle: WorkerHandle
   try {
-    handle = await factory.startRun(spec, sink)
+    handle = await factory.startRun(spec, orch.sink)
   } catch (err) {
     // Rethrown to the caller (WS 'runs:start' handler / triggerService), which
     // reports it — capturing here too would double-report. The factory rolls
     // back any workspace/config it created before throwing.
     cleanupRun(runId, undefined, false)
-    logStream.end()
+    orch.abort()
     await updateRun(runId, { status: 'failed', endedAt: Date.now() })
     broadcast('run:statusChange', { runId, status: 'failed' })
     throw err
   }
 
-  workspacePath = handle.workspacePath
-  isEphemeral = handle.ephemeral
-  worktreeClonePath = handle.worktreeClonePath
-
-  activeProcesses.set(runId, {
-    handle,
-    finalize: finalizeRun,
-    workspacePath: workspacePath ?? '',
-    agentId,
-  })
+  orch.register(handle)
 
   // Record the resolved workspace path (worker-local for remote factories) and
   // the executing worker's identity.
-  const run = await updateRun(runId, { workspacePath, workerId: handle.workerId })
-  return run
+  return await updateRun(runId, { workspacePath: handle.workspacePath, workerId: handle.workerId })
 }
 
 /**

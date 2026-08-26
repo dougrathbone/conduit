@@ -336,6 +336,12 @@ export class WorkerControlPlane {
     }
   }
 
+  /** Send run:cancel on the currently bound socket (no-op if detached/unbound). */
+  requestCancel(runId: string): void {
+    const a = this.runs.get(runId)
+    if (a) this.sendOn(a.ws, { type: 'run:cancel', runId })
+  }
+
   private buildHandle(runId: string, assignment: Assignment): WorkerHandle {
     return {
       runId,
@@ -346,7 +352,7 @@ export class WorkerControlPlane {
       ephemeral: false,
       workerId: assignment.workerId,
       cancel: async () => {
-        this.sendOn(assignment.ws, { type: 'run:cancel', runId })
+        this.requestCancel(runId)
       },
     }
   }
@@ -923,9 +929,15 @@ function rawMessageBytes(data: Buffer | ArrayBuffer | Buffer[] | string): number
 let controlPlane: WorkerControlPlane | null = null
 
 /** Process-wide control plane, created lazily so importing modules at startup
- *  doesn't open the endpoint before the upgrade handler is wired. */
-export function getWorkerControlPlane(): WorkerControlPlane {
-  if (!controlPlane) controlPlane = new WorkerControlPlane()
+ *  doesn't open the endpoint before the upgrade handler is wired. Pass options
+ *  on the first call (recoverRun must be installed before worker upgrades). */
+export function getWorkerControlPlane(options?: WorkerControlPlaneOptions): WorkerControlPlane {
+  if (!controlPlane) controlPlane = new WorkerControlPlane(options)
+  return controlPlane
+}
+
+/** The singleton if it has already been constructed; never creates one. */
+export function peekWorkerControlPlane(): WorkerControlPlane | null {
   return controlPlane
 }
 
