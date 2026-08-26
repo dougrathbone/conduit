@@ -150,10 +150,23 @@ export const WORKER_MAX_EVENT_BATCH = 256
 /** Default worker reconnect window while retrying unacked delivery. */
 export const DEFAULT_WORKER_RECONNECT_TIMEOUT_MS = 300_000
 
-/** Positive milliseconds from CONDUIT_WORKER_RECONNECT_TIMEOUT_MS, else 300_000. */
+/** Largest delay `setTimeout` honors; anything above it fires immediately. */
+export const MAX_TIMER_DELAY_MS = 2_147_483_647
+
+/** Clamp a delay to the range `setTimeout` can actually represent. */
+export function clampTimerDelayMs(ms: number): number {
+  return Math.min(Math.max(ms, 0), MAX_TIMER_DELAY_MS)
+}
+
+/**
+ * Positive milliseconds from CONDUIT_WORKER_RECONNECT_TIMEOUT_MS, else 300_000.
+ * Clamped to `MAX_TIMER_DELAY_MS`: a larger value would overflow `setTimeout`
+ * and expire the delivery window immediately — the opposite of what was asked.
+ */
 export function resolveWorkerReconnectTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
   const n = Number(env.CONDUIT_WORKER_RECONNECT_TIMEOUT_MS)
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_WORKER_RECONNECT_TIMEOUT_MS
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_WORKER_RECONNECT_TIMEOUT_MS
+  return clampTimerDelayMs(n)
 }
 
 export type WorkerMessageParseFailure = 'malformed' | 'invalid' | 'oversized-batch'

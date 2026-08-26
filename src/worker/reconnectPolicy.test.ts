@@ -3,11 +3,14 @@ import { planAfterRunExit } from './oneShot'
 import { createEventFlushQueue } from './eventFlush'
 import { createReliableDeliveryQueue } from './reliableDelivery'
 import type { ReliableRunFrame } from '../shared/workerControl'
+import { MAX_TIMER_DELAY_MS } from '../shared/workerControl'
 import {
   createReconnectPolicy,
+  createRejectedRunLedger,
   expireDeliveryRecovery,
   hasPendingDelivery,
   holdAllSends,
+  installUnlessRejected,
   pendingRunIds,
   recordLocalExit,
   rejectAssignedRun,
@@ -156,6 +159,125 @@ describe('ReconnectPolicy outage deadline', () => {
     expect(policy.isExpired()).toBe(false)
     vi.advanceTimersByTime(1)
     expect(policy.isExpired()).toBe(true)
+  })
+
+  it('fires the deadline while the worker is connected, not only from reconnect scheduling', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const expiries: number[] = []
+    const policy = createReconnectPolicy({
+      timeoutMs: 1_000,
+      clock: injectedClock(),
+      onExpired: () => expiries.push(Date.now()),
+    })
+
+    policy.noteDisconnect(['run-1'])
+    // Reconnected successfully but the server never resumed or rejected the run.
+    policy.noteOpen()
+    vi.advanceTimersByTime(999)
+    expect(expiries).toEqual([])
+    vi.advanceTimersByTime(1)
+    expect(expiries).toEqual([1_000])
+    policy.cancel()
+  })
+
+  it('does not fire the connected deadline once every pending run is handled', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const expiries: number[] = []
+    const policy = createReconnectPolicy({
+      timeoutMs: 1_000,
+      clock: injectedClock(),
+      onExpired: () => expiries.push(Date.now()),
+    })
+
+    policy.noteDisconnect(['run-1'])
+    policy.noteOpen()
+    vi.advanceTimersByTime(500)
+    policy.noteHandled('run-1')
+    vi.advanceTimersByTime(5_000)
+    expect(expiries).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('re-arms the connected deadline when an assignment supplies a new window', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const expiries: number[] = []
+    const policy = createReconnectPolicy({
+      timeoutMs: 10_000,
+      clock: injectedClock(),
+      onExpired: () => expiries.push(Date.now()),
+    })
+
+    policy.noteDisconnect(['run-1'])
+    policy.setTimeoutMs(2_000)
+    vi.advanceTimersByTime(1_999)
+    expect(expiries).toEqual([])
+    vi.advanceTimersByTime(1)
+    expect(expiries).toEqual([2_000])
+    policy.cancel()
+  })
+
+  it('clamps an oversized window to the maximum timer delay instead of firing immediately', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const expiries: number[] = []
+    const policy = createReconnectPolicy({
+      timeoutMs: Number.MAX_SAFE_INTEGER,
+      clock: injectedClock(),
+      onExpired: () => expiries.push(Date.now()),
+    })
+    policy.noteDisconnect(['run-1'])
+    expect(policy.remainingMs()).toBe(MAX_TIMER_DELAY_MS)
+    vi.advanceTimersByTime(60_000)
+    expect(expiries).toEqual([])
+    policy.cancel()
+  })
+})
+
+describe('rejected run ledger', () => {
+  it('cancels a handle that is installed after the reject arrived, so nothing leaks', async () => {
+    const ledger = createRejectedRunLedger()
+    ledger.reject('run-late')
+    expect(ledger.isRejected('run-late')).toBe(true)
+
+    const cancelled: string[] = []
+    const handles = new Map<string, { cancel(): Promise<void> }>()
+    const handle = {
+      cancel: async (): Promise<void> => {
+        cancelled.push('run-late')
+      },
+    }
+    const kept = await installUnlessRejected(ledger, 'run-late', handle, handles)
+
+    expect(kept).toBe(false)
+    expect(cancelled).toEqual(['run-late'])
+    expect(handles.has('run-late')).toBe(false)
+    expect(ledger.isRejected('run-late')).toBe(false)
+  })
+
+  it('keeps a handle for a run that was never rejected', async () => {
+    const ledger = createRejectedRunLedger()
+    const handles = new Map<string, { cancel(): Promise<void> }>()
+    const handle = { cancel: async (): Promise<void> => {} }
+    expect(await installUnlessRejected(ledger, 'run-ok', handle, handles)).toBe(true)
+    expect(handles.get('run-ok')).toBe(handle)
+  })
+
+  it('bounds retained reject ids so a hostile server cannot grow worker memory', () => {
+    const ledger = createRejectedRunLedger(4)
+    for (let i = 0; i < 50; i++) ledger.reject(`run-${i}`)
+    expect(ledger.size).toBe(4)
+    expect(ledger.isRejected('run-49')).toBe(true)
+    expect(ledger.isRejected('run-0')).toBe(false)
+  })
+})
+
+describe('shutdown exit codes', () => {
+  it('exits non-zero when delivery was rejected or lost, and zero on clean delivery', () => {
+    expect(shutdownExitCode({ deliveryExpired: false })).toBe(0)
+    expect(shutdownExitCode({ deliveryExpired: true })).toBe(1)
   })
 })
 
@@ -311,10 +433,26 @@ describe('local exit and ACK-gated shutdown', () => {
     })
     expect(sent).toEqual([])
     expect(delivery.pending().map((frame) => frame.sequence)).toEqual([1, 2])
-    await replayFromCursor(delivery, 1, async (frame) => {
+    await expect(
+      replayFromCursor(delivery, 1, async (frame) => {
+        sent.push(frame.sequence)
+      })
+    ).resolves.toBe(true)
+    expect(sent).toEqual([2])
+  })
+
+  it('reports a rejected resume cursor so an unusable resume does not count as adoption', async () => {
+    const delivery = createReliableDeliveryQueue()
+    delivery.enqueue(started('run-1'))
+    holdAllSends(new Map([['run-1', delivery]]))
+    const sent: number[] = []
+
+    const accepted = await replayFromCursor(delivery, 42, async (frame) => {
       sent.push(frame.sequence)
     })
-    expect(sent).toEqual([2])
+
+    expect(accepted).toBe(false)
+    expect(sent).toEqual([])
   })
 })
 

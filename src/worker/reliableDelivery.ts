@@ -17,7 +17,12 @@ export type ReliableDeliverySend = (frame: ReliableRunFrame) => Promise<void>
 export interface ReliableDeliveryQueue {
   enqueue(frame: UnsequencedRunFrame): ReliableRunFrame
   acknowledge(sequence: number): void
-  resumeAfter(sequence: number): void
+  /**
+   * Apply a server resume cursor. Resolves `true` when the cursor was usable —
+   * only then has the server actually adopted this run's delivery; a cursor
+   * above the spool (or otherwise invalid) resolves `false` and changes nothing.
+   */
+  resumeAfter(sequence: number): Promise<boolean>
   drain(send: ReliableDeliverySend): Promise<void>
   /** Stop sending until a later resumeAfter applies a cursor for this connection. */
   holdSends(): void
@@ -64,18 +69,24 @@ export function createReliableDeliveryQueue(): ReliableDeliveryQueue {
     }
   }
 
-  const applyResume = (sequence: number): void => {
-    if (!Number.isSafeInteger(sequence) || sequence < 0) return
-    if (sequence > highestEnqueued()) return
+  const applyResume = (sequence: number): boolean => {
+    if (!Number.isSafeInteger(sequence) || sequence < 0) return false
+    if (sequence > highestEnqueued()) return false
     sentThrough = sequence
     sendsHeld = false
+    return true
   }
 
-  const resumeAfter = (sequence: number): void => {
-    chain = chain.then(
+  const resumeAfter = (sequence: number): Promise<boolean> => {
+    const applied = chain.then(
       () => applyResume(sequence),
       () => applyResume(sequence)
     )
+    chain = applied.then(
+      () => undefined,
+      () => undefined
+    )
+    return applied
   }
 
   const drainOnce = async (send: ReliableDeliverySend): Promise<void> => {

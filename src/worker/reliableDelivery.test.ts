@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   DEFAULT_WORKER_RECONNECT_TIMEOUT_MS,
+  MAX_TIMER_DELAY_MS,
   WORKER_MAX_EVENT_BATCH,
   parseWorkerToServerMessage,
   resolveWorkerReconnectTimeoutMs,
@@ -58,6 +59,19 @@ describe('resolveWorkerReconnectTimeoutMs', () => {
     expect(resolveWorkerReconnectTimeoutMs({ CONDUIT_WORKER_RECONNECT_TIMEOUT_MS: '0' })).toBe(300_000)
     expect(resolveWorkerReconnectTimeoutMs({ CONDUIT_WORKER_RECONNECT_TIMEOUT_MS: '-5' })).toBe(300_000)
     expect(resolveWorkerReconnectTimeoutMs({ CONDUIT_WORKER_RECONNECT_TIMEOUT_MS: 'nope' })).toBe(300_000)
+  })
+
+  it('clamps to the maximum setTimeout delay so a huge window cannot become an immediate expiry', () => {
+    expect(MAX_TIMER_DELAY_MS).toBe(2_147_483_647)
+    expect(
+      resolveWorkerReconnectTimeoutMs({ CONDUIT_WORKER_RECONNECT_TIMEOUT_MS: '2147483648' })
+    ).toBe(MAX_TIMER_DELAY_MS)
+    expect(resolveWorkerReconnectTimeoutMs({ CONDUIT_WORKER_RECONNECT_TIMEOUT_MS: '1e21' })).toBe(
+      MAX_TIMER_DELAY_MS
+    )
+    expect(
+      resolveWorkerReconnectTimeoutMs({ CONDUIT_WORKER_RECONNECT_TIMEOUT_MS: 'Infinity' })
+    ).toBe(300_000)
   })
 })
 
@@ -272,6 +286,18 @@ describe('ReliableDeliveryQueue', () => {
     queue.acknowledge(99)
     expect(queue.pending().map((frame) => frame.sequence)).toEqual([3])
     expect(queue.terminalAcknowledged).toBe(false)
+  })
+
+  it('reports whether a resume cursor was accepted so only an accepted resume counts as adoption', async () => {
+    const queue = createReliableDeliveryQueue()
+    queue.enqueue(started())
+    queue.enqueue(event('a'))
+
+    await expect(queue.resumeAfter(1)).resolves.toBe(true)
+    await expect(queue.resumeAfter(0)).resolves.toBe(true)
+    await expect(queue.resumeAfter(99)).resolves.toBe(false)
+    await expect(queue.resumeAfter(-1)).resolves.toBe(false)
+    await expect(queue.resumeAfter(1.5)).resolves.toBe(false)
   })
 
   it('ignores a resume cursor above the highest enqueued sequence so frames 1..terminal still drain', async () => {

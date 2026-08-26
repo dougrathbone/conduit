@@ -31,7 +31,10 @@ import type {
   WorkerCapabilities,
   WorkerToServerMessage,
 } from '../shared/workerControl'
-import { DEFAULT_WORKER_RECONNECT_TIMEOUT_MS, WORKER_HEARTBEAT_INTERVAL_MS } from '../shared/workerControl'
+import {
+  resolveWorkerReconnectTimeoutMs,
+  WORKER_HEARTBEAT_INTERVAL_MS,
+} from '../shared/workerControl'
 import { LocalWorkerFactory } from '../server/workers/localWorker'
 import { deleteMcpConfig } from '../main/utils/mcpConfigFile'
 import { deleteClaudeConfig } from '../main/utils/claudeConfig'
@@ -42,23 +45,27 @@ import { createEventFlushQueue } from './eventFlush'
 import { createReliableDeliveryQueue, type ReliableDeliveryQueue } from './reliableDelivery'
 import {
   createReconnectPolicy,
+  createRejectedRunLedger,
   expireDeliveryRecovery,
   hasPendingDelivery,
   holdAllSends,
+  installUnlessRejected,
   pendingRunIds,
   recordLocalExit,
   rejectAssignedRun,
   replayFromCursor,
   applyDeliveryAck,
   shouldShutdownAfterDelivery,
+  shutdownExitCode,
 } from './reconnectPolicy'
 import { createIdempotentShutdown, sendWsJson } from './wsSend'
 
 const SERVER_URL = process.env.CONDUIT_SERVER_URL?.trim()
 const TOKEN = process.env.CONDUIT_WORKER_TOKEN?.trim()
 const WORKER_ID = process.env.CONDUIT_WORKER_ID?.trim() || `${os.hostname()}-${process.pid}`
-/** Bumped when the control-plane protocol changes; reported in worker:hello. */
-const PROTOCOL_VERSION = '1'
+/** Bumped when the control-plane protocol changes; reported in worker:hello.
+ *  2 = sequenced/resumable delivery (run:ack, run:resume, run:reject). */
+const PROTOCOL_VERSION = '2'
 
 if (!SERVER_URL || !TOKEN) {
   console.error(
@@ -77,7 +84,15 @@ const STALE_WORKSPACE_GRACE_MS = 6 * 60 * 60 * 1000 // 6h
 const factory = new LocalWorkerFactory()
 const handles = new Map<string, WorkerHandle>()
 const deliveryQueues = new Map<string, ReliableDeliveryQueue>()
-const policy = createReconnectPolicy({ timeoutMs: DEFAULT_WORKER_RECONNECT_TIMEOUT_MS })
+const rejectedRuns = createRejectedRunLedger()
+const policy = createReconnectPolicy({
+  timeoutMs: resolveWorkerReconnectTimeoutMs(),
+  // The window must also expire while connected: a server that never resumes
+  // or rejects a reported run would otherwise leave the worker waiting forever.
+  onExpired: () => {
+    void expireRecovery()
+  },
+})
 
 let ws: WebSocket | null = null
 let heartbeat: NodeJS.Timeout | null = null
@@ -159,7 +174,7 @@ function sweepStaleArtifacts(): void {
   }
 }
 
-function maybeExitAfterDelivery(): void {
+function maybeExitAfterDelivery(deliveryExpired = false): void {
   if (
     !shouldShutdownAfterDelivery({
       shuttingDown,
@@ -169,7 +184,7 @@ function maybeExitAfterDelivery(): void {
   ) {
     return
   }
-  void shutdown(0)
+  void shutdown(shutdownExitCode({ deliveryExpired }))
 }
 
 async function drainOrDefer(delivery: ReliableDeliveryQueue): Promise<void> {
@@ -216,7 +231,15 @@ async function execute(spec: RunSpec, assignId?: string): Promise<void> {
 
   try {
     const handle = await factory.startRun(spec, sink)
-    handles.set(runId, handle)
+    // A run:reject can land while the CLI was still being spawned; installing
+    // through the ledger cancels such a handle instead of leaking the process.
+    const installed = await installUnlessRejected(rejectedRuns, runId, handle, handles)
+    if (!installed) {
+      deliveryQueues.delete(runId)
+      cleanupAfterRun(runId, handle)
+      maybeExitAfterDelivery(true)
+      return
+    }
     delivery.enqueue({ type: 'run:started', runId, workspacePath: handle.workspacePath, assignId })
     await drainOrDefer(delivery)
   } catch (err) {
@@ -248,18 +271,29 @@ function applyAck(runId: string, sequence: number): void {
 function applyResume(runId: string, sequence: number): void {
   const delivery = deliveryQueues.get(runId)
   if (!delivery) return
-  policy.noteHandled(runId)
-  void replayFromCursor(delivery, sequence, (frame) => send(frame)).catch(() => {
-    // Disconnect during replay; the next resume retries from the durable cursor.
-  })
+  void replayFromCursor(delivery, sequence, (frame) => send(frame))
+    .then((accepted) => {
+      // Only an accepted cursor means the server adopted this run's delivery,
+      // so only then may the outage deadline stop counting.
+      if (accepted) policy.noteHandled(runId)
+    })
+    .catch(() => {
+      // Disconnect during replay; the next resume retries from the durable cursor.
+    })
 }
 
 async function applyReject(runId: string, reason: string): Promise<void> {
   console.warn(`[worker] run:reject ${runId}: ${reason}`)
+  rejectedRuns.reject(runId)
   const result = await rejectAssignedRun({ runId, handles, deliveryQueues })
-  if (result.handle) cleanupAfterRun(runId, result.handle)
+  if (result.handle) {
+    rejectedRuns.clear(runId)
+    cleanupAfterRun(runId, result.handle)
+  }
   policy.noteHandled(runId)
-  maybeExitAfterDelivery()
+  // A rejected run never delivered: a one-shot worker must exit visibly
+  // non-zero so the orchestrator does not read it as a clean run.
+  maybeExitAfterDelivery(true)
 }
 
 async function expireRecovery(): Promise<void> {
