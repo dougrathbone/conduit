@@ -795,7 +795,7 @@ export class WorkerControlPlane {
     const now = Date.now()
     if (a.exitRetryDeadline === undefined) a.exitRetryDeadline = now + this.reconnectTimeoutMs
     const remaining = a.exitRetryDeadline - now
-    if (remaining <= 0) {
+    if (remaining <= 0 && !a.exitInFlight) {
       this.abandonTerminalDelivery(a)
       return
     }
@@ -804,7 +804,7 @@ export class WorkerControlPlane {
     a.exitRetryTimer = setTimeout(() => {
       a.exitRetryTimer = undefined
       this.redriveTerminalFrame(a)
-    }, Math.min(step, remaining))
+    }, remaining > 0 ? Math.min(step, remaining) : step)
   }
 
   /** Ask the worker to rewind to the durable cursor and resend the terminal frame. */
@@ -818,14 +818,16 @@ export class WorkerControlPlane {
       this.armReconnectTimerIfDetached(a)
       return
     }
-    if (Date.now() >= (a.exitRetryDeadline ?? 0)) {
-      this.abandonTerminalDelivery(a)
+    if (a.exitInFlight) {
+      // A resend is already being finalized, so that attempt owns the outcome:
+      // asking again would queue a duplicate behind it, and giving up on the
+      // window would reject a frame the finalize may be about to ACK. Checked
+      // before the deadline for exactly that reason.
+      this.scheduleExitRedrive(a)
       return
     }
-    if (a.exitInFlight) {
-      // A resend is already being finalized; asking again would only queue a
-      // duplicate behind it. Wait for that attempt's outcome instead.
-      this.scheduleExitRedrive(a)
+    if (Date.now() >= (a.exitRetryDeadline ?? 0)) {
+      this.abandonTerminalDelivery(a)
       return
     }
     this.sendOn(a.ws, { type: 'run:resume', runId, sequence: a.durableSequence })

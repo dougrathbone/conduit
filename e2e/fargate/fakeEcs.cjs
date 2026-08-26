@@ -7,7 +7,10 @@
  * `node out/worker/index.js`. The supervisor outlives an abrupt server death.
  *
  * Cross-process writers (server persist + supervisor exit/retry patches) share
- * CONDUIT_FARGATE_E2E_STATE under a lockfile: re-read, merge, atomic rename.
+ * CONDUIT_FARGATE_E2E_STATE under a lock: re-read, merge, atomic rename. The
+ * lock is a directory claimed by a single atomic mkdir, with an owner record
+ * written inside it afterwards; a lock with no owner yet counts as held, so no
+ * writer can mistake a mid-claim lock for an abandoned one.
  * Merge keeps max seq, union runTasks by ARN, STOPPED dominance, unioned
  * retryTimestamps, and non-null exit / PID metadata. STOPPED tasks retain
  * supervisorPid, workerPid, and pgid so cleanup can still kill leaked groups.
@@ -22,6 +25,7 @@ const path = require('node:path')
 const FAKE_ACCOUNT = '000000000000'
 const TASK_ARN_PREFIX = `arn:aws:ecs:local:${FAKE_ACCOUNT}:task/conduit-e2e`
 const LOCK_STALE_MS = 2000
+const LOCK_CLAIM_GRACE_MS = 500
 const LOCK_RETRY_MS = 10
 
 function statePath() {
@@ -194,53 +198,161 @@ function lockPath() {
   return dest ? `${dest}.lock` : ''
 }
 
-function readLockPid(file) {
+function ownerPath(dir) {
+  return path.join(dir, 'owner')
+}
+
+/**
+ * Who holds the lock, or null when that is not (yet) knowable — the directory
+ * exists but its owner file is missing, half-written, or corrupt.
+ */
+function readOwner(dir) {
   try {
-    const n = Number(String(fs.readFileSync(file, 'utf8')).trim())
-    return Number.isInteger(n) && n > 0 ? n : null
+    const raw = fs.readFileSync(ownerPath(dir), 'utf8')
+    const parsed = JSON.parse(raw)
+    const pid = Number(parsed?.pid)
+    const acquiredAt = Number(parsed?.acquiredAt)
+    if (!Number.isInteger(pid) || pid <= 0) return null
+    if (typeof parsed?.token !== 'string' || !parsed.token) return null
+    return { pid, token: parsed.token, acquiredAt: Number.isFinite(acquiredAt) ? acquiredAt : 0 }
   } catch {
     return null
   }
 }
 
-function acquireLock() {
-  const file = lockPath()
-  if (!file) return
-  const start = Date.now()
-  const deadline = start + LOCK_STALE_MS
-  for (;;) {
-    try {
-      const fd = fs.openSync(file, 'wx')
-      fs.writeFileSync(fd, String(process.pid))
-      fs.closeSync(fd)
-      return
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err
-      const holder = readLockPid(file)
-      const stale = Date.now() >= deadline
-      if (!holder || !pidAlive(holder) || stale) {
-        try {
-          fs.unlinkSync(file)
-        } catch {
-          // raced with another steal
-        }
-        if (stale && Date.now() - start > LOCK_STALE_MS + 500) {
-          sleepMs(LOCK_RETRY_MS)
-        }
-        continue
-      }
-      sleepMs(LOCK_RETRY_MS)
-    }
+/** Publish ownership atomically, so a reader never sees a partial record. */
+function writeOwner(dir, token) {
+  const tmp = path.join(dir, `owner.${process.pid}.tmp`)
+  fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, token, acquiredAt: Date.now() }))
+  fs.renameSync(tmp, ownerPath(dir))
+}
+
+function ageOf(target, fallbackAge) {
+  try {
+    return Date.now() - fs.statSync(target).mtimeMs
+  } catch {
+    return fallbackAge
   }
 }
 
-function releaseLock() {
-  const file = lockPath()
-  if (!file) return
-  const holder = readLockPid(file)
-  if (holder && holder !== process.pid && pidAlive(holder)) return
+/**
+ * Remove a lock nobody can be holding any more, so the next `mkdir` can claim
+ * it. Returns whether anything was removed; `false` means "still held, wait".
+ *
+ * The two reclaim reasons are deliberately different: a dead owner is proof, so
+ * it is reclaimed at once, while a lock we cannot attribute (owner file not
+ * written yet, or a legacy lock file) is presumed **held** and only reclaimed
+ * once it is older than the claim grace. Never stealing on sight is the whole
+ * point — the previous protocol published an empty lock file and then wrote its
+ * pid, so a competitor could read "no owner", call it stale, and walk straight
+ * in alongside the holder.
+ */
+function reclaimIfDead(dir) {
+  let stat
   try {
-    fs.unlinkSync(file)
+    stat = fs.statSync(dir)
+  } catch {
+    return true // vanished; try to claim it
+  }
+
+  // Backward compatibility: a lock left behind by the old file-based protocol.
+  if (stat.isFile()) {
+    let pid = null
+    try {
+      const n = Number(String(fs.readFileSync(dir, 'utf8')).trim())
+      if (Number.isInteger(n) && n > 0) pid = n
+    } catch {
+      pid = null
+    }
+    const age = Date.now() - stat.mtimeMs
+    const expired = pid ? !pidAlive(pid) || age >= LOCK_STALE_MS : age >= LOCK_CLAIM_GRACE_MS
+    if (!expired) return false
+    try {
+      fs.unlinkSync(dir)
+    } catch {
+      // raced with another reclaim
+    }
+    return true
+  }
+
+  const owner = readOwner(dir)
+  const expired = owner
+    ? !pidAlive(owner.pid) || Date.now() - owner.acquiredAt >= LOCK_STALE_MS
+    : ageOf(dir, LOCK_CLAIM_GRACE_MS) >= LOCK_CLAIM_GRACE_MS
+  if (!expired) return false
+  try {
+    fs.rmSync(dir, { recursive: true, force: true })
+  } catch {
+    // raced with another reclaim
+  }
+  return true
+}
+
+/** Token of the lock this process currently holds, if any. */
+let heldToken = null
+let tokenCounter = 0
+
+/**
+ * Take the cross-process state lock. Ownership is decided by one atomic
+ * `mkdirSync` — the directory either did not exist (we now own it) or it did
+ * (someone else does). Recording who we are is a separate, later step, and
+ * correctness never depends on it having happened.
+ */
+function acquireLock() {
+  const dir = lockPath()
+  if (!dir) return
+  fs.mkdirSync(path.dirname(dir), { recursive: true })
+  for (;;) {
+    try {
+      fs.mkdirSync(dir, { recursive: false })
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err
+      if (!reclaimIfDead(dir)) sleepMs(LOCK_RETRY_MS)
+      continue
+    }
+    const token = `${process.pid}:${Date.now()}:${++tokenCounter}:${Math.random().toString(36).slice(2)}`
+    try {
+      writeOwner(dir, token)
+    } catch (err) {
+      if (err.code === 'ENOENT') {
+        // Our directory was reclaimed before we could name ourselves; the claim
+        // is simply lost, which is a retry rather than an error.
+        sleepMs(LOCK_RETRY_MS)
+        continue
+      }
+      // We own the directory but cannot say so; drop it rather than hold a lock
+      // nobody can attribute (and that only the claim grace would free).
+      try {
+        fs.rmSync(dir, { recursive: true, force: true })
+      } catch {
+        // best-effort
+      }
+      throw err
+    }
+    // Read our claim back: a reclaimer that judged this lock stale a moment
+    // before we created it could have removed the directory underneath us and
+    // claimed its own. Whoever the owner file names is the holder.
+    const owner = readOwner(dir)
+    if (!owner || owner.token !== token) {
+      sleepMs(LOCK_RETRY_MS)
+      continue
+    }
+    heldToken = token
+    return
+  }
+}
+
+/** Release only our own lock: a lock reclaimed from us now belongs to someone else. */
+function releaseLock() {
+  const dir = lockPath()
+  if (!dir) return
+  const token = heldToken
+  heldToken = null
+  if (!token) return
+  const owner = readOwner(dir)
+  if (!owner || owner.token !== token) return
+  try {
+    fs.rmSync(dir, { recursive: true, force: true })
   } catch {
     // already gone
   }
@@ -579,6 +691,8 @@ if (require.main === module && process.argv[2] === '--supervise') {
     createFakeEcsClient,
     mergeSnapshots,
     persistSnapshot,
+    acquireLock,
+    releaseLock,
     cleanupPidsForTask,
     killRecordedTasks,
     TASK_ARN_PREFIX,

@@ -101,7 +101,9 @@ disconnected. So the server re-drives it: `run:resume` at the durable cursor
 after an exponential backoff (`exitRetryInitialDelayMs`/`exitRetryMaxDelayMs`),
 which makes the worker rewind and resend. Re-drives are bounded by one delivery
 window from the first failure; if the state is still not durable by then the
-delivery is rejected and the run failed, so a one-shot task cannot bill forever.
+delivery is rejected and the run failed, so a one-shot task cannot bill forever —
+except while a finalize is still in flight, which owns the outcome and is waited
+out rather than rejected (a slow commit must not be rejected and then ACKed).
 A disconnect mid-way cancels the re-drive and hands recovery back to the normal
 reconnect resume under the detach deadline.
 

@@ -621,6 +621,195 @@ describe('fake ECS state hydration', () => {
   })
 })
 
+/**
+ * Mutual exclusion of the cross-process state lock, tested with real barriers
+ * rather than by racing and hoping. Each test puts the lock into one exact
+ * contended shape, then proves a competing writer waits instead of entering —
+ * the property every merge in this harness depends on.
+ */
+describe('fake ECS state lock', () => {
+  const requireE2e = createRequire(path.join(process.cwd(), 'package.json'))
+  const e2eModule = path.resolve(process.cwd(), 'e2e/fargate/fakeEcs.cjs')
+  let tmpDir: string
+  let kids: ReturnType<typeof spawn>[] = []
+  const prevState = process.env.CONDUIT_FARGATE_E2E_STATE
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'conduit-fake-ecs-lock-'))
+    kids = []
+  })
+
+  afterEach(() => {
+    for (const kid of kids) {
+      if (!kid.pid) continue
+      try {
+        process.kill(kid.pid, 'SIGKILL')
+      } catch {
+        // already gone
+      }
+    }
+    if (prevState === undefined) delete process.env.CONDUIT_FARGATE_E2E_STATE
+    else process.env.CONDUIT_FARGATE_E2E_STATE = prevState
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  /** Spawn a child, capturing its exit up front so a fast exit cannot be missed. */
+  function spawnKid(script: string, stateFile: string, args: string[] = []) {
+    const kid = spawn(process.execPath, ['-e', script, ...args], {
+      env: { ...process.env, CONDUIT_FARGATE_E2E_STATE: stateFile },
+      stdio: 'ignore',
+    })
+    kids.push(kid)
+    const exited = new Promise<void>((resolve) => kid.once('exit', () => resolve()))
+    return { kid, exited }
+  }
+
+  /** A child that persists one patch, then marks a file so we can see it entered. */
+  function spawnWriter(stateFile: string, doneFile: string, patch: object) {
+    return spawnKid(
+      `
+        const fs = require('node:fs')
+        const { persistSnapshot } = require(${JSON.stringify(e2eModule)})
+        persistSnapshot(JSON.parse(process.argv[1]))
+        fs.writeFileSync(${JSON.stringify(doneFile)}, '1')
+      `,
+      stateFile,
+      [JSON.stringify(patch)]
+    )
+  }
+
+  const settle = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+  async function waitFor(file: string, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (fs.existsSync(file)) return true
+      await settle(10)
+    }
+    return false
+  }
+
+  const patch = { seq: 2, runTasks: [], tasks: { t: { lastStatus: 'RUNNING' } } }
+
+  it('does not enter a lock whose owner has not been recorded yet', async () => {
+    const stateFile = path.join(tmpDir, 'fake-ecs.json')
+    const doneFile = path.join(tmpDir, 'done')
+    // Exactly the state a holder publishes in the window between claiming the
+    // lock and recording who owns it. Unowned must not mean unheld.
+    fs.writeFileSync(`${stateFile}.lock`, '')
+
+    const { exited } = spawnWriter(stateFile, doneFile, patch)
+    await settle(200)
+    expect(fs.existsSync(doneFile)).toBe(false)
+    expect(fs.existsSync(stateFile)).toBe(false)
+
+    fs.rmSync(`${stateFile}.lock`, { recursive: true, force: true })
+    expect(await waitFor(doneFile, 5_000)).toBe(true)
+    await exited
+    expect(JSON.parse(fs.readFileSync(stateFile, 'utf8')).tasks.t.lastStatus).toBe('RUNNING')
+  })
+
+  it('does not enter a claimed lock directory that has no owner file yet', async () => {
+    const stateFile = path.join(tmpDir, 'fake-ecs.json')
+    const doneFile = path.join(tmpDir, 'done')
+    fs.mkdirSync(`${stateFile}.lock`)
+
+    const { exited } = spawnWriter(stateFile, doneFile, patch)
+    await settle(200)
+    expect(fs.existsSync(doneFile)).toBe(false)
+
+    fs.rmSync(`${stateFile}.lock`, { recursive: true, force: true })
+    expect(await waitFor(doneFile, 5_000)).toBe(true)
+    await exited
+    expect(JSON.parse(fs.readFileSync(stateFile, 'utf8')).tasks.t.lastStatus).toBe('RUNNING')
+  })
+
+  it('waits for a live holder and proceeds the moment it releases', async () => {
+    const { acquireLock, releaseLock } = requireE2e(e2eModule) as {
+      acquireLock: () => void
+      releaseLock: () => void
+    }
+    const stateFile = path.join(tmpDir, 'fake-ecs.json')
+    const doneFile = path.join(tmpDir, 'done')
+    process.env.CONDUIT_FARGATE_E2E_STATE = stateFile
+
+    acquireLock()
+    const { exited } = spawnWriter(stateFile, doneFile, patch)
+    await settle(200)
+    expect(fs.existsSync(doneFile)).toBe(false)
+
+    releaseLock()
+    expect(await waitFor(doneFile, 5_000)).toBe(true)
+    await exited
+  })
+
+  it('reclaims a lock whose owner is gone, without waiting forever', async () => {
+    const { acquireLock } = requireE2e(e2eModule) as { acquireLock: () => void }
+    const stateFile = path.join(tmpDir, 'fake-ecs.json')
+    const doneFile = path.join(tmpDir, 'done')
+
+    // A holder that dies mid-transaction: the lock outlives the process.
+    const holder = spawnKid(
+      `
+        const fs = require('node:fs')
+        const { acquireLock } = require(${JSON.stringify(e2eModule)})
+        acquireLock()
+        fs.writeFileSync(${JSON.stringify(path.join(tmpDir, 'held'))}, '1')
+        setInterval(() => {}, 1000)
+      `,
+      stateFile
+    )
+    expect(await waitFor(path.join(tmpDir, 'held'), 5_000)).toBe(true)
+    process.kill(holder.kid.pid!, 'SIGKILL')
+    await holder.exited
+
+    const { exited } = spawnWriter(stateFile, doneFile, patch)
+    expect(await waitFor(doneFile, 10_000)).toBe(true)
+    await exited
+    // And the reclaiming process really owned it: it could lock again cleanly.
+    process.env.CONDUIT_FARGATE_E2E_STATE = stateFile
+    expect(() => acquireLock()).not.toThrow()
+  })
+
+  it('keeps every concurrent writer\u2019s update when many processes pile on at once', async () => {
+    const stateFile = path.join(tmpDir, 'fake-ecs.json')
+    const writers = 8
+    const started = Array.from({ length: writers }, (_, i) =>
+      spawnWriter(stateFile, path.join(tmpDir, `done-${i}`), {
+        seq: i + 1,
+        runTasks: [{ taskArn: `arn:aws:ecs:local:000000000000:task/conduit-e2e/0000000${i + 1}` }],
+        tasks: { [`t${i}`]: { lastStatus: 'STOPPED', exitCode: i } },
+      })
+    )
+    await Promise.all(started.map((s) => s.exited))
+
+    const state = JSON.parse(fs.readFileSync(stateFile, 'utf8'))
+    // A lost update means a writer read a snapshot another writer was mid-way
+    // through replacing — exactly what the lock exists to prevent.
+    for (let i = 0; i < writers; i++) {
+      expect(state.tasks[`t${i}`]?.exitCode, `writer ${i} was lost`).toBe(i)
+    }
+    expect(fs.existsSync(`${stateFile}.lock`)).toBe(false)
+  }, 30_000)
+
+  it('never releases a lock another process owns', async () => {
+    const { acquireLock, releaseLock } = requireE2e(e2eModule) as {
+      acquireLock: () => void
+      releaseLock: () => void
+    }
+    const stateFile = path.join(tmpDir, 'fake-ecs.json')
+    process.env.CONDUIT_FARGATE_E2E_STATE = stateFile
+    acquireLock()
+
+    const intruder = spawnKid(`require(${JSON.stringify(e2eModule)}).releaseLock()`, stateFile)
+    await intruder.exited
+
+    expect(fs.existsSync(`${stateFile}.lock`)).toBe(true)
+    releaseLock()
+    expect(fs.existsSync(`${stateFile}.lock`)).toBe(false)
+  })
+})
+
 describe('buildFargateEcsClientConfig', () => {
   it('does not assume a role when roleArn is unset', () => {
     expect(buildFargateEcsClientConfig(baseConfig()).credentials).toBeUndefined()

@@ -1390,6 +1390,63 @@ describe('WorkerControlPlane detach, rebind, and idempotent ACK', () => {
     expect(await nextOrTimeout(worker.next, 300)).toBe('timeout')
   })
 
+  it('waits for a finalize that is still in flight rather than rejecting a frame it may yet ACK', async () => {
+    await ctx.close()
+    ctx = await startServer({
+      reconnectTimeoutMs: 200,
+      logsDir,
+      exitRetryInitialDelayMs: 20,
+      exitRetryMaxDelayMs: 40,
+    })
+    const worker = await connectWorker(ctx, { workerId: 'w1' })
+    const attempts: string[] = []
+    let releaseSecond = () => {}
+    const secondFinalize = new Promise<void>((resolve) => {
+      releaseSecond = resolve
+    })
+    const handlePromise = ctx.controlPlane.assign(SPEC, {
+      onEvent: () => {},
+      onExit: async (status) => {
+        attempts.push(status)
+        if (attempts.length === 1) throw new Error('db unavailable')
+        // A slow commit: it outlives the re-drive window but does succeed.
+        await secondFinalize
+      },
+    })
+    void handlePromise.catch(() => {})
+    await worker.next()
+    worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, sequence: 1 }))
+    expect(await worker.next()).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 1 })
+    await handlePromise
+
+    const exitFrame = {
+      type: 'run:exit',
+      runId: SPEC.runId,
+      sequence: 2,
+      status: 'completed',
+      exitCode: 0,
+    }
+    worker.ws.send(JSON.stringify(exitFrame))
+    expect(await worker.next(500)).toEqual({
+      type: 'run:resume',
+      runId: SPEC.runId,
+      sequence: 1,
+    })
+    worker.ws.send(JSON.stringify(exitFrame))
+
+    // The window lapses while the second finalize is still pending. Abandoning
+    // here would reject a frame that is about to be acknowledged.
+    await vi.waitFor(() => {
+      expect(attempts).toHaveLength(2)
+    })
+    expect(await nextOrTimeout(worker.next, 500)).toBe('timeout')
+
+    releaseSecond()
+    expect(await worker.next(500)).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 2 })
+    expect(attempts).toEqual(['completed', 'completed'])
+    expect(ctx.controlPlane.activeAssignmentCount).toBe(0)
+  })
+
   it('lets a reconnect drive the resume after a detach instead of a stale retry timer', async () => {
     const { worker, attempts, exitFrame } = await startRunWithFailingExit({
       failTimes: 1,
