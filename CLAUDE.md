@@ -65,15 +65,35 @@ is required regardless of dev-bypass auth; without it the endpoint 401s everythi
 Use `wss://` outside localhost — RunSpecs carry resolved secrets.
 
 **Protocol** (`src/shared/workerControl.ts` — types only): worker→server
-`worker:hello` (capabilities: which runner CLIs are on PATH), `worker:heartbeat`
-(30s lease with active run ids), `run:started`, `run:event` (batched), `run:exit`;
-server→worker `run:assign` (RunSpec), `run:cancel`.
+`worker:hello` (capabilities: which runner CLIs are on PATH; `activeRunIds` plus
+`pendingRunIds` for unacked delivery so a worker that finished while disconnected
+can still be adopted), `worker:heartbeat` (30s lease with active run ids),
+`run:started`, `run:event` (batched), `run:exit` — started/event/exit frames carry
+a per-run delivery sequence. Server→worker `run:assign` (RunSpec plus
+`reconnectTimeoutMs`), `run:ack` (highest contiguous sequence durably applied),
+`run:resume` (replay from the durable cursor), `run:reject`, `run:cancel`.
 
-**Lease semantics**: socket close or 75s without a heartbeat (`WORKER_LEASE_MS`)
-= dead worker; its runs are failed via a synthesized exit into each run's event
-sink, so the orchestrator's normal finalize path (log, broadcast, publish) runs.
-Server restart marks all `running` runs failed as before — workers can't be
-re-adopted (their event pipelines died with the process).
+The worker keeps every frame on a process-local spool until the matching
+contiguous sequence is ACKed, then resends later frames in order after
+`run:resume`. Duplicate frames at or below the server cursor are not applied
+again. Compatibility is fail-safe: a worker without resumable-delivery support
+cannot claim a recoverable assignment.
+
+**Lease and reconnect**: socket close or 75s without a heartbeat (`WORKER_LEASE_MS`)
+detaches the assignment for the reconnect window instead of synthesizing
+immediate failure. The worker retries with capped exponential backoff from the
+first disconnect (default five minutes). One-shot (Fargate/EKS) workers do not
+exit after local process completion until `run:exit` is acknowledged. If the
+window expires, the worker cancels still-active execution and exits non-zero;
+the server appends an explicit reconnect-timeout diagnostic and marks the run
+failed.
+
+**Server replacement**: startup reconciliation still fails `local` / missing-kind
+orphans immediately. Remote/eks/fargate runs with a recorded `workerId` stay
+`running` until a matching worker reconnects or `CONDUIT_WORKER_RECONNECT_TIMEOUT_MS`
+elapses. Recovery assumes the existing database and `CONDUIT_DATA_DIR` run-log
+storage survive the web-server process — the same durability already required
+for run history. Discarding both stores is outside this guarantee.
 
 **Server env**:
 | Variable | Description |
@@ -82,6 +102,7 @@ re-adopted (their event pipelines died with the process).
 | `CONDUIT_WORKER_TOKEN` | Shared secret for /ws/worker upgrades |
 | `CONDUIT_WORKER_ASSIGN_TIMEOUT_MS` | run:assign → run:started timeout (default 120000) |
 | `CONDUIT_WORKER_CONNECT_TIMEOUT_MS` | `assignTo` wait for a named worker to dial in (default 600000) |
+| `CONDUIT_WORKER_RECONNECT_TIMEOUT_MS` | Delivery/reconnect window in ms (default 300000). Resolved once on the server and sent on every `run:assign`; tests inject short values. |
 
 **Worker env**: `CONDUIT_SERVER_URL` (`ws(s)://<host>/ws/worker`),
 `CONDUIT_WORKER_TOKEN`, `CONDUIT_WORKER_ID` (default `<hostname>-<pid>`).
@@ -119,7 +140,10 @@ are required. Optional: `CONDUIT_FARGATE_CONTAINER_NAME` (default `worker`),
 `ENABLED`), `CONDUIT_FARGATE_PLATFORM_VERSION`. AWS credentials/region: standard
 SDK chain. Bake `CONDUIT_WORKER_TOKEN` into the task definition via Secrets
 Manager (`secrets`), not `CONDUIT_FARGATE_WORKER_TOKEN` — the latter is a plain
-env override visible in DescribeTask output and is for dev only.
+env override visible in DescribeTask output and is for dev only. The Fargate
+task stays running while the worker retries delivery; once the terminal ACK
+arrives the one-shot worker exits and the task reaches `STOPPED`. A replacement
+server does not need the old factory's in-memory task ARN for that normal path.
 
 **Remote run specifics**: repo agents use `workspace.kind: 'repo-clone'` — a
 shallow clone straight from the remote with the run's short-lived token (no
@@ -403,7 +427,9 @@ npx tsc --noEmit --project tsconfig.server.json # Server only
 npm run build                             # Full production build
 npm run e2e:local   # E2E: in-process factory (needs build + Postgres via npm run db:up)
 npm run e2e:remote  # E2E: remote factory incl. worker-death + reconnect (same reqs)
-npm run e2e:fargate # E2E: Fargate factory + fake ECS (same reqs; no real AWS)
+npm run e2e:fargate # E2E: Fargate factory + fake ECS (same reqs; no real AWS).
+                    # Includes process-replacement restart (SIGKILL server, same
+                    # DB/data dir/token/state) and reconnect-expiry coverage.
 ```
 
 E2E suites live in `e2e/` — `e2e/lib/` holds the shared stub `claude` CLI,

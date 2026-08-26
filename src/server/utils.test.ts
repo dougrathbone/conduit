@@ -35,4 +35,17 @@ describe('runLogFromRows', () => {
     expect(log.format).toBe('events')
     if (log.format === 'events') expect(log.events).toHaveLength(1)
   })
+
+  it('skips delivery-sequence metadata rows when detecting the events format', () => {
+    const log = runLogFromRows([
+      { _deliverySequence: 1 },
+      { t: 2, kind: 'assistant', text: 'stub-claude received prompt', _deliverySequence: 2 },
+      { t: 3, kind: 'assistant', text: 'RECONNECT_DURING', _deliverySequence: 3 },
+    ])
+    expect(log.format).toBe('events')
+    if (log.format === 'events') {
+      expect(log.events).toHaveLength(2)
+      expect(log.events[0].text).toContain('stub-claude received prompt')
+    }
+  })
 })

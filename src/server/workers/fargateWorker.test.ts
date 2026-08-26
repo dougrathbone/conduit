@@ -1,5 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as path from 'node:path'
+import * as fs from 'node:fs'
+import * as os from 'node:os'
+import { spawn } from 'node:child_process'
+import { createRequire } from 'node:module'
 import type { ECSClient } from '@aws-sdk/client-ecs'
 import type { RunSpec, WorkerEventSink, WorkerHandle } from '../../shared/worker'
 import type { WorkerControlPlane } from '../workerControl'
@@ -187,6 +191,146 @@ describe('tryLoadE2eFakeEcsClient', () => {
     })
     expect(client).toBeDefined()
     expect(typeof client?.send).toBe('function')
+  })
+})
+
+describe('fake ECS state hydration', () => {
+  const requireE2e = createRequire(path.join(process.cwd(), 'package.json'))
+  const e2eModule = path.resolve(process.cwd(), 'e2e/fargate/fakeEcs.cjs')
+  let tmpDir: string
+  let child: ReturnType<typeof spawn> | undefined
+  const prevState = process.env.CONDUIT_FARGATE_E2E_STATE
+  const prevSkip = process.env.CONDUIT_FARGATE_E2E_SKIP_SPAWN
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'conduit-fake-ecs-'))
+  })
+
+  afterEach(() => {
+    if (prevState === undefined) delete process.env.CONDUIT_FARGATE_E2E_STATE
+    else process.env.CONDUIT_FARGATE_E2E_STATE = prevState
+    if (prevSkip === undefined) delete process.env.CONDUIT_FARGATE_E2E_SKIP_SPAWN
+    else process.env.CONDUIT_FARGATE_E2E_SKIP_SPAWN = prevSkip
+    if (child?.pid) {
+      try {
+        process.kill(-child.pid, 'SIGKILL')
+      } catch {
+        try {
+          process.kill(child.pid, 'SIGKILL')
+        } catch {
+          // gone
+        }
+      }
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true })
+  })
+
+  it('reloads a surviving task PID without spawning a duplicate or wiping state', async () => {
+    const stateFile = path.join(tmpDir, 'fake-ecs.json')
+    const arn = 'arn:aws:ecs:local:000000000000:task/conduit-e2e/00000001'
+    child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      detached: true,
+      stdio: 'ignore',
+    })
+    child.unref()
+    fs.writeFileSync(
+      stateFile,
+      JSON.stringify({
+        seq: 1,
+        runTasks: [{ taskArn: arn, runId: 'run-hydrate', workerId: 'fargate-run-hydrate', skippedSpawn: false }],
+        tasks: {
+          [arn]: {
+            lastStatus: 'RUNNING',
+            pid: child.pid,
+            workerId: 'fargate-run-hydrate',
+            runId: 'run-hydrate',
+          },
+        },
+      })
+    )
+    process.env.CONDUIT_FARGATE_E2E_STATE = stateFile
+    process.env.CONDUIT_FARGATE_E2E_SKIP_SPAWN = path.join(tmpDir, 'skip-spawn')
+    fs.writeFileSync(process.env.CONDUIT_FARGATE_E2E_SKIP_SPAWN, '1')
+
+    const { createFakeEcsClient } = requireE2e(e2eModule) as {
+      createFakeEcsClient: () => {
+        send: (command: { input?: unknown }) => Promise<unknown>
+      }
+    }
+    const client = createFakeEcsClient()
+
+    const persisted = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as {
+      tasks: Record<string, { lastStatus: string; pid: number | null; runId: string }>
+    }
+    expect(persisted.tasks[arn]?.pid).toBe(child.pid)
+    expect(persisted.tasks[arn]?.lastStatus).toBe('RUNNING')
+
+    class DescribeTasksCommand {
+      input: { tasks: string[] }
+      constructor(input: { tasks: string[] }) {
+        this.input = input
+      }
+    }
+    const described = (await client.send(new DescribeTasksCommand({ tasks: [arn] }))) as {
+      tasks: { taskArn: string; lastStatus: string; desiredStatus: string }[]
+    }
+    expect(described.tasks).toEqual([
+      { taskArn: arn, lastStatus: 'RUNNING', desiredStatus: 'RUNNING' },
+    ])
+
+    class RunTaskCommand {
+      input: { overrides?: { containerOverrides?: { environment?: { name: string; value: string }[] }[] } }
+      constructor(input: RunTaskCommand['input']) {
+        this.input = input
+      }
+    }
+    const spawned = (await client.send(
+      new RunTaskCommand({
+        overrides: { containerOverrides: [{ environment: [{ name: 'CONDUIT_WORKER_ID', value: 'fargate-new' }] }] },
+      })
+    )) as { tasks: { taskArn: string }[] }
+    expect(spawned.tasks[0]?.taskArn).not.toBe(arn)
+    const afterRun = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as {
+      tasks: Record<string, { pid: number | null }>
+    }
+    expect(afterRun.tasks[arn]?.pid).toBe(child.pid)
+  })
+
+  it('keeps skip-spawn tasks RUNNING until StopTask so connect-timeout still works', async () => {
+    const stateFile = path.join(tmpDir, 'fake-ecs.json')
+    const skipFile = path.join(tmpDir, 'skip-spawn')
+    process.env.CONDUIT_FARGATE_E2E_STATE = stateFile
+    process.env.CONDUIT_FARGATE_E2E_SKIP_SPAWN = skipFile
+    fs.writeFileSync(skipFile, '1')
+
+    const { createFakeEcsClient } = requireE2e(e2eModule) as {
+      createFakeEcsClient: () => { send: (command: { input?: unknown }) => Promise<unknown> }
+    }
+    const client = createFakeEcsClient()
+
+    class RunTaskCommand {
+      input: { overrides?: { containerOverrides?: { environment?: { name: string; value: string }[] }[] } }
+      constructor(input: RunTaskCommand['input']) {
+        this.input = input
+      }
+    }
+    class DescribeTasksCommand {
+      input: { tasks: string[] }
+      constructor(input: { tasks: string[] }) {
+        this.input = input
+      }
+    }
+    const spawned = (await client.send(
+      new RunTaskCommand({
+        overrides: { containerOverrides: [{ environment: [{ name: 'CONDUIT_WORKER_ID', value: 'fargate-skip' }] }] },
+      })
+    )) as { tasks: { taskArn: string }[] }
+    const arn = spawned.tasks[0]?.taskArn
+    expect(arn).toBeTruthy()
+    const described = (await client.send(new DescribeTasksCommand({ tasks: [arn!] }))) as {
+      tasks: { lastStatus: string }[]
+    }
+    expect(described.tasks[0]?.lastStatus).toBe('RUNNING')
   })
 })
 

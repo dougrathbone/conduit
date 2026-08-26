@@ -30,15 +30,17 @@ function readRawLines(runId: string): unknown[] {
  * still renders. Pure (no I/O) so the detection is unit-testable.
  */
 export function runLogFromRows(rows: unknown[]): RunLog {
-  if (rows.length === 0) return { format: 'events', events: [] }
-  if (isRunEvent(rows[0])) {
+  const meaningful = rows.filter((row) => isRunEvent(row) || isLegacyLogEntry(row))
+  if (meaningful.length === 0) return { format: 'events', events: [] }
+  if (isRunEvent(meaningful[0])) {
     return { format: 'events', events: rows.filter(isRunEvent) }
   }
-  const entries = rows.filter(
-    (r): r is LogEntry =>
-      !!r && typeof r === 'object' && typeof (r as LogEntry).chunk === 'string'
-  )
+  const entries = meaningful.filter(isLegacyLogEntry)
   return { format: 'terminal', entries }
+}
+
+function isLegacyLogEntry(row: unknown): row is LogEntry {
+  return !!row && typeof row === 'object' && typeof (row as LogEntry).chunk === 'string'
 }
 
 /**

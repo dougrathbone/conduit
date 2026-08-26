@@ -3,8 +3,13 @@
  * Stub `claude` CLI for e2e testing — emits stream-json NDJSON like the real
  * CLI's `-p --output-format stream-json`, with zero API calls.
  * A prompt containing "E2E_LONG" makes it stream one line then run until killed
- * (exercises the stop path); anything else completes immediately.
+ * (exercises the stop path); "E2E_RECONNECT" emits BEFORE/DURING/AFTER markers
+ * gated by files under $CONDUIT_DATA_DIR/reconnect-gates; anything else
+ * completes immediately.
  */
+const fs = require('node:fs')
+const path = require('node:path')
+
 let prompt = ''
 process.stdin.setEncoding('utf8')
 process.stdin.on('data', (c) => (prompt += c))
@@ -18,6 +23,10 @@ process.stdin.on('end', () => {
     console.log(JSON.stringify({ type: 'result', subtype: 'error', result: 'stub-claude failed as requested' }))
     process.exit(1)
   }
+  if (prompt.includes('E2E_RECONNECT')) {
+    void runReconnect(say)
+    return
+  }
   if (prompt.includes('E2E_LONG')) {
     const timer = setInterval(() => say('still working…'), 2000)
     process.on('SIGTERM', () => {
@@ -29,3 +38,31 @@ process.stdin.on('end', () => {
   console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done' }))
   process.exit(0)
 })
+
+function gatePath(name) {
+  const root = process.env.CONDUIT_DATA_DIR?.trim() || process.cwd()
+  return path.join(root, 'reconnect-gates', name)
+}
+
+function waitForGate(name) {
+  const file = gatePath(name)
+  return new Promise((resolve) => {
+    if (fs.existsSync(file)) return resolve()
+    const timer = setInterval(() => {
+      if (fs.existsSync(file)) {
+        clearInterval(timer)
+        resolve()
+      }
+    }, 50)
+  })
+}
+
+async function runReconnect(say) {
+  say('RECONNECT_BEFORE')
+  await waitForGate('during')
+  say('RECONNECT_DURING')
+  await waitForGate('after')
+  say('RECONNECT_AFTER')
+  console.log(JSON.stringify({ type: 'result', subtype: 'success', result: 'done' }))
+  process.exit(0)
+}
