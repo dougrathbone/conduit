@@ -20,7 +20,13 @@ import {
 import type { RunSpec, WorkerHandle } from '../shared/worker'
 import type { ServerToWorkerMessage } from '../shared/workerControl'
 import { WORKER_MAX_EVENT_BATCH, WORKER_MAX_MESSAGE_BYTES } from '../shared/workerControl'
-import { appendSequencedEvents, readHighestContiguousSequence } from './runDeliveryLog'
+import {
+  appendSequencedEvents,
+  openDeliveryLog,
+  readHighestContiguousSequence,
+  type DeliveryLogWriter,
+  type OpenDeliveryLog,
+} from './runDeliveryLog'
 
 const TOKEN = 'test-worker-token'
 
@@ -46,11 +52,6 @@ type ResumablePlaneOptions = WorkerControlPlaneOptions & {
   reconnectTimeoutMs?: number
   logsDir?: string
   recoverRun?: (runId: string, workerId: string) => Promise<RecoverRunResult>
-  appendSequencedEvents?: (
-    logPath: string,
-    events: import('../shared/types').RunEventInit[],
-    sequence: number
-  ) => Promise<'appended' | 'duplicate' | 'rejected'>
 }
 
 function assertTempLogsDir(logsDir: string): void {
@@ -877,7 +878,12 @@ describe('WorkerControlPlane detach, rebind, and idempotent ACK', () => {
       workerId: 'stranger',
       pendingRunIds: [SPEC.runId],
     })
-    expect(await nextOrTimeout(stranger.next, 80)).toBe('timeout')
+    // Told to stop retrying, but never resumed and never given owner detail.
+    expect(await stranger.next(500)).toEqual({
+      type: 'run:reject',
+      runId: SPEC.runId,
+      reason: 'run is not recoverable on this server',
+    })
     stranger.ws.send(
       JSON.stringify({
         type: 'run:event',
@@ -1097,6 +1103,8 @@ describe('WorkerControlPlane detach, rebind, and idempotent ACK', () => {
       }
     }
     ctx = await startServer({ reconnectTimeoutMs: 400, logsDir, recoverRun })
+    // The log is the authority for the cursor, so seed the durable prefix.
+    await appendSequencedEvents(logPath(), [{ kind: 'raw', stream: 'stdout', text: 'pre' }], 1)
     const worker = await connectWorker(ctx, {
       workerId: 'w1',
       pendingRunIds: [SPEC.runId],
@@ -1114,6 +1122,222 @@ describe('WorkerControlPlane detach, rebind, and idempotent ACK', () => {
     expect(events).toEqual(['recovered'])
   })
 
+  it('resumes a recovered run from cursor 0 and accepts the replayed run:started with its original assignId', async () => {
+    await ctx.close()
+    const events: string[] = []
+    const recoverRun: ResumablePlaneOptions['recoverRun'] = async (runId, workerId) => ({
+      runId,
+      workerId,
+      durableSequence: 0,
+      sink: {
+        onEvent: (ev) => events.push(ev.text ?? ev.stream),
+        onDurableEvent: (ev) => events.push(ev.text ?? ev.stream),
+        onExit: () => {},
+      },
+      handle: { runId, workerId, ephemeral: false, cancel: async () => {} },
+    })
+    ctx = await startServer({ reconnectTimeoutMs: 400, logsDir, recoverRun })
+    const worker = await connectWorker(ctx, { workerId: 'w1', pendingRunIds: [SPEC.runId] })
+    expect(await worker.next()).toEqual({ type: 'run:resume', runId: SPEC.runId, sequence: 0 })
+
+    // assignId was issued by the *previous* server process; the replay must still apply.
+    worker.ws.send(
+      JSON.stringify({
+        type: 'run:started',
+        runId: SPEC.runId,
+        sequence: 1,
+        assignId: 'issued-before-restart',
+        workspacePath: '/tmp/x',
+      })
+    )
+    expect(await worker.next()).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 1 })
+    worker.ws.send(
+      JSON.stringify({
+        type: 'run:event',
+        runId: SPEC.runId,
+        sequence: 2,
+        events: [{ kind: 'raw', stream: 'stdout', text: 'replayed' }],
+      })
+    )
+    expect(await worker.next()).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 2 })
+    expect(events).toEqual(['replayed'])
+    expect(await readHighestContiguousSequence(logPath())).toBe(2)
+  })
+
+  it('rejects a run the recovery declines instead of leaving the worker retrying', async () => {
+    await ctx.close()
+    const seen: Array<[string, string]> = []
+    const recoverRun: ResumablePlaneOptions['recoverRun'] = async (runId, workerId) => {
+      seen.push([runId, workerId])
+      return undefined
+    }
+    ctx = await startServer({ reconnectTimeoutMs: 400, logsDir, recoverRun })
+    const worker = await connectWorker(ctx, { workerId: 'w1', pendingRunIds: [SPEC.runId] })
+    const msg = await worker.next(500)
+    expect(msg).toEqual({
+      type: 'run:reject',
+      runId: SPEC.runId,
+      reason: 'run is not recoverable on this server',
+    })
+    expect(seen).toEqual([[SPEC.runId, 'w1']])
+  })
+
+  it('rejects a reported run whose recovery resolves for a different worker identity', async () => {
+    await ctx.close()
+    const recoverRun: ResumablePlaneOptions['recoverRun'] = async (runId) => ({
+      runId,
+      workerId: 'someone-else',
+      durableSequence: 0,
+      sink: { onEvent: () => {}, onExit: () => {} },
+      handle: { runId, workerId: 'someone-else', ephemeral: false, cancel: async () => {} },
+    })
+    ctx = await startServer({ reconnectTimeoutMs: 400, logsDir, recoverRun })
+    const worker = await connectWorker(ctx, { workerId: 'w1', pendingRunIds: [SPEC.runId] })
+    const msg = await worker.next(500)
+    expect(msg.type).toBe('run:reject')
+    if (msg.type === 'run:reject') {
+      // No detail about the real owner, the run's state, or its existence.
+      expect(msg.reason).toBe('run is not recoverable on this server')
+      expect(msg.reason).not.toContain('someone-else')
+    }
+  })
+
+  it('rejects a reported run held by another worker identity without naming the owner', async () => {
+    const { worker } = await startAssignedRun('owner')
+    expect(worker.ws.readyState).toBe(WebSocket.OPEN)
+    const stranger = await connectWorker(ctx, {
+      workerId: 'stranger',
+      pendingRunIds: [SPEC.runId],
+    })
+    const msg = await stranger.next(500)
+    expect(msg).toEqual({
+      type: 'run:reject',
+      runId: SPEC.runId,
+      reason: 'run is not recoverable on this server',
+    })
+  })
+
+  it('drops an unsequenced frame once the assignment is in sequenced delivery mode', async () => {
+    const { worker, events, exits } = await startAssignedRun()
+
+    worker.ws.send(
+      JSON.stringify({
+        type: 'run:event',
+        runId: SPEC.runId,
+        events: [{ kind: 'raw', stream: 'stdout', text: 'unsequenced' }],
+      })
+    )
+    worker.ws.send(JSON.stringify({ type: 'run:exit', runId: SPEC.runId, status: 'completed', exitCode: 0 }))
+    await new Promise((r) => setTimeout(r, 60))
+    expect(events).toEqual([])
+    expect(exits).toEqual([])
+
+    worker.ws.send(
+      JSON.stringify({
+        type: 'run:event',
+        runId: SPEC.runId,
+        sequence: 2,
+        events: [{ kind: 'raw', stream: 'stdout', text: 'sequenced' }],
+      })
+    )
+    expect(await worker.next()).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 2 })
+    expect(events).toEqual(['sequenced'])
+  })
+
+  it('drops a sequenced frame once the assignment is in legacy delivery mode', async () => {
+    const worker = await connectWorker(ctx, { workerId: 'legacy' })
+    const events: string[] = []
+    const handlePromise = ctx.controlPlane.assign(SPEC, {
+      onEvent: (ev) => events.push(ev.text ?? ev.stream),
+      onExit: () => {},
+    })
+    await worker.next()
+    worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId }))
+    await handlePromise
+
+    worker.ws.send(
+      JSON.stringify({
+        type: 'run:event',
+        runId: SPEC.runId,
+        sequence: 2,
+        events: [{ kind: 'raw', stream: 'stdout', text: 'sequenced' }],
+      })
+    )
+    expect(await nextOrTimeout(worker.next, 80)).toBe('timeout')
+    expect(events).toEqual([])
+  })
+
+  it('withholds the terminal ACK when finalization fails, then ACKs the replay exactly once', async () => {
+    const worker = await connectWorker(ctx)
+    const attempts: string[] = []
+    let failNext = true
+    const handlePromise = ctx.controlPlane.assign(SPEC, {
+      onEvent: () => {},
+      onExit: async (status) => {
+        attempts.push(status)
+        if (failNext) {
+          failNext = false
+          throw new Error('db unavailable')
+        }
+      },
+    })
+    await worker.next()
+    worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, sequence: 1 }))
+    expect(await worker.next()).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 1 })
+    await handlePromise
+
+    const exitFrame = {
+      type: 'run:exit',
+      runId: SPEC.runId,
+      sequence: 2,
+      status: 'completed',
+      exitCode: 0,
+    }
+    worker.ws.send(JSON.stringify(exitFrame))
+    await vi.waitFor(() => {
+      expect(attempts).toEqual(['completed'])
+    })
+    expect(await nextOrTimeout(worker.next, 100)).toBe('timeout')
+
+    worker.ws.send(JSON.stringify(exitFrame))
+    expect(await worker.next(500)).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 2 })
+    expect(attempts).toEqual(['completed', 'completed'])
+
+    // A third replay is answered from the final-ACK record, not re-finalized.
+    worker.ws.send(JSON.stringify(exitFrame))
+    expect(await worker.next(500)).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 2 })
+    expect(attempts).toEqual(['completed', 'completed'])
+  })
+
+  it('keeps the log at its byte cap while still acknowledging and recovering the delivery cursor', async () => {
+    await ctx.close()
+    ctx = await startServer({ reconnectTimeoutMs: 400, logsDir, runLogMaxBytes: 400 })
+    const { worker, events } = await startAssignedRun()
+
+    const chunk = 'y'.repeat(300)
+    for (let sequence = 2; sequence <= 8; sequence++) {
+      worker.ws.send(
+        JSON.stringify({
+          type: 'run:event',
+          runId: SPEC.runId,
+          sequence,
+          events: [{ kind: 'raw', stream: 'stdout', text: `${sequence}-${chunk}` }],
+        })
+      )
+      expect(await worker.next(500)).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence })
+    }
+
+    // Every event still reached the sink live even after the log stopped growing.
+    expect(events).toHaveLength(7)
+    const text = fs.readFileSync(logPath(), 'utf8')
+    expect(text.match(/run log truncated on disk/g)).toHaveLength(1)
+    expect(fs.statSync(logPath()).size).toBeLessThan(400 * 4)
+    expect(text).not.toContain(`8-${chunk}`)
+
+    // The durable cursor survives for a replacement process to resume from.
+    expect(await readHighestContiguousSequence(logPath())).toBe(8)
+  })
+
   it('serializes reconnect replay during a gated append so the event is applied once and ACK goes to the live socket', async () => {
     await ctx.close()
     let releaseAppend!: () => void
@@ -1121,18 +1345,26 @@ describe('WorkerControlPlane detach, rebind, and idempotent ACK', () => {
       releaseAppend = resolve
     })
     let enteredSeq2 = 0
-    const gatedAppend: NonNullable<ResumablePlaneOptions['appendSequencedEvents']> = async (
-      logPath,
-      events,
-      sequence
-    ) => {
-      if (sequence === 2) {
-        enteredSeq2++
-        await appendHeld
+    const gatedOpen: OpenDeliveryLog = async (logPath, opts) => {
+      const inner = await openDeliveryLog(logPath, opts)
+      const gated: DeliveryLogWriter = {
+        get cursor() {
+          return inner.cursor
+        },
+        get capped() {
+          return inner.capped
+        },
+        append: async (events, sequence) => {
+          if (sequence === 2) {
+            enteredSeq2++
+            await appendHeld
+          }
+          return inner.append(events, sequence)
+        },
       }
-      return appendSequencedEvents(logPath, events, sequence)
+      return gated
     }
-    ctx = await startServer({ reconnectTimeoutMs: 400, logsDir, appendSequencedEvents: gatedAppend })
+    ctx = await startServer({ reconnectTimeoutMs: 400, logsDir, openDeliveryLog: gatedOpen })
 
     const { worker, events } = await startAssignedRun()
     worker.ws.send(
@@ -1257,6 +1489,7 @@ describe('WorkerControlPlane detach, rebind, and idempotent ACK', () => {
       }
     }
     ctx = await startServer({ reconnectTimeoutMs: 400, logsDir, recoverRun })
+    await appendSequencedEvents(logPath(), [{ kind: 'raw', stream: 'stdout', text: 'pre' }], 1)
     const first = await connectWorker(ctx, { workerId: 'w1', pendingRunIds: [SPEC.runId] })
     await vi.waitFor(() => {
       expect(recoverCalls).toBe(1)
@@ -1318,7 +1551,11 @@ describe('WorkerControlPlane detach, rebind, and idempotent ACK', () => {
     }
     ctx = await startServer({ reconnectTimeoutMs: 400, logsDir, recoverRun })
     const impostor = await connectWorker(ctx, { workerId: 'impostor', pendingRunIds: [SPEC.runId] })
-    expect(await nextOrTimeout(impostor.next, 80)).toBe('timeout')
+    expect(await impostor.next(500)).toEqual({
+      type: 'run:reject',
+      runId: SPEC.runId,
+      reason: 'run is not recoverable on this server',
+    })
     impostor.ws.send(
       JSON.stringify({
         type: 'run:exit',

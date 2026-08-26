@@ -27,10 +27,22 @@ import {
 } from '../shared/workerControl'
 import { reporter } from './observability'
 import { LOGS_DIR } from '../main/utils/paths'
-import { appendSequencedEvents, readHighestContiguousSequence } from './runDeliveryLog'
+import {
+  openDeliveryLog,
+  resolveRunLogMaxBytes,
+  type DeliveryLogWriter,
+  type OpenDeliveryLog,
+} from './runDeliveryLog'
 
 const DEFAULT_ASSIGN_TIMEOUT_MS = 120_000
 const DEFAULT_CONNECT_TIMEOUT_MS = 600_000
+
+/**
+ * Reason sent with `run:reject`. Deliberately generic: a worker that reported a
+ * run it cannot own must learn to stop retrying without learning why (whether
+ * the run exists, belongs to someone else, or is already terminal).
+ */
+const REJECT_REASON = 'run is not recoverable on this server'
 
 function parsePositiveMs(raw: string | undefined, fallback: number): number {
   const n = Number(raw)
@@ -51,12 +63,6 @@ export function resolveConnectTimeoutMs(env: NodeJS.ProcessEnv = process.env): n
 /** Import-time default from process.env — factories that don't pass waitMs. */
 export const WORKER_CONNECT_TIMEOUT_MS = resolveConnectTimeoutMs()
 
-export type AppendSequencedEvents = (
-  logPath: string,
-  events: RunEventInit[],
-  sequence: number
-) => Promise<'appended' | 'duplicate' | 'rejected'>
-
 /** Optional constructor injection for timeouts and frame limits. */
 export interface WorkerControlPlaneOptions {
   assignTimeoutMs?: number
@@ -68,10 +74,12 @@ export interface WorkerControlPlaneOptions {
   reconnectTimeoutMs?: number
   /** Directory for sequenced run logs (`<runId>.jsonl`). */
   logsDir?: string
+  /** Per-run on-disk log cap for durable appends. `0` disables it. */
+  runLogMaxBytes?: number
   /** Reconstruct a binding when a reconnecting worker reports a run this process does not hold. */
   recoverRun?: RecoverRun
-  /** Tests inject a gated append to prove per-run serialize-during-fsync. */
-  appendSequencedEvents?: AppendSequencedEvents
+  /** Tests inject a gated writer to prove per-run serialize-during-fsync. */
+  openDeliveryLog?: OpenDeliveryLog
 }
 
 export interface RecoverableRunBinding {
@@ -111,6 +119,14 @@ interface ConnectedWorker {
   reportedRunIds: Set<string>
 }
 
+/**
+ * Frames for one run are either all sequenced (resumable delivery) or all
+ * legacy/unsequenced. Mixing the two would let an unsequenced frame bypass the
+ * durable cursor after resumable delivery is established, so the first frame
+ * fixes the mode and the other kind is dropped from then on.
+ */
+type DeliveryMode = 'unset' | 'sequenced' | 'legacy'
+
 interface Assignment {
   spec: RunSpec
   sink: WorkerEventSink
@@ -121,11 +137,19 @@ interface Assignment {
   generation: number
   /** Token sent on run:assign and required on run:started after a retry. */
   assignId: string
+  /** Rebuilt after a server replacement — the worker still echoes the original
+   *  assignId, which this process never issued, so assignId is not checked. */
+  recovered: boolean
+  mode: DeliveryMode
   workspacePath?: string
   started: boolean
-  /** Highest contiguous sequence durably applied for this run. */
+  /**
+   * Highest contiguous sequence durably applied. Tracks the delivery log's
+   * cursor for event frames and additionally advances past the terminal frame,
+   * whose durable record is the run's DB status rather than a log row.
+   */
   durableSequence: number
-  logPath: string
+  log: DeliveryLogWriter
   reconnectTimer?: NodeJS.Timeout
   /** True while sequenced onExit is awaiting durable finalization. */
   exitInFlight?: boolean
@@ -133,6 +157,9 @@ interface Assignment {
   fail: (err: Error) => void
   timeout: NodeJS.Timeout
 }
+
+/** Outcome of trying to (re)bind one run a reconnecting worker reported. */
+type AdoptionOutcome = 'bound' | 'declined' | 'skipped'
 
 interface StartedSuppression {
   runId: string
@@ -160,8 +187,9 @@ export class WorkerControlPlane {
   private readonly leaseMs: number
   private readonly reconnectTimeoutMs: number
   private readonly logsDir: string
+  private readonly runLogMaxBytes: number
   private readonly recoverRun?: RecoverRun
-  private readonly appendEvents: AppendSequencedEvents
+  private readonly openLog: OpenDeliveryLog
   private nextAssignmentGeneration = 1
   /** Timed-out assignment identities; a retry on a new generation is not suppressed. */
   private ignoreNextStarted = new Set<StartedSuppression>()
@@ -179,8 +207,9 @@ export class WorkerControlPlane {
     this.leaseMs = options?.leaseMs ?? WORKER_LEASE_MS
     this.reconnectTimeoutMs = options?.reconnectTimeoutMs ?? resolveWorkerReconnectTimeoutMs()
     this.logsDir = options?.logsDir ?? LOGS_DIR
+    this.runLogMaxBytes = options?.runLogMaxBytes ?? resolveRunLogMaxBytes()
     this.recoverRun = options?.recoverRun
-    this.appendEvents = options?.appendSequencedEvents ?? appendSequencedEvents
+    this.openLog = options?.openDeliveryLog ?? openDeliveryLog
     this.wss.on('connection', (ws) => this.onConnection(ws))
     this.leaseTimer = setInterval(() => this.checkLeases(), this.leaseMs / 3)
     this.leaseTimer.unref()
@@ -278,12 +307,16 @@ export class WorkerControlPlane {
     }
   }
 
-  private assignToConnected(
+  private async assignToConnected(
     worker: ConnectedWorker,
     spec: RunSpec,
     sink: WorkerEventSink
   ): Promise<WorkerHandle> {
     const runId = spec.runId
+    // A brand-new assignment starts at cursor 0, so the writer is opened with a
+    // known cursor and never scans the log. Done before run:assign is sent, so
+    // no frame can arrive before the assignment is registered.
+    const log = await this.openDeliveryLogFor(runId, 0)
     return new Promise<WorkerHandle>((resolve, reject) => {
       const generation = this.nextAssignmentGeneration++
       const assignId = `${generation}`
@@ -294,9 +327,11 @@ export class WorkerControlPlane {
         ws: worker.ws,
         generation,
         assignId,
+        recovered: false,
+        mode: 'unset',
         started: false,
-        durableSequence: 0,
-        logPath: path.join(this.logsDir, `${runId}.jsonl`),
+        durableSequence: log.cursor,
+        log,
         settle: (handle) => {
           assignment.started = true
           clearTimeout(assignment.timeout)
@@ -328,6 +363,14 @@ export class WorkerControlPlane {
         assignId,
         reconnectTimeoutMs: this.reconnectTimeoutMs,
       })
+    })
+  }
+
+  /** Open a run's durable delivery log. `cursor` omitted ⇒ derive it by scan. */
+  private openDeliveryLogFor(runId: string, cursor?: number): Promise<DeliveryLogWriter> {
+    return this.openLog(path.join(this.logsDir, `${runId}.jsonl`), {
+      maxBytes: this.runLogMaxBytes,
+      cursor,
     })
   }
 
@@ -550,6 +593,25 @@ export class WorkerControlPlane {
     return ws.readyState === WebSocket.OPEN && this.workers.get(workerId)?.ws === ws
   }
 
+  /**
+   * Accept the frame's delivery mode, or drop it. The first frame decides; a
+   * later frame of the other kind is refused so an unsequenced frame can never
+   * bypass the durable cursor of a run already using resumable delivery.
+   */
+  private acceptMode(a: Assignment, sequenced: boolean): boolean {
+    const mode: DeliveryMode = sequenced ? 'sequenced' : 'legacy'
+    if (a.mode === 'unset') {
+      a.mode = mode
+      return true
+    }
+    if (a.mode === mode) return true
+    console.warn(
+      `[worker-control] Dropping ${mode} frame for run ${a.spec.runId} — ` +
+        `assignment is in ${a.mode} delivery mode`
+    )
+    return false
+  }
+
   private async handleRunStarted(
     ws: WebSocket,
     workerId: string | undefined,
@@ -559,9 +621,10 @@ export class WorkerControlPlane {
     if (this.ackIfTerminalRecovery(ws, workerId, msg.runId, msg.sequence)) return
     const a = this.ownedAssignment(msg.runId, ws)
     if (!a) return
-    if (msg.assignId && msg.assignId !== a.assignId) return
+    if (!a.recovered && msg.assignId && msg.assignId !== a.assignId) return
     if (!msg.assignId && this.hasStaleSuppression(msg.runId, ws, a.generation)) return
     if (this.consumeIgnoredStarted(msg.runId, ws, a.generation)) return
+    if (!this.acceptMode(a, msg.sequence !== undefined)) return
     if (msg.sequence === undefined) {
       if (a.started) return
       a.workspacePath = msg.workspacePath
@@ -574,7 +637,7 @@ export class WorkerControlPlane {
       this.sendAck(this.liveAckSocket(msg.runId), msg.runId, msg.sequence)
       return
     }
-    const persist = await this.appendEvents(a.logPath, [], msg.sequence)
+    const persist = await a.log.append([], msg.sequence)
     if (persist === 'rejected') return
     if (!a.started) {
       a.workspacePath = msg.workspacePath
@@ -593,6 +656,7 @@ export class WorkerControlPlane {
     if (this.ackIfTerminalRecovery(ws, workerId, msg.runId, msg.sequence)) return
     const a = this.ownedAssignment(msg.runId, ws)
     if (!a) return
+    if (!this.acceptMode(a, msg.sequence !== undefined)) return
     if (msg.sequence === undefined) {
       for (const ev of msg.events) a.sink.onEvent(ev)
       return
@@ -603,9 +667,11 @@ export class WorkerControlPlane {
       this.sendAck(this.liveAckSocket(msg.runId), msg.runId, msg.sequence)
       return
     }
-    const persist = await this.appendEvents(a.logPath, msg.events, msg.sequence)
+    const persist = await a.log.append(msg.events, msg.sequence)
     if (persist === 'rejected') return
-    if (persist === 'appended') {
+    // `capped` means the cursor advanced durably but the events were not
+    // written (log at its byte cap) — still stream them live, still ACK.
+    if (persist === 'appended' || persist === 'capped') {
       for (const ev of msg.events) this.notifySinkEvent(a.sink, ev, true)
     }
     a.durableSequence = msg.sequence
@@ -621,6 +687,7 @@ export class WorkerControlPlane {
     if (this.ackIfTerminalRecovery(ws, workerId, msg.runId, msg.sequence)) return
     const a = this.ownedAssignment(msg.runId, ws)
     if (!a) return
+    if (!this.acceptMode(a, msg.sequence !== undefined)) return
     if (msg.sequence === undefined) {
       if (!a.started) {
         a.fail(
@@ -651,16 +718,30 @@ export class WorkerControlPlane {
     a.exitInFlight = true
     try {
       await Promise.resolve(a.sink.onExit(msg.status, msg.exitCode))
-      a.durableSequence = msg.sequence
-      this.finalAcks.set(msg.runId, { workerId: a.workerId, sequence: msg.sequence })
-      const ackWs = this.liveAckSocket(msg.runId) ?? ws
-      clearTimeout(a.timeout)
-      this.clearReconnectTimer(a)
-      this.runs.delete(msg.runId)
-      this.sendAck(ackWs, msg.runId, msg.sequence)
-    } finally {
+    } catch (err) {
+      // Terminal state was not persisted. Do not record a final ACK and do not
+      // acknowledge: the worker keeps the terminal frame spooled and replays it.
       a.exitInFlight = false
+      reporter.captureException(err instanceof Error ? err : new Error(String(err)), {
+        tags: { component: 'worker-control', op: 'runExit', workerId: a.workerId, runId: msg.runId },
+      })
+      console.error(
+        `[worker-control] Terminal finalization failed for run ${msg.runId} — ` +
+          `leaving the frame unacknowledged for replay:`,
+        err
+      )
+      // A socket that died mid-finalize skipped arming the detach timer.
+      this.armReconnectTimerIfDetached(a)
+      return
     }
+    a.exitInFlight = false
+    a.durableSequence = msg.sequence
+    this.finalAcks.set(msg.runId, { workerId: a.workerId, sequence: msg.sequence })
+    const ackWs = this.liveAckSocket(msg.runId) ?? ws
+    clearTimeout(a.timeout)
+    this.clearReconnectTimer(a)
+    this.runs.delete(msg.runId)
+    this.sendAck(ackWs, msg.runId, msg.sequence)
   }
 
   private sequenceDecision(a: Assignment, sequence: number): 'apply' | 'duplicate' | 'gap' {
@@ -710,46 +791,68 @@ export class WorkerControlPlane {
     else recovered.onAbandoned?.()
   }
 
+  /**
+   * Bind every run a reconnecting worker reported, and tell it explicitly when
+   * a run cannot be bound. Without that `run:reject` the worker would keep the
+   * frames spooled and retry until its delivery window expired — a guaranteed
+   * stall for a run this process will never adopt.
+   */
   private async adoptPendingRuns(workerId: string, ws: WebSocket, pendingRunIds: string[]): Promise<void> {
     for (const runId of pendingRunIds) {
-      const done = this.finalAcks.get(runId)
-      if (done && done.workerId === workerId) {
-        this.sendAck(ws, runId, done.sequence)
-        continue
-      }
-      const existing = this.runs.get(runId)
-      if (existing) {
-        if (existing.workerId !== workerId) continue
-        if (existing.ws && existing.ws !== ws && existing.ws.readyState === WebSocket.OPEN) continue
-        this.rebindAssignment(existing, ws)
-        continue
-      }
-      const recovered = await this.recoverRun?.(runId, workerId)
-      if (!this.socketStillBound(workerId, ws)) {
-        this.notifyRecoveryOutcome(recovered, false)
-        continue
-      }
-      if (!recovered || recovered.workerId !== workerId) {
-        this.notifyRecoveryOutcome(recovered, false)
-        continue
-      }
-      if (isRecoveredTerminalRun(recovered)) {
-        this.installTerminalRecovery(recovered, ws)
-        continue
-      }
-      const existingAfter = this.runs.get(runId)
-      if (existingAfter) {
-        if (existingAfter.workerId !== workerId) {
-          this.notifyRecoveryOutcome(recovered, false)
-          continue
-        }
-        this.rebindAssignment(existingAfter, ws)
-        this.notifyRecoveryOutcome(recovered, true)
-        continue
-      }
-      const installed = await this.installRecoveredBinding(recovered, ws)
-      this.notifyRecoveryOutcome(recovered, installed)
+      const outcome = await this.adoptPendingRun(workerId, ws, runId)
+      if (outcome !== 'declined') continue
+      console.warn(`[worker-control] Rejecting run ${runId} reported by worker ${workerId}`)
+      this.sendOn(ws, { type: 'run:reject', runId, reason: REJECT_REASON })
     }
+  }
+
+  private async adoptPendingRun(
+    workerId: string,
+    ws: WebSocket,
+    runId: string
+  ): Promise<AdoptionOutcome> {
+    const done = this.finalAcks.get(runId)
+    if (done && done.workerId === workerId) {
+      this.sendAck(ws, runId, done.sequence)
+      return 'bound'
+    }
+    const existing = this.runs.get(runId)
+    if (existing) {
+      if (existing.workerId !== workerId) return 'declined'
+      // Held by another live socket of the same identity: the duplicate-identity
+      // guard owns that case; never tell a healthy holder to drop its run.
+      if (existing.ws && existing.ws !== ws && existing.ws.readyState === WebSocket.OPEN) {
+        return 'skipped'
+      }
+      this.rebindAssignment(existing, ws)
+      return 'bound'
+    }
+    const recovered = await this.recoverRun?.(runId, workerId)
+    if (!this.socketStillBound(workerId, ws)) {
+      this.notifyRecoveryOutcome(recovered, false)
+      return 'skipped'
+    }
+    if (!recovered || recovered.workerId !== workerId) {
+      this.notifyRecoveryOutcome(recovered, false)
+      return 'declined'
+    }
+    if (isRecoveredTerminalRun(recovered)) {
+      this.installTerminalRecovery(recovered, ws)
+      return 'bound'
+    }
+    const existingAfter = this.runs.get(runId)
+    if (existingAfter) {
+      if (existingAfter.workerId !== workerId) {
+        this.notifyRecoveryOutcome(recovered, false)
+        return 'declined'
+      }
+      this.rebindAssignment(existingAfter, ws)
+      this.notifyRecoveryOutcome(recovered, true)
+      return 'bound'
+    }
+    const installed = await this.installRecoveredBinding(recovered, ws)
+    this.notifyRecoveryOutcome(recovered, installed)
+    return installed ? 'bound' : 'skipped'
   }
 
   private rebindAssignment(assignment: Assignment, ws: WebSocket): void {
@@ -781,8 +884,10 @@ export class WorkerControlPlane {
   private async installRecoveredBinding(binding: RecoverableRunBinding, ws: WebSocket): Promise<boolean> {
     if (!this.socketStillBound(binding.workerId, ws)) return false
     const runId = binding.runId
-    const logPath = path.join(this.logsDir, `${runId}.jsonl`)
-    await this.ensureLogCursor(logPath, binding.durableSequence)
+    // The log this process will append to is the authority for the cursor —
+    // never a number handed in, which could sit above the durable prefix and
+    // silently skip a frame the worker would then never resend.
+    const log = await this.openDeliveryLogFor(runId)
     if (!this.socketStillBound(binding.workerId, ws)) return false
     if (this.runs.has(runId)) {
       const existing = this.runs.get(runId)
@@ -802,29 +907,20 @@ export class WorkerControlPlane {
       ws,
       generation: this.nextAssignmentGeneration++,
       assignId: 'recovered',
+      recovered: true,
+      mode: 'sequenced',
       workspacePath: binding.handle.workspacePath,
       started: true,
-      durableSequence: binding.durableSequence,
-      logPath,
+      durableSequence: log.cursor,
+      log,
       settle: () => {},
       fail: () => {},
       timeout: setTimeout(() => {}, 0),
     }
     clearTimeout(assignment.timeout)
     this.runs.set(runId, assignment)
-    this.sendOn(ws, { type: 'run:resume', runId, sequence: binding.durableSequence })
+    this.sendOn(ws, { type: 'run:resume', runId, sequence: log.cursor })
     return true
-  }
-
-  /** Fill missing prefix markers so resume never sits above a gapped log. */
-  private async ensureLogCursor(logPath: string, through: number): Promise<void> {
-    if (through <= 0) return
-    let highest = await readHighestContiguousSequence(logPath)
-    while (highest < through) {
-      const result = await this.appendEvents(logPath, [], highest + 1)
-      if (result === 'rejected') return
-      highest = await readHighestContiguousSequence(logPath)
-    }
   }
 
   private detachOrFailRuns(workerId: string, ws: WebSocket): void {
@@ -842,13 +938,22 @@ export class WorkerControlPlane {
       if (!a.ws && a.reconnectTimer) continue
       this.clearReconnectTimer(a)
       a.ws = null
-      a.reconnectTimer = setTimeout(() => {
-        this.failDetachedAssignment(
-          a,
-          `did not reconnect within ${this.reconnectTimeoutMs}ms`
-        )
-      }, this.reconnectTimeoutMs)
+      this.armReconnectTimer(a)
     }
+  }
+
+  /** Arm the detach deadline for an assignment left without a live socket. */
+  private armReconnectTimerIfDetached(a: Assignment): void {
+    if (a.reconnectTimer) return
+    if (a.ws && a.ws.readyState === WebSocket.OPEN) return
+    a.ws = null
+    this.armReconnectTimer(a)
+  }
+
+  private armReconnectTimer(a: Assignment): void {
+    a.reconnectTimer = setTimeout(() => {
+      this.failDetachedAssignment(a, `did not reconnect within ${this.reconnectTimeoutMs}ms`)
+    }, this.reconnectTimeoutMs)
   }
 
   private failDetachedAssignment(a: Assignment, reason: string): void {
