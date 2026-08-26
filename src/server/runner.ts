@@ -20,6 +20,7 @@ import { resolvePushCredential, githubTokenEnvEntry } from './githubApp'
 import { publishRunResult } from './publisher'
 import { buildTriggeredPrompt } from './triggers/promptBuilder'
 import { createRunEventHandlers } from './runEventSink'
+import { resolveRunLogMaxBytes } from './runDeliveryLog'
 import { reporter } from './observability'
 import { getWorkerFactory } from './workers'
 
@@ -90,7 +91,9 @@ async function buildRunnerEnvOverlay(
 
 interface ActiveRun {
   handle: WorkerHandle
-  finalize: (status: 'completed' | 'failed' | 'stopped', exitCode?: number | null) => void
+  /** Rejects when the terminal status could not be persisted — the run stays
+   *  retryable and the caller must not treat it as finalized. */
+  finalize: (status: 'completed' | 'failed' | 'stopped', exitCode?: number | null) => Promise<void>
   /** The run's workspace dir (git worktree or ephemeral tmp dir). Used by the
    *  data-dir sweeper to avoid deleting a running run's workspace. */
   workspacePath: string
@@ -150,11 +153,9 @@ const WORKSPACE_CLEANUP_DELAY_MS = 30_000
  *  data-dir sweeper never reclaims (run logs are history, not swept until they
  *  age out). Past the cap we stop persisting to disk (writing one truncation
  *  marker); live streaming to the UI and stdout log-forwarding continue. `0`
- *  disables the cap. */
-const RUN_LOG_MAX_BYTES = (() => {
-  const n = Number(process.env.CONDUIT_RUN_LOG_MAX_BYTES)
-  return Number.isFinite(n) && n >= 0 ? n : 500 * 1024 * 1024 // 500 MB
-})()
+ *  disables the cap. The control plane's durable delivery log honors the same
+ *  cap for sequenced remote frames (see runDeliveryLog.ts). */
+const RUN_LOG_MAX_BYTES = resolveRunLogMaxBytes()
 
 /** Append a system event to a run's log file (used after the log stream is
  *  closed, e.g. by the delayed cleanup). Also emits to stdout for log forwarding. */
@@ -252,30 +253,34 @@ export function createRunOrchestration(opts: {
     })
   }
 
-  function writeRunEvent(event: RunEvent): void {
+  /** Append to the run's own jsonl, honoring the per-run byte cap. */
+  function persistRunEvent(event: RunEvent): void {
+    if (logCapped) return
     const line = JSON.stringify(event)
-    if (!logCapped) {
-      logStream.write(line + '\n')
-      if (RUN_LOG_MAX_BYTES > 0) {
-        logBytesWritten += Buffer.byteLength(line) + 1
-        if (logBytesWritten >= RUN_LOG_MAX_BYTES) {
-          logCapped = true
-          logStream.write(
-            JSON.stringify({
-              t: Date.now(),
-              kind: 'raw',
-              stream: 'system',
-              text: `[Conduit: run log truncated on disk — exceeded ${RUN_LOG_MAX_BYTES}-byte cap. Live output continues.]`,
-            }) + '\n'
-          )
-        }
-      }
-    }
+    logStream.write(line + '\n')
+    if (RUN_LOG_MAX_BYTES <= 0) return
+    logBytesWritten += Buffer.byteLength(line) + 1
+    if (logBytesWritten < RUN_LOG_MAX_BYTES) return
+    logCapped = true
+    logStream.write(
+      JSON.stringify({
+        t: Date.now(),
+        kind: 'raw',
+        stream: 'system',
+        text: `[Conduit: run log truncated on disk — exceeded ${RUN_LOG_MAX_BYTES}-byte cap. Live output continues.]`,
+      }) + '\n'
+    )
+  }
+
+  /** Emit to the process log for external shipping. Runs for durable remote
+   *  frames too — those skip `persistRunEvent`, not stdout forwarding. */
+  function forwardRunEvent(event: RunEvent): void {
     process.stdout.write(JSON.stringify({ runId, agentId, ...event }) + '\n')
   }
 
   const eventHandlers = createRunEventHandlers({
-    write: writeRunEvent,
+    persist: persistRunEvent,
+    forward: forwardRunEvent,
     live: (event) => {
       const summary = summarizeEvent(event)
       if (summary) lastLine = summary.slice(0, 500)
@@ -289,14 +294,46 @@ export function createRunOrchestration(opts: {
   let isEphemeral = false
   let worktreeClonePath: string | undefined = undefined
 
+  /**
+   * Terminal handling, ordered around the one durable step.
+   *
+   * The status write comes first and is the commit point. If it throws, nothing
+   * observable has happened: the run stays retryable (workspace intact, log
+   * stream open, still in the active set) and the error propagates so a
+   * sequenced control-plane frame is left spooled for replay rather than
+   * acknowledged. Cleanup, the log-stream close, and the finalized hook only
+   * run once the status is durable. A publish failure after that point is
+   * reported but not rethrown — terminal state must not be applied twice.
+   */
   async function finalizeRun(
     status: 'completed' | 'failed' | 'stopped',
     exitCode: number | null | undefined
   ): Promise<void> {
     if (finalized) return
     finalized = true
+
+    const endedAt = Date.now()
+    const durationMs = endedAt - run.startedAt
+
+    let finalRun: ExecutionRun | null
+    try {
+      finalRun = await updateRunIfRunning(runId, {
+        status,
+        endedAt,
+        durationMs,
+        exitCode: exitCode ?? undefined,
+        lastLine: lastLine || undefined,
+      })
+    } catch (err) {
+      finalized = false
+      console.error(`[server/runner] Terminal update failed for run ${runId}:`, err)
+      reporter.captureException(err instanceof Error ? err : new Error(String(err)), {
+        tags: { component: 'runner', op: 'finalizeRun', runId, runner },
+      })
+      throw err
+    }
+
     activeProcesses.delete(runId)
-    cleanupRun(runId, workspacePath, isEphemeral, worktreeClonePath)
 
     if (eventBuffer.length > 0) {
       const events = eventBuffer.splice(0)
@@ -307,28 +344,24 @@ export function createRunOrchestration(opts: {
       logStream.end(() => resolve())
     })
 
-    const endedAt = Date.now()
-    const durationMs = endedAt - run.startedAt
+    cleanupRun(runId, workspacePath, isEphemeral, worktreeClonePath)
 
     try {
-      const finalRun = await updateRunIfRunning(runId, {
-        status,
-        endedAt,
-        durationMs,
-        exitCode: exitCode ?? undefined,
-        lastLine: lastLine || undefined,
-      })
-      if (!finalRun) return
-      broadcast('run:statusChange', {
-        runId,
-        status,
-        exitCode: exitCode ?? undefined,
-        endedAt,
-        durationMs,
-      })
-      await publishRunResult(agentId, finalRun)
+      if (finalRun) {
+        broadcast('run:statusChange', {
+          runId,
+          status,
+          exitCode: exitCode ?? undefined,
+          endedAt,
+          durationMs,
+        })
+        await publishRunResult(agentId, finalRun)
+      }
     } catch (err) {
-      console.error(`[server/runner] Finalize failed for run ${runId}:`, err)
+      console.error(`[server/runner] Publish failed for run ${runId}:`, err)
+      reporter.captureException(err instanceof Error ? err : new Error(String(err)), {
+        tags: { component: 'runner', op: 'publishRunResult', runId, runner },
+      })
     } finally {
       notifyRunFinalized()
     }
@@ -345,7 +378,9 @@ export function createRunOrchestration(opts: {
         tags: { component: 'runner', runId, runner },
       })
       eventHandlers.onEvent({ kind: 'raw', stream: 'system', text: `\n[Error: ${err.message}]\n` })
-      void finalizeRun('failed', undefined)
+      void finalizeRun('failed', undefined).catch((finalizeErr) => {
+        console.error(`[server/runner] Failed to finalize run ${runId} after spawn error:`, finalizeErr)
+      })
     },
     onExit: (status, exitCode) => {
       if (status === 'failed' && !finalized) {

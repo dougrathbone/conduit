@@ -365,8 +365,10 @@ describe('recoverRemoteRun', () => {
     runs.clear()
     updateRun.mockClear()
     getRun.mockClear()
+    updateRunIfRunning.mockClear()
     publishRunResult.mockClear()
     captureMessage.mockClear()
+    captureException.mockClear()
     broadcasts.length = 0
   })
 
@@ -418,6 +420,79 @@ describe('recoverRemoteRun', () => {
     await binding.sink.onExit('completed', 0)
     expect(runs.get(run.id)?.lastLine).toBe('post-recover line')
     expect(broadcasts.some(([ch]) => ch === 'run:events')).toBe(true)
+  })
+
+  it('forwards a durable event to the platform log exactly once without a second jsonl write', async () => {
+    const run = await seedRemote()
+    const before = fs.readFileSync(run.logPath, 'utf8')
+    const binding = (await recoverRemoteRun(run.id, 'worker-1', broadcast))!
+    if (!('sink' in binding)) throw new Error('expected a live binding')
+    binding.onAdopted?.()
+
+    const written: string[] = []
+    const stdout = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation((chunk: string | Uint8Array) => {
+        written.push(String(chunk))
+        return true
+      })
+    try {
+      binding.sink.onDurableEvent!({ kind: 'raw', stream: 'stdout', text: 'forward-me' })
+    } finally {
+      stdout.mockRestore()
+    }
+
+    const forwarded = written.filter((line) => line.includes('forward-me'))
+    expect(forwarded).toHaveLength(1)
+    expect(JSON.parse(forwarded[0]!)).toMatchObject({ runId: run.id, text: 'forward-me' })
+    expect(fs.readFileSync(run.logPath, 'utf8')).toBe(before)
+
+    await binding.sink.onExit('completed', 0)
+  })
+
+  it('rejects the terminal callback when the status write fails and finalizes once on replay', async () => {
+    const run = await seedRemote()
+    const binding = (await recoverRemoteRun(run.id, 'worker-1', broadcast))!
+    if (!('sink' in binding)) throw new Error('expected a live binding')
+    binding.onAdopted?.()
+
+    updateRunIfRunning.mockImplementationOnce(async () => {
+      throw new Error('database is unavailable')
+    })
+
+    await expect(binding.sink.onExit('completed', 0)).rejects.toThrow(/database is unavailable/)
+    expect(runs.get(run.id)?.status).toBe('running')
+    expect(publishRunResult).not.toHaveBeenCalled()
+    expect(broadcasts.filter(([ch]) => ch === 'run:statusChange')).toHaveLength(0)
+    // Still retryable: the run was not removed from the active set.
+    expect(getActiveRunIds().has(run.id)).toBe(true)
+
+    await binding.sink.onExit('completed', 0)
+    await binding.sink.onExit('completed', 0)
+
+    expect(runs.get(run.id)?.status).toBe('completed')
+    expect(publishRunResult).toHaveBeenCalledTimes(1)
+    expect(
+      broadcasts.filter(
+        ([ch, p]) => ch === 'run:statusChange' && (p as { status: string }).status === 'completed'
+      )
+    ).toHaveLength(1)
+    expect(getActiveRunIds().has(run.id)).toBe(false)
+  })
+
+  it('acknowledges the terminal state when publishing fails after the status is durable', async () => {
+    const run = await seedRemote()
+    const binding = (await recoverRemoteRun(run.id, 'worker-1', broadcast))!
+    if (!('sink' in binding)) throw new Error('expected a live binding')
+    binding.onAdopted?.()
+
+    publishRunResult.mockImplementationOnce(async () => {
+      throw new Error('publish target unreachable')
+    })
+
+    await expect(binding.sink.onExit('completed', 0)).resolves.toBeUndefined()
+    expect(runs.get(run.id)?.status).toBe('completed')
+    expect(captureException).toHaveBeenCalled()
   })
 
   it('routes stop through the recovered handle so cancel can use the rebound socket', async () => {
