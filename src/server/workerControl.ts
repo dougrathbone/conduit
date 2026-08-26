@@ -15,14 +15,19 @@
 import { WebSocketServer, WebSocket } from 'ws'
 import type { IncomingMessage } from 'http'
 import type { Duplex } from 'stream'
-import type { RunSpec, WorkerEventSink, WorkerHandle } from '../shared/worker'
+import * as path from 'path'
+import type { RunSpec, WorkerEventSink, WorkerHandle, WorkerExitStatus } from '../shared/worker'
+import type { RunEventInit } from '../shared/types'
 import type { ServerToWorkerMessage, WorkerCapabilities } from '../shared/workerControl'
 import {
   WORKER_LEASE_MS,
   WORKER_MAX_MESSAGE_BYTES,
   parseWorkerToServerMessage,
+  resolveWorkerReconnectTimeoutMs,
 } from '../shared/workerControl'
 import { reporter } from './observability'
+import { LOGS_DIR } from '../main/utils/paths'
+import { appendSequencedEvents, readHighestContiguousSequence } from './runDeliveryLog'
 
 const DEFAULT_ASSIGN_TIMEOUT_MS = 120_000
 const DEFAULT_CONNECT_TIMEOUT_MS = 600_000
@@ -53,7 +58,26 @@ export interface WorkerControlPlaneOptions {
   maxMessageBytes?: number
   /** Lease window; tests inject a short value. Default `WORKER_LEASE_MS`. */
   leaseMs?: number
+  /** Detach window after an ordinary socket close. Tests inject a short value. */
+  reconnectTimeoutMs?: number
+  /** Directory for sequenced run logs (`<runId>.jsonl`). */
+  logsDir?: string
+  /** Reconstruct a binding when a reconnecting worker reports a run this process does not hold. */
+  recoverRun?: RecoverRun
 }
+
+export interface RecoverableRunBinding {
+  runId: string
+  workerId: string
+  sink: WorkerEventSink
+  handle: WorkerHandle
+  durableSequence: number
+}
+
+export type RecoverRun = (
+  runId: string,
+  workerId: string
+) => Promise<RecoverableRunBinding | undefined>
 
 interface ConnectedWorker {
   workerId: string
@@ -68,14 +92,18 @@ interface Assignment {
   spec: RunSpec
   sink: WorkerEventSink
   workerId: string
-  /** Socket that received run:assign — the only session allowed to report this run. */
-  ws: WebSocket
+  /** Socket currently bound to this run; null while detached for reconnect. */
+  ws: WebSocket | null
   /** Monotonic id so a timed-out assignment's late run:started cannot settle a retry. */
   generation: number
   /** Token sent on run:assign and required on run:started after a retry. */
   assignId: string
   workspacePath?: string
   started: boolean
+  /** Highest contiguous sequence durably applied for this run. */
+  durableSequence: number
+  logPath: string
+  reconnectTimer?: NodeJS.Timeout
   settle: (handle: WorkerHandle) => void
   fail: (err: Error) => void
   timeout: NodeJS.Timeout
@@ -105,15 +133,23 @@ export class WorkerControlPlane {
   private readonly connectTimeoutMs: number
   private readonly maxMessageBytes: number
   private readonly leaseMs: number
+  private readonly reconnectTimeoutMs: number
+  private readonly logsDir: string
+  private readonly recoverRun?: RecoverRun
   private nextAssignmentGeneration = 1
   /** Timed-out assignment identities; a retry on a new generation is not suppressed. */
   private ignoreNextStarted = new Set<StartedSuppression>()
+  /** Terminal sequences already applied; lost-ACK replay is acknowledged without re-finalizing. */
+  private finalAcks = new Map<string, { workerId: string; sequence: number }>()
 
   constructor(options?: WorkerControlPlaneOptions) {
     this.assignTimeoutMs = options?.assignTimeoutMs ?? resolveAssignTimeoutMs()
     this.connectTimeoutMs = options?.connectTimeoutMs ?? resolveConnectTimeoutMs()
     this.maxMessageBytes = options?.maxMessageBytes ?? WORKER_MAX_MESSAGE_BYTES
     this.leaseMs = options?.leaseMs ?? WORKER_LEASE_MS
+    this.reconnectTimeoutMs = options?.reconnectTimeoutMs ?? resolveWorkerReconnectTimeoutMs()
+    this.logsDir = options?.logsDir ?? LOGS_DIR
+    this.recoverRun = options?.recoverRun
     this.wss.on('connection', (ws) => this.onConnection(ws))
     this.leaseTimer = setInterval(() => this.checkLeases(), this.leaseMs / 3)
     this.leaseTimer.unref()
@@ -228,6 +264,8 @@ export class WorkerControlPlane {
         generation,
         assignId,
         started: false,
+        durableSequence: 0,
+        logPath: path.join(this.logsDir, `${runId}.jsonl`),
         settle: (handle) => {
           assignment.started = true
           clearTimeout(assignment.timeout)
@@ -235,13 +273,14 @@ export class WorkerControlPlane {
         },
         fail: (err) => {
           clearTimeout(assignment.timeout)
+          this.clearReconnectTimer(assignment)
           this.runs.delete(runId)
           reject(err)
         },
         timeout: setTimeout(() => {
           const a = this.runs.get(runId)
           if (a && !a.started && a.generation === assignment.generation) {
-            this.ignoreNextStarted.add({ runId, generation: a.generation, ws: a.ws })
+            if (a.ws) this.ignoreNextStarted.add({ runId, generation: a.generation, ws: a.ws })
             this.sendOn(a.ws, { type: 'run:cancel', runId })
             a.fail(
               new Error(
@@ -252,7 +291,12 @@ export class WorkerControlPlane {
         }, this.assignTimeoutMs),
       }
       this.runs.set(runId, assignment)
-      this.sendOn(worker.ws, { type: 'run:assign', spec, assignId })
+      this.sendOn(worker.ws, {
+        type: 'run:assign',
+        spec,
+        assignId,
+        reconnectTimeoutMs: this.reconnectTimeoutMs,
+      })
     })
   }
 
@@ -272,8 +316,8 @@ export class WorkerControlPlane {
     return best
   }
 
-  private sendOn(ws: WebSocket, msg: ServerToWorkerMessage): void {
-    if (ws.readyState === WebSocket.OPEN) {
+  private sendOn(ws: WebSocket | null | undefined, msg: ServerToWorkerMessage): void {
+    if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(msg))
     }
   }
@@ -297,6 +341,7 @@ export class WorkerControlPlane {
     let workerId: string | undefined
     let closed = false
     let protocolClose = false
+    let chain = Promise.resolve()
 
     const rejectSocket = (code: number, reason: string): void => {
       if (closed) return
@@ -310,117 +355,22 @@ export class WorkerControlPlane {
     }
 
     ws.on('message', (data) => {
-      if (closed) return
-      if (rawMessageBytes(data) > this.maxMessageBytes) {
-        rejectSocket(1009, 'message too large')
-        return
-      }
-      const parsed = parseWorkerToServerMessage(data.toString())
-      if (!parsed.ok) {
-        rejectSocket(parsed.error === 'oversized-batch' ? 1009 : 1008, parsed.error)
-        return
-      }
-      const msg = parsed.message
-      if (!workerId && msg.type !== 'worker:hello') {
-        rejectSocket(1008, 'hello required')
-        return
-      }
-      // Any valid frame from a registered socket is liveness. Heartbeats can
-      // sit behind large run:event sends on a single-threaded worker, so a
-      // busy run that is still streaming must not look dead.
-      if (workerId) {
-        const w = this.workers.get(workerId)
-        if (w && w.ws === ws) w.lastHeartbeat = Date.now()
-      }
-
-      switch (msg.type) {
-        case 'worker:hello': {
-          if (workerId && msg.workerId !== workerId) {
-            console.warn(
-              `[worker-control] Ignoring identity change on socket ${workerId} → ${msg.workerId}`
-            )
-            break
-          }
-          if (workerId && msg.workerId === workerId) {
-            const current = this.workers.get(workerId)
-            if (current && current.ws === ws) {
-              current.capabilities = msg.capabilities
-              current.lastHeartbeat = Date.now()
-              current.reportedRunIds = new Set(msg.activeRunIds)
-            }
-            break
-          }
-          const existing = this.workers.get(msg.workerId)
-          if (existing && existing.ws !== ws) {
-            if (this.hasAssignmentsOn(existing.ws)) {
-              // One-shot / in-flight: the assigning socket keeps ownership.
-              // A duplicate must not inherit or inject into those assignments.
-              rejectSocket(4002, 'duplicate identity with active assignment')
-              break
-            }
-            existing.ws.close(4000, 'replaced by new connection')
-          }
-          workerId = msg.workerId
-          this.workers.set(workerId, {
-            workerId,
-            ws,
-            capabilities: msg.capabilities,
-            lastHeartbeat: Date.now(),
-            reportedRunIds: new Set(msg.activeRunIds),
+      chain = chain
+        .then(() => this.handleSocketMessage(ws, data, {
+          get workerId() {
+            return workerId
+          },
+          set workerId(id: string | undefined) {
+            workerId = id
+          },
+          closed: () => closed,
+          rejectSocket,
+        }))
+        .catch((err) => {
+          reporter.captureException(err, {
+            tags: { component: 'worker-control', workerId: workerId ?? 'unknown' },
           })
-          console.log(
-            `[worker-control] Worker connected: ${workerId} ` +
-              `(runners: ${msg.capabilities.runners.join(', ') || 'none'}, v${msg.capabilities.version})`
-          )
-          // A Job/Task-per-run factory may be waiting for this exact worker.
-          this.waiters.get(workerId)?.resolve(this.workers.get(workerId)!)
-          break
-        }
-        case 'worker:heartbeat': {
-          const w = workerId ? this.workers.get(workerId) : undefined
-          if (w && w.ws === ws) {
-            w.lastHeartbeat = Date.now()
-            w.reportedRunIds = new Set(msg.activeRunIds)
-          }
-          break
-        }
-        case 'run:started': {
-          const a = this.ownedAssignment(msg.runId, ws)
-          if (!a || a.started) break
-          if (msg.assignId && msg.assignId !== a.assignId) break
-          if (!msg.assignId && this.hasStaleSuppression(msg.runId, ws, a.generation)) break
-          if (this.consumeIgnoredStarted(msg.runId, ws, a.generation)) break
-          a.workspacePath = msg.workspacePath
-          a.settle(this.buildHandle(msg.runId, a))
-          break
-        }
-        case 'run:event': {
-          const a = this.ownedAssignment(msg.runId, ws)
-          if (a) {
-            for (const ev of msg.events) a.sink.onEvent(ev)
-          }
-          break
-        }
-        case 'run:exit': {
-          const a = this.ownedAssignment(msg.runId, ws)
-          if (!a) break
-          if (!a.started) {
-            // Execution never went live (prep failed on the worker) — let the
-            // factory's startRun reject so the orchestrator's start-failure
-            // path owns the run record; don't also fire the sink.
-            a.fail(
-              new Error(
-                `Worker ${a.workerId} failed to start run ${msg.runId} (status: ${msg.status})`
-              )
-            )
-          } else {
-            clearTimeout(a.timeout)
-            this.runs.delete(msg.runId)
-            a.sink.onExit(msg.status, msg.exitCode)
-          }
-          break
-        }
-      }
+        })
     })
 
     ws.on('close', () => {
@@ -433,10 +383,351 @@ export class WorkerControlPlane {
           this.failRunsOfWorker(workerId, 'protocol violation', { systemEvent: false, ws })
         } else {
           console.warn(`[worker-control] Worker disconnected: ${workerId}`)
-          this.failRunsOfWorker(workerId, 'disconnected', { ws })
+          this.detachOrFailRuns(workerId, ws)
         }
       }
     })
+  }
+
+  private async handleSocketMessage(
+    ws: WebSocket,
+    data: Buffer | ArrayBuffer | Buffer[] | string,
+    ctx: {
+      workerId: string | undefined
+      closed: () => boolean
+      rejectSocket: (code: number, reason: string) => void
+    }
+  ): Promise<void> {
+    if (ctx.closed()) return
+    if (rawMessageBytes(data) > this.maxMessageBytes) {
+      ctx.rejectSocket(1009, 'message too large')
+      return
+    }
+    const parsed = parseWorkerToServerMessage(data.toString())
+    if (!parsed.ok) {
+      ctx.rejectSocket(parsed.error === 'oversized-batch' ? 1009 : 1008, parsed.error)
+      return
+    }
+    const msg = parsed.message
+    if (!ctx.workerId && msg.type !== 'worker:hello') {
+      ctx.rejectSocket(1008, 'hello required')
+      return
+    }
+    if (ctx.workerId) {
+      const w = this.workers.get(ctx.workerId)
+      if (w && w.ws === ws) w.lastHeartbeat = Date.now()
+    }
+
+    switch (msg.type) {
+      case 'worker:hello': {
+        if (ctx.workerId && msg.workerId !== ctx.workerId) {
+          console.warn(
+            `[worker-control] Ignoring identity change on socket ${ctx.workerId} → ${msg.workerId}`
+          )
+          break
+        }
+        if (ctx.workerId && msg.workerId === ctx.workerId) {
+          const current = this.workers.get(ctx.workerId)
+          if (current && current.ws === ws) {
+            current.capabilities = msg.capabilities
+            current.lastHeartbeat = Date.now()
+            current.reportedRunIds = new Set(msg.activeRunIds)
+          }
+          break
+        }
+        const existing = this.workers.get(msg.workerId)
+        if (existing && existing.ws !== ws) {
+          if (this.hasAssignmentsOn(existing.ws)) {
+            ctx.rejectSocket(4002, 'duplicate identity with active assignment')
+            break
+          }
+          existing.ws.close(4000, 'replaced by new connection')
+        }
+        ctx.workerId = msg.workerId
+        this.workers.set(msg.workerId, {
+          workerId: msg.workerId,
+          ws,
+          capabilities: msg.capabilities,
+          lastHeartbeat: Date.now(),
+          reportedRunIds: new Set(msg.activeRunIds),
+        })
+        console.log(
+          `[worker-control] Worker connected: ${msg.workerId} ` +
+            `(runners: ${msg.capabilities.runners.join(', ') || 'none'}, v${msg.capabilities.version})`
+        )
+        this.waiters.get(msg.workerId)?.resolve(this.workers.get(msg.workerId)!)
+        if (ws.readyState !== WebSocket.OPEN || ctx.closed()) {
+          this.workers.delete(msg.workerId)
+          this.detachOrFailRuns(msg.workerId, ws)
+          break
+        }
+        await this.adoptPendingRuns(msg.workerId, ws, msg.pendingRunIds ?? [])
+        break
+      }
+      case 'worker:heartbeat': {
+        const w = ctx.workerId ? this.workers.get(ctx.workerId) : undefined
+        if (w && w.ws === ws) {
+          w.lastHeartbeat = Date.now()
+          w.reportedRunIds = new Set(msg.activeRunIds)
+        }
+        break
+      }
+      case 'run:started': {
+        await this.handleRunStarted(ws, ctx.workerId, msg)
+        break
+      }
+      case 'run:event': {
+        await this.handleRunEvent(ws, ctx.workerId, msg)
+        break
+      }
+      case 'run:exit': {
+        await this.handleRunExit(ws, ctx.workerId, msg)
+        break
+      }
+    }
+  }
+
+  private async handleRunStarted(
+    ws: WebSocket,
+    workerId: string | undefined,
+    msg: { runId: string; sequence?: number; workspacePath?: string; assignId?: string }
+  ): Promise<void> {
+    if (this.ackIfFinalized(ws, workerId, msg.runId, msg.sequence)) return
+    const a = this.ownedAssignment(msg.runId, ws)
+    if (!a) return
+    if (msg.assignId && msg.assignId !== a.assignId) return
+    if (!msg.assignId && this.hasStaleSuppression(msg.runId, ws, a.generation)) return
+    if (this.consumeIgnoredStarted(msg.runId, ws, a.generation)) return
+    if (msg.sequence === undefined) {
+      if (a.started) return
+      a.workspacePath = msg.workspacePath
+      a.settle(this.buildHandle(msg.runId, a))
+      return
+    }
+    const decision = this.sequenceDecision(a, msg.sequence)
+    if (decision === 'gap') return
+    if (decision === 'duplicate') {
+      this.sendAck(ws, msg.runId, msg.sequence)
+      return
+    }
+    const persist = await appendSequencedEvents(a.logPath, [], msg.sequence)
+    if (persist === 'rejected') return
+    if (!a.started) {
+      a.workspacePath = msg.workspacePath
+      a.settle(this.buildHandle(msg.runId, a))
+    }
+    a.durableSequence = msg.sequence
+    this.sendAck(ws, msg.runId, msg.sequence)
+  }
+
+  private async handleRunEvent(
+    ws: WebSocket,
+    workerId: string | undefined,
+    msg: { runId: string; sequence?: number; events: RunEventInit[] }
+  ): Promise<void> {
+    if (this.ackIfFinalized(ws, workerId, msg.runId, msg.sequence)) return
+    const a = this.ownedAssignment(msg.runId, ws)
+    if (!a) return
+    if (msg.sequence === undefined) {
+      for (const ev of msg.events) a.sink.onEvent(ev)
+      return
+    }
+    const decision = this.sequenceDecision(a, msg.sequence)
+    if (decision === 'gap') return
+    if (decision === 'duplicate') {
+      this.sendAck(ws, msg.runId, msg.sequence)
+      return
+    }
+    const persist = await appendSequencedEvents(a.logPath, msg.events, msg.sequence)
+    if (persist === 'rejected') return
+    if (persist === 'appended') {
+      for (const ev of msg.events) a.sink.onEvent(ev)
+    }
+    a.durableSequence = msg.sequence
+    this.sendAck(ws, msg.runId, msg.sequence)
+  }
+
+  private async handleRunExit(
+    ws: WebSocket,
+    workerId: string | undefined,
+    msg: { runId: string; sequence?: number; status: WorkerExitStatus; exitCode?: number | null }
+  ): Promise<void> {
+    if (this.ackIfFinalized(ws, workerId, msg.runId, msg.sequence)) return
+    const a = this.ownedAssignment(msg.runId, ws)
+    if (!a) return
+    if (msg.sequence === undefined) {
+      if (!a.started) {
+        a.fail(
+          new Error(`Worker ${a.workerId} failed to start run ${msg.runId} (status: ${msg.status})`)
+        )
+      } else {
+        clearTimeout(a.timeout)
+        this.clearReconnectTimer(a)
+        this.runs.delete(msg.runId)
+        a.sink.onExit(msg.status, msg.exitCode)
+      }
+      return
+    }
+    const decision = this.sequenceDecision(a, msg.sequence)
+    if (decision === 'gap') return
+    if (decision === 'duplicate') {
+      this.sendAck(ws, msg.runId, msg.sequence)
+      return
+    }
+    if (!a.started) {
+      a.fail(
+        new Error(`Worker ${a.workerId} failed to start run ${msg.runId} (status: ${msg.status})`)
+      )
+      a.durableSequence = msg.sequence
+      this.sendAck(ws, msg.runId, msg.sequence)
+      return
+    }
+    await Promise.resolve(a.sink.onExit(msg.status, msg.exitCode))
+    a.durableSequence = msg.sequence
+    this.finalAcks.set(msg.runId, { workerId: a.workerId, sequence: msg.sequence })
+    clearTimeout(a.timeout)
+    this.clearReconnectTimer(a)
+    this.runs.delete(msg.runId)
+    this.sendAck(ws, msg.runId, msg.sequence)
+  }
+
+  private sequenceDecision(a: Assignment, sequence: number): 'apply' | 'duplicate' | 'gap' {
+    if (sequence <= a.durableSequence) return 'duplicate'
+    if (sequence === a.durableSequence + 1) return 'apply'
+    return 'gap'
+  }
+
+  private sendAck(ws: WebSocket | null | undefined, runId: string, sequence: number): void {
+    this.sendOn(ws, { type: 'run:ack', runId, sequence })
+  }
+
+  private ackIfFinalized(
+    ws: WebSocket,
+    workerId: string | undefined,
+    runId: string,
+    sequence: number | undefined
+  ): boolean {
+    if (sequence === undefined || !workerId) return false
+    const done = this.finalAcks.get(runId)
+    if (!done || done.workerId !== workerId || sequence > done.sequence) return false
+    this.sendAck(ws, runId, sequence)
+    return true
+  }
+
+  private async adoptPendingRuns(workerId: string, ws: WebSocket, pendingRunIds: string[]): Promise<void> {
+    for (const runId of pendingRunIds) {
+      const done = this.finalAcks.get(runId)
+      if (done && done.workerId === workerId) {
+        this.sendAck(ws, runId, done.sequence)
+        continue
+      }
+      const existing = this.runs.get(runId)
+      if (existing) {
+        if (existing.workerId !== workerId) continue
+        if (existing.ws && existing.ws !== ws && existing.ws.readyState === WebSocket.OPEN) continue
+        this.rebindAssignment(existing, ws)
+        continue
+      }
+      const recovered = await this.recoverRun?.(runId, workerId)
+      if (!recovered || recovered.workerId !== workerId) continue
+      await this.installRecoveredBinding(recovered, ws)
+    }
+  }
+
+  private rebindAssignment(assignment: Assignment, ws: WebSocket): void {
+    this.clearReconnectTimer(assignment)
+    assignment.ws = ws
+    this.sendOn(ws, {
+      type: 'run:resume',
+      runId: assignment.spec.runId,
+      sequence: assignment.durableSequence,
+    })
+  }
+
+  private async installRecoveredBinding(binding: RecoverableRunBinding, ws: WebSocket): Promise<void> {
+    const runId = binding.runId
+    const assignment: Assignment = {
+      spec: {
+        runId,
+        agentId: '',
+        runner: 'claude',
+        prompt: '',
+        env: {},
+        workspace: { kind: 'ephemeral' },
+      },
+      sink: binding.sink,
+      workerId: binding.workerId,
+      ws,
+      generation: this.nextAssignmentGeneration++,
+      assignId: 'recovered',
+      workspacePath: binding.handle.workspacePath,
+      started: true,
+      durableSequence: binding.durableSequence,
+      logPath: path.join(this.logsDir, `${runId}.jsonl`),
+      settle: () => {},
+      fail: () => {},
+      timeout: setTimeout(() => {}, 0),
+    }
+    clearTimeout(assignment.timeout)
+    this.runs.set(runId, assignment)
+    await this.ensureLogCursor(assignment.logPath, binding.durableSequence)
+    this.sendOn(ws, { type: 'run:resume', runId, sequence: binding.durableSequence })
+  }
+
+  /** Fill missing prefix markers so resume never sits above a gapped log. */
+  private async ensureLogCursor(logPath: string, through: number): Promise<void> {
+    if (through <= 0) return
+    let highest = await readHighestContiguousSequence(logPath)
+    while (highest < through) {
+      const result = await appendSequencedEvents(logPath, [], highest + 1)
+      if (result === 'rejected') return
+      highest = await readHighestContiguousSequence(logPath)
+    }
+  }
+
+  private detachOrFailRuns(workerId: string, ws: WebSocket): void {
+    for (const a of [...this.runs.values()]) {
+      if (a.workerId !== workerId) continue
+      if (a.ws && a.ws !== ws) continue
+      if (!a.started) {
+        a.fail(new Error(`Worker ${workerId} disconnected`))
+        continue
+      }
+      if (!a.ws && a.reconnectTimer) continue
+      this.clearReconnectTimer(a)
+      a.ws = null
+      a.reconnectTimer = setTimeout(() => {
+        this.failDetachedAssignment(
+          a,
+          `did not reconnect within ${this.reconnectTimeoutMs}ms`
+        )
+      }, this.reconnectTimeoutMs)
+    }
+  }
+
+  private failDetachedAssignment(a: Assignment, reason: string): void {
+    const runId = a.spec.runId
+    if (this.runs.get(runId) !== a) return
+    this.clearReconnectTimer(a)
+    clearTimeout(a.timeout)
+    this.runs.delete(runId)
+    const err = new Error(`Worker ${a.workerId} ${reason}`)
+    reporter.captureMessage(err.message, 'warning', {
+      tags: { component: 'worker-control', workerId: a.workerId, runId },
+    })
+    a.sink.onEvent({
+      kind: 'raw',
+      stream: 'system',
+      text: `[Conduit: worker ${a.workerId} ${reason} — failing this run.]`,
+    })
+    a.sink.onExit('failed', null)
+  }
+
+  private clearReconnectTimer(a: Assignment): void {
+    if (a.reconnectTimer) {
+      clearTimeout(a.reconnectTimer)
+      a.reconnectTimer = undefined
+    }
   }
 
   /** Assignment exists and was dispatched on this exact socket. */
@@ -507,6 +798,7 @@ export class WorkerControlPlane {
       reporter.captureMessage(err.message, 'warning', {
         tags: { component: 'worker-control', workerId, runId },
       })
+      this.clearReconnectTimer(a)
       if (!a.started) {
         a.fail(err)
       } else {
@@ -531,6 +823,7 @@ export class WorkerControlPlane {
     }
     this.waiters.clear()
     for (const a of [...this.runs.values()]) {
+      this.clearReconnectTimer(a)
       if (!a.started) {
         a.fail(new Error('Worker control plane is shutting down'))
       } else {
@@ -553,6 +846,7 @@ export class WorkerControlPlane {
     }
     this.workers.clear()
     this.ignoreNextStarted.clear()
+    this.finalAcks.clear()
   }
 }
 
