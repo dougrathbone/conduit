@@ -99,6 +99,19 @@ describe('reliable run-frame protocol', () => {
     }
   })
 
+  it('rejects pendingRunIds that contain a non-string so a mixed array cannot look like a valid hello', () => {
+    const parsed = parseWorkerToServerMessage(
+      JSON.stringify({
+        type: 'worker:hello',
+        workerId: 'w1',
+        capabilities: { runners: ['claude'], version: '2' },
+        activeRunIds: [],
+        pendingRunIds: ['run-1', 2],
+      })
+    )
+    expect(parsed).toEqual({ ok: false, error: 'invalid' })
+  })
+
   it('keeps a sequenced run:event payload and still rejects batches above WORKER_MAX_EVENT_BATCH', () => {
     const ok = parseWorkerToServerMessage(
       JSON.stringify({
@@ -153,13 +166,14 @@ describe('reliable run-frame protocol', () => {
 })
 
 describe('ReliableDeliveryQueue', () => {
-  it('allocates sequences once and drops only prefix frames covered by a contiguous ACK', () => {
+  it('allocates sequences once and drops only prefix frames covered by a contiguous ACK of sent frames', async () => {
     const queue = createReliableDeliveryQueue()
     queue.enqueue(started())
     queue.enqueue(event('a'))
     queue.enqueue(exit())
 
     expect(queue.pending().map((frame) => frame.sequence)).toEqual([1, 2, 3])
+    await queue.drain(async () => {})
     queue.acknowledge(2)
     expect(queue.pending().map((frame) => frame.sequence)).toEqual([3])
     expect(queue.terminalAcknowledged).toBe(false)
@@ -216,11 +230,12 @@ describe('ReliableDeliveryQueue', () => {
     expect(queue.pending().map((frame) => frame.sequence)).toEqual([1, 2, 3])
   })
 
-  it('ignores stale and duplicate ACKs so a late ack-1 cannot resurrect dropped prefix frames', () => {
+  it('ignores stale and duplicate ACKs so a late ack-1 cannot resurrect dropped prefix frames', async () => {
     const queue = createReliableDeliveryQueue()
     queue.enqueue(started())
     queue.enqueue(event('a'))
     queue.enqueue(exit())
+    await queue.drain(async () => {})
     queue.acknowledge(2)
     queue.acknowledge(2)
     queue.acknowledge(1)
@@ -228,15 +243,53 @@ describe('ReliableDeliveryQueue', () => {
     expect(queue.terminalAcknowledged).toBe(false)
   })
 
-  it('rejects an ACK past the highest enqueued sequence so a future frame is not discarded unseen', () => {
+  it('ignores an ACK beyond the highest successfully sent contiguous sequence so an unsent frame is not discarded', async () => {
     const queue = createReliableDeliveryQueue()
     queue.enqueue(started())
     queue.enqueue(event('a'))
-    queue.acknowledge(99)
-    expect(queue.pending().map((frame) => frame.sequence)).toEqual([1, 2])
     queue.enqueue(exit())
+    queue.acknowledge(2)
     expect(queue.pending().map((frame) => frame.sequence)).toEqual([1, 2, 3])
+    await queue.drain(async () => {})
+    queue.acknowledge(2)
+    expect(queue.pending().map((frame) => frame.sequence)).toEqual([3])
+    queue.acknowledge(99)
+    expect(queue.pending().map((frame) => frame.sequence)).toEqual([3])
     expect(queue.terminalAcknowledged).toBe(false)
+  })
+
+  it('ignores a resume cursor above the highest enqueued sequence so frames 1..terminal still drain', async () => {
+    const queue = createReliableDeliveryQueue()
+    queue.enqueue(started())
+    queue.enqueue(event('a'))
+    queue.enqueue(exit())
+    queue.resumeAfter(99)
+    const sent: number[] = []
+    await queue.drain(async (frame) => {
+      sent.push(frame.sequence)
+    })
+    expect(sent).toEqual([1, 2, 3])
+    expect(queue.pending().map((frame) => frame.sequence)).toEqual([1, 2, 3])
+  })
+
+  it('does not advance sentThrough when send rejects, so a later drain retries the unwritten frame', async () => {
+    const queue = createReliableDeliveryQueue()
+    queue.enqueue(started())
+    queue.enqueue(event('a'))
+    queue.enqueue(exit())
+    const sent: number[] = []
+    let attempts = 0
+    const send = async (frame: ReliableRunFrame): Promise<void> => {
+      attempts++
+      if (attempts === 1) throw new Error('not written')
+      sent.push(frame.sequence)
+    }
+
+    await expect(queue.drain(send)).rejects.toThrow('not written')
+    expect(sent).toEqual([])
+    await queue.drain(send)
+    expect(sent).toEqual([1, 2, 3])
+    expect(attempts).toBe(4)
   })
 })
 
