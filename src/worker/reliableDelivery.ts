@@ -84,12 +84,8 @@ export function createReliableDeliveryQueue(): ReliableDeliveryQueue {
       if (sendsHeld) return
       const next = frames.find((frame) => frame.sequence > ackedThrough && frame.sequence > sentThrough)
       if (!next) return
-      try {
-        await send(next)
-      } catch (err) {
-        // Leave sentThrough unchanged so the next drain retries this frame.
-        throw err
-      }
+      // sentThrough advances only after send resolves; a rejection retries this frame.
+      await send(next)
       if (next.sequence === Math.max(ackedThrough, sentThrough) + 1) sentThrough = next.sequence
       if (sendsHeld) return
     }

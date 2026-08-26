@@ -17,7 +17,7 @@ import {
   type WorkerControlPlaneOptions,
   type RecoverRunResult,
 } from './workerControl'
-import type { RunSpec, WorkerEventSink, WorkerHandle } from '../shared/worker'
+import type { RunSpec, WorkerHandle } from '../shared/worker'
 import type { ServerToWorkerMessage } from '../shared/workerControl'
 import { WORKER_MAX_EVENT_BATCH, WORKER_MAX_MESSAGE_BYTES } from '../shared/workerControl'
 import { appendSequencedEvents, readHighestContiguousSequence } from './runDeliveryLog'
@@ -40,14 +40,6 @@ interface TestCtx {
   sockets: WebSocket[]
   logsDir: string
   close: () => Promise<void>
-}
-
-type RecoverRunBinding = {
-  runId: string
-  workerId: string
-  sink: WorkerEventSink
-  handle: WorkerHandle
-  durableSequence: number
 }
 
 type ResumablePlaneOptions = WorkerControlPlaneOptions & {

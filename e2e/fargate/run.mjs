@@ -131,7 +131,7 @@ async function main() {
   let server
   let restartDriver
   let expiryDriver
-  let exitCode = 1
+  let exitCode
   try {
     server = startServer(RESTART_TIMEOUT_MS)
     await waitForOutput(server, 'running at')
