@@ -76,8 +76,31 @@ a per-run delivery sequence. Server→worker `run:assign` (RunSpec plus
 The worker keeps every frame on a process-local spool until the matching
 contiguous sequence is ACKed, then resends later frames in order after
 `run:resume`. Duplicate frames at or below the server cursor are not applied
-again. Compatibility is fail-safe: a worker without resumable-delivery support
-cannot claim a recoverable assignment.
+again. Only an *accepted* `run:resume` cursor counts as adoption — a cursor the
+worker cannot honor leaves the delivery window running. Compatibility is
+fail-safe: a worker without resumable-delivery support (`capabilities.version`
+`2`) cannot claim a recoverable assignment. Once an assignment has seen a
+sequenced frame it rejects unsequenced frames for that run, and vice versa, so a
+mixed-protocol peer cannot silently bypass the durable cursor.
+
+**Durable delivery log**: sequenced frames are appended to the run's
+`logs/<runId>.jsonl` with an internal sequence field, and the ACK is only sent
+after that write. The append is O(1) — it uses the assignment's in-memory
+cursor and never rescans the log — while recovery scans the log once with
+bounded streaming line processing (oversized or malformed lines are skipped, not
+buffered). Remote appends honor the same `CONDUIT_RUN_LOG_MAX_BYTES` cap as
+local runs: at the cap the log gets one truncation diagnostic, live/stdout
+output continues, and the delivery cursor is carried forward in a small
+`logs/<runId>.jsonl.cursor` sidecar so ACK and recovery keep advancing without
+growing the log. The sidecar is removed with the run's log artifacts.
+
+**Rejection**: when the server declines a run a worker reports (no recoverable
+record, `workerId` mismatch, or another live socket owns it) it replies
+`run:reject` with a non-specific reason, so the worker stops retrying instead of
+hanging until the window elapses. The worker remembers rejected ids briefly in a
+bounded ledger, so a reject that arrives while the CLI is still spawning still
+cancels the handle rather than leaking the process. A one-shot worker exits
+non-zero after a rejected or expired delivery.
 
 **Lease**: 75s without a hello, heartbeat, or run frame (`WORKER_LEASE_MS`)
 means the worker is dead; its in-memory assignments are failed. That is distinct
@@ -86,9 +109,21 @@ reconnect window instead of synthesizing immediate failure.
 
 **Reconnect**: the worker retries with capped exponential backoff from the first
 disconnect (default five minutes, `CONDUIT_WORKER_RECONNECT_TIMEOUT_MS`, sent on
-every `run:assign`). One-shot (Fargate/EKS) workers do not exit after local
-process completion until `run:exit` is acknowledged. If the window expires, the
-worker cancels still-active execution and exits non-zero.
+every `run:assign`, clamped to the largest delay `setTimeout` can represent).
+The window is enforced by its own watchdog, not only by reconnect scheduling: a
+worker that reconnects successfully but is never resumed or rejected still gives
+up on schedule. One-shot (Fargate/EKS) workers do not exit after local process
+completion until `run:exit` is acknowledged. If the window expires, the worker
+cancels still-active execution and exits non-zero.
+
+**Graceful shutdown is not a delivery guarantee.** `SIGINT`/`SIGTERM` cancel
+active runs and exit; they do not wait for unacked frames to drain. During a
+rolling deploy of the *server*, in-flight remote runs survive because the worker
+reconnects to the replacement and replays from the durable cursor. A `SIGTERM`
+to the *worker* (pod eviction, spot reclaim, `docker stop`) ends its run: the
+spool is process-local, so anything unacked at that moment is lost and the run
+fails when the lease lapses. Drain worker pods by stopping new assignment and
+waiting for runs to finish, not by relying on the shutdown path.
 
 **Server replacement**: startup reconciliation still fails `local` / missing-kind
 orphans immediately. Remote/eks/fargate runs with a recorded `workerId` stay
@@ -107,7 +142,8 @@ this guarantee.
 | `CONDUIT_WORKER_TOKEN` | Shared secret for /ws/worker upgrades |
 | `CONDUIT_WORKER_ASSIGN_TIMEOUT_MS` | run:assign → run:started timeout (default 120000) |
 | `CONDUIT_WORKER_CONNECT_TIMEOUT_MS` | `assignTo` wait for a named worker to dial in (default 600000) |
-| `CONDUIT_WORKER_RECONNECT_TIMEOUT_MS` | Delivery/reconnect window in ms (default 300000). Resolved once on the server and sent on every `run:assign`; tests inject short values. |
+| `CONDUIT_WORKER_RECONNECT_TIMEOUT_MS` | Delivery/reconnect window in ms (default 300000, clamped to 2147483647). Resolved once on the server and sent on every `run:assign`; tests inject short values. |
+| `CONDUIT_RUN_LOG_MAX_BYTES` | Per-run log cap in bytes (default 524288000, `0` disables). Applies to local writes and durable remote appends alike. |
 
 **Worker env**: `CONDUIT_SERVER_URL` (`ws(s)://<host>/ws/worker`),
 `CONDUIT_WORKER_TOKEN`, `CONDUIT_WORKER_ID` (default `<hostname>-<pid>`).
@@ -392,7 +428,7 @@ builds without it skip upload entirely and emit no public maps:
 
 All data lives under `~/.conduit/` (or `$CONDUIT_DATA_DIR`):
 - `conduit.db` — SQLite database
-- `logs/` — NDJSON run logs (`{runId}.jsonl`)
+- `logs/` — NDJSON run logs (`{runId}.jsonl`), plus a `{runId}.jsonl.cursor` sidecar for remote runs whose log hit the size cap
 - `repos/` — Bare git clones for managed repositories; each run gets an isolated worktree under `repos/<id>/worktrees-run/<uuid>`
 - `prefs.json` — Key-value preferences (GitHub PAT stored as base64)
 

@@ -7,8 +7,9 @@
  * Phases:
  *   1. full driver suite against worker 1 (assign/stream/stop/concurrency
  *      over the control plane, workerKind=remote, workerId recorded)
- *   2. drive-death.mjs: SIGKILL worker 1 mid-run — the server must detect the
- *      dead socket and fail the run (lease semantics, no stuck 'running')
+ *   2. drive-death.mjs: SIGKILL worker 1 mid-run — the server must detach the
+ *      run, wait out the delivery window (shortened here), and then fail it
+ *      with the worker-death diagnostic (no stuck 'running')
  *   3. connect worker 2 and re-run the driver in quick mode — proves the
  *      control plane recovers and accepts new workers
  *
@@ -59,6 +60,10 @@ async function main() {
       DATABASE_SSL: 'disable',
       CONDUIT_WORKER_FACTORY: 'remote',
       CONDUIT_WORKER_TOKEN: TOKEN,
+      // A killed worker never comes back, so the run can only fail once its
+      // delivery window elapses. Five seconds keeps phase 2 fast while still
+      // being far longer than any in-harness reconnect.
+      CONDUIT_WORKER_RECONNECT_TIMEOUT_MS: '5000',
     },
   })
 
