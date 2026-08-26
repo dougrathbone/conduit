@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient, useIsMutating } from '@tanstack/react-query'
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '@renderer/lib/ipc'
 import { summarizeEvent } from '@shared/runEvents'
@@ -12,9 +12,14 @@ export function useRuns(agentId: string) {
   })
 }
 
+/** Keyed by agent so an in-flight start can be observed per agent. */
+const startRunMutationKey = (agentId: string) => ['runs', 'start', agentId]
+const STOP_RUN_MUTATION_KEY = ['runs', 'stop']
+
 export function useStartRun(agentId: string) {
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: startRunMutationKey(agentId),
     mutationFn: () => api.runs.start(agentId),
     onSuccess: (run) => {
       // Show the new run in the list immediately, before the refetch round-trip —
@@ -28,9 +33,31 @@ export function useStartRun(agentId: string) {
   })
 }
 
+/**
+ * Whether a start for this specific agent is in flight, read from the mutation
+ * cache rather than from a `useStartRun` result. The Run button's component is
+ * reused across agent switches, so a mutation observer's own `isPending` would
+ * follow the user to the next agent and disable its Run button — for minutes,
+ * since starting a run waits on the worker (a cold cloud worker is slow).
+ */
+export function useIsStartingRun(agentId: string): boolean {
+  return useIsMutating({ mutationKey: startRunMutationKey(agentId) }) > 0
+}
+
+/** As above, for the Stop button — scoped to the run being stopped. */
+export function useIsStoppingRun(runId: string | null): boolean {
+  return (
+    useIsMutating({
+      mutationKey: STOP_RUN_MUTATION_KEY,
+      predicate: (m) => m.state.variables === runId,
+    }) > 0
+  )
+}
+
 export function useStopRun() {
   const queryClient = useQueryClient()
   return useMutation({
+    mutationKey: STOP_RUN_MUTATION_KEY,
     mutationFn: (runId: string) => api.runs.stop(runId),
     onSuccess: (_data, runId) => {
       // Invalidate all run lists — we don't know which agentId owns this run here

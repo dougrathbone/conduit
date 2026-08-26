@@ -1,7 +1,12 @@
 import React, { useEffect, useState } from 'react'
 import { Play, Square, Loader2 } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
-import { useStartRun, useStopRun } from '@renderer/hooks/useRuns'
+import {
+  useIsStartingRun,
+  useIsStoppingRun,
+  useStartRun,
+  useStopRun,
+} from '@renderer/hooks/useRuns'
 import { useUIStore } from '@renderer/store/ui'
 import { formatDuration } from '@renderer/lib/utils'
 import type { RunStatus } from '@shared/types'
@@ -31,6 +36,12 @@ export function RunControls({
   // the failure is invisible and the user just sees an unchanged, empty list.
   const [startError, setStartError] = useState<string | null>(null)
 
+  // This component is reused when another agent is selected, so clear the
+  // previous agent's error rather than showing it against the new one.
+  useEffect(() => {
+    setStartError(null)
+  }, [agentId])
+
   useEffect(() => {
     if (activeRunStatus !== 'running' && activeRunStatus !== 'launched') {
       setElapsed(0)
@@ -49,6 +60,10 @@ export function RunControls({
     setStartError(null)
     try {
       const run = await startRun.mutateAsync()
+      // The user may have moved on to another agent while the start was in
+      // flight — navigating them to this run would yank them out of the agent
+      // they're now looking at. The run is already in its own agent's list.
+      if (useUIStore.getState().selectedAgentId !== agentId) return
       // Point both the active + viewed run at the new run so the pane switches to
       // its live view immediately (otherwise a previously-selected run keeps the
       // pane and the new run's output never shows).
@@ -57,6 +72,7 @@ export function RunControls({
       onRunStarted?.()
     } catch (e) {
       console.error('Failed to start run:', e)
+      if (useUIStore.getState().selectedAgentId !== agentId) return
       setStartError(e instanceof Error ? e.message : 'Failed to start run')
     }
   }
@@ -72,8 +88,9 @@ export function RunControls({
 
   const isLive =
     activeRunStatus === 'running' || activeRunStatus === 'launched'
-  const isStarting = startRun.isPending
-  const isStopping = stopRun.isPending
+  // Per-agent / per-run, not per-component: see useIsStartingRun.
+  const isStarting = useIsStartingRun(agentId)
+  const isStopping = useIsStoppingRun(activeRunId)
 
   if (isLive) {
     return (

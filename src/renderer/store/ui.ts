@@ -118,9 +118,12 @@ export const useUIStore = create<UIState>((set, get) => ({
   showRepositories: initialUrl.repositories,
   showSettings: initialUrl.settings,
 
+  // activeRunId/viewedRunId belong to the agent they were selected under, so
+  // they're cleared here — otherwise the new agent's runs tab opens on a run
+  // from the previous one.
   selectAgent: (id) => {
     pushUrl(id ? `/agents/${id}` : '/')
-    set({ selectedAgentId: id, viewedRunId: null, showGlobalMcpManager: false, showPublishTargets: false, showRepositories: false, showSettings: false })
+    set({ selectedAgentId: id, activeRunId: null, viewedRunId: null, showGlobalMcpManager: false, showPublishTargets: false, showRepositories: false, showSettings: false })
   },
 
   setViewedRun: (id) => {
