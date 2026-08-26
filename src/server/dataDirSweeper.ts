@@ -9,6 +9,7 @@ import { deleteWorkspace } from '../main/execution/workspace'
 import { getActiveWorkspacePaths, getActiveRunIds } from './runner'
 import { getAllRepositoryIds } from '../main/db/queries/repositories'
 import { reporter } from './observability'
+import { deliveryCursorPath } from './runDeliveryLog'
 import type { SweepResult, StorageUsage } from '../shared/types'
 
 /**
@@ -47,6 +48,16 @@ export const LOG_RETENTION_MS = envMs(process.env.CONDUIT_LOG_RETENTION_MS, DEFA
  *  fetch). A `git gc` consolidates them; after gc the count drops to ~1 so it
  *  won't run again until packs re-accumulate — making the sweep self-limiting. */
 export const GC_PACK_THRESHOLD = envMs(process.env.CONDUIT_GC_PACK_THRESHOLD, 10)
+
+/**
+ * Everything on disk that belongs to one run log: the NDJSON itself plus the
+ * delivery-cursor sidecar (and its atomic-write temp) a capped remote run may
+ * have left next to it. Reclaiming a log must take all of them.
+ */
+export function runLogArtifactPaths(logPath: string): string[] {
+  const cursor = deliveryCursorPath(logPath)
+  return [logPath, cursor, `${cursor}.tmp`]
+}
 
 /** A candidate artifact considered for removal. */
 export interface SweepEntry {
@@ -333,7 +344,8 @@ export async function collectSweepCandidates(opts: SweepScanOptions = {}): Promi
   }
 
   // 4. Run logs: logs/<runId>.jsonl. Pruned on the long retention window (not the
-  //    short grace) since they are the run history.
+  //    short grace) since they are the run history. The delivery-cursor sidecar
+  //    is not a candidate of its own — it is reclaimed with its log.
   const logs: SweepCandidate[] = []
   for (const e of listDir(logsDir)) {
     if (!e.isFile() || !e.name.endsWith('.jsonl')) continue
@@ -425,7 +437,7 @@ async function runSweep(now: number): Promise<SweepResult> {
   // 4. Expired run logs (retention window, not the short grace).
   for (const stale of selectStale(logs, { now, graceMs: LOG_RETENTION_MS })) {
     try {
-      fs.rmSync(stale.path, { force: true })
+      for (const artifact of runLogArtifactPaths(stale.path)) fs.rmSync(artifact, { force: true })
       result.logsRemoved++
     } catch (err) {
       reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'log' } })

@@ -20,7 +20,13 @@ vi.mock('../main/utils/paths', () => ({ REPOS_DIR: '/nonexistent-repos-for-test'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { selectStale, classifyTmpEntry, collectSweepCandidates, type SweepEntry } from './dataDirSweeper'
+import {
+  selectStale,
+  classifyTmpEntry,
+  collectSweepCandidates,
+  runLogArtifactPaths,
+  type SweepEntry,
+} from './dataDirSweeper'
 
 const UUID = '11111111-2222-3333-4444-555555555555'
 
@@ -169,6 +175,45 @@ describe('collectSweepCandidates — agent-created worktrees (git-discovered)', 
       const busyByPath = new Map(busy.worktrees.map((w) => [w.path, w]))
       expect(busyByPath.get(runWt)?.protectedByActive).toBe(true) // exact active-set match
       expect(busyByPath.get(agentWt)?.protectedByActive).toBe(true) // spared: clone has a live run
+    } finally {
+      fs.rmSync(base, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('runLogArtifactPaths', () => {
+  it('includes the delivery-cursor sidecar so a reclaimed log leaves nothing behind', () => {
+    expect(runLogArtifactPaths('/data/logs/run-1.jsonl')).toEqual([
+      '/data/logs/run-1.jsonl',
+      '/data/logs/run-1.jsonl.cursor',
+      '/data/logs/run-1.jsonl.cursor.tmp',
+    ])
+  })
+})
+
+describe('collectSweepCandidates — run logs', () => {
+  it('treats only the jsonl as a candidate, never the sidecar as a run of its own', async () => {
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sweeper-log-test-'))
+    const reposDir = path.join(base, 'repos')
+    const tmpDir = path.join(base, 'tmp')
+    const logsDir = path.join(base, 'logs')
+    for (const dir of [reposDir, tmpDir, logsDir]) fs.mkdirSync(dir)
+    try {
+      const logPath = path.join(logsDir, 'run-9.jsonl')
+      fs.writeFileSync(logPath, '{}\n')
+      fs.writeFileSync(`${logPath}.cursor`, '{"sequence":3,"capped":true}\n')
+
+      const { logs } = await collectSweepCandidates({
+        reposDir,
+        tmpDir,
+        logsDir,
+        activePaths: new Set(),
+        activeRunIds: new Set(),
+        activeClonePaths: new Set(),
+        listWorktrees: async () => [],
+      })
+
+      expect(logs.map((l) => l.path)).toEqual([logPath])
     } finally {
       fs.rmSync(base, { recursive: true, force: true })
     }
