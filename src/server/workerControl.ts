@@ -44,6 +44,11 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 600_000
  */
 const REJECT_REASON = 'run is not recoverable on this server'
 
+/** First delay before re-driving a terminal frame whose finalization failed. */
+const DEFAULT_EXIT_RETRY_INITIAL_DELAY_MS = 500
+/** Ceiling for the exponential backoff between those re-drives. */
+const DEFAULT_EXIT_RETRY_MAX_DELAY_MS = 15_000
+
 function parsePositiveMs(raw: string | undefined, fallback: number): number {
   const n = Number(raw)
   return Number.isFinite(n) && n > 0 ? n : fallback
@@ -76,6 +81,10 @@ export interface WorkerControlPlaneOptions {
   logsDir?: string
   /** Per-run on-disk log cap for durable appends. `0` disables it. */
   runLogMaxBytes?: number
+  /** First backoff step before re-driving a failed terminal frame (default 500). */
+  exitRetryInitialDelayMs?: number
+  /** Ceiling for that backoff (default 15000). */
+  exitRetryMaxDelayMs?: number
   /** Reconstruct a binding when a reconnecting worker reports a run this process does not hold. */
   recoverRun?: RecoverRun
   /** Tests inject a gated writer to prove per-run serialize-during-fsync. */
@@ -153,6 +162,12 @@ interface Assignment {
   reconnectTimer?: NodeJS.Timeout
   /** True while sequenced onExit is awaiting durable finalization. */
   exitInFlight?: boolean
+  /** Armed re-drive of a terminal frame whose finalization failed. */
+  exitRetryTimer?: NodeJS.Timeout
+  /** Next backoff step for that re-drive. */
+  exitRetryDelayMs?: number
+  /** Absolute deadline for re-driving, one delivery window from the first failure. */
+  exitRetryDeadline?: number
   settle: (handle: WorkerHandle) => void
   fail: (err: Error) => void
   timeout: NodeJS.Timeout
@@ -188,6 +203,8 @@ export class WorkerControlPlane {
   private readonly reconnectTimeoutMs: number
   private readonly logsDir: string
   private readonly runLogMaxBytes: number
+  private readonly exitRetryInitialDelayMs: number
+  private readonly exitRetryMaxDelayMs: number
   private readonly recoverRun?: RecoverRun
   private readonly openLog: OpenDeliveryLog
   private nextAssignmentGeneration = 1
@@ -208,6 +225,9 @@ export class WorkerControlPlane {
     this.reconnectTimeoutMs = options?.reconnectTimeoutMs ?? resolveWorkerReconnectTimeoutMs()
     this.logsDir = options?.logsDir ?? LOGS_DIR
     this.runLogMaxBytes = options?.runLogMaxBytes ?? resolveRunLogMaxBytes()
+    this.exitRetryInitialDelayMs =
+      options?.exitRetryInitialDelayMs ?? DEFAULT_EXIT_RETRY_INITIAL_DELAY_MS
+    this.exitRetryMaxDelayMs = options?.exitRetryMaxDelayMs ?? DEFAULT_EXIT_RETRY_MAX_DELAY_MS
     this.recoverRun = options?.recoverRun
     this.openLog = options?.openDeliveryLog ?? openDeliveryLog
     this.wss.on('connection', (ws) => this.onConnection(ws))
@@ -237,6 +257,11 @@ export class WorkerControlPlane {
   /** Connected worker count (observability + tests). */
   get connectedWorkerCount(): number {
     return this.workers.size
+  }
+
+  /** Assignments this process still holds — zero once every run is settled. */
+  get activeAssignmentCount(): number {
+    return this.runs.size
   }
 
   /**
@@ -720,7 +745,9 @@ export class WorkerControlPlane {
       await Promise.resolve(a.sink.onExit(msg.status, msg.exitCode))
     } catch (err) {
       // Terminal state was not persisted. Do not record a final ACK and do not
-      // acknowledge: the worker keeps the terminal frame spooled and replays it.
+      // acknowledge, so the worker keeps the frame spooled — but the worker has
+      // no reason to resend on its own (its cursor covers the frame and the
+      // socket is fine), so the server must ask for it again.
       a.exitInFlight = false
       reporter.captureException(err instanceof Error ? err : new Error(String(err)), {
         tags: { component: 'worker-control', op: 'runExit', workerId: a.workerId, runId: msg.runId },
@@ -730,8 +757,13 @@ export class WorkerControlPlane {
           `leaving the frame unacknowledged for replay:`,
         err
       )
-      // A socket that died mid-finalize skipped arming the detach timer.
-      this.armReconnectTimerIfDetached(a)
+      if (this.isLiveSocket(a.ws)) {
+        this.scheduleExitRedrive(a)
+      } else {
+        // A socket that died mid-finalize skipped arming the detach timer, and
+        // its reconnect resume will re-deliver the frame anyway.
+        this.armReconnectTimerIfDetached(a)
+      }
       return
     }
     a.exitInFlight = false
@@ -740,8 +772,98 @@ export class WorkerControlPlane {
     const ackWs = this.liveAckSocket(msg.runId) ?? ws
     clearTimeout(a.timeout)
     this.clearReconnectTimer(a)
+    this.clearExitRedrive(a)
     this.runs.delete(msg.runId)
     this.sendAck(ackWs, msg.runId, msg.sequence)
+  }
+
+  private isLiveSocket(ws: WebSocket | null | undefined): ws is WebSocket {
+    return !!ws && ws.readyState === WebSocket.OPEN
+  }
+
+  /**
+   * Arm the next re-drive of a terminal frame the server could not persist.
+   *
+   * Backs off exponentially and is bounded by one delivery window from the first
+   * failure on this socket — the same window a disconnected worker gets — so a
+   * wedged database cannot keep a one-shot task (and its bill) alive
+   * indefinitely. Only one timer is ever armed, so repeated failures cannot
+   * become a hot loop.
+   */
+  private scheduleExitRedrive(a: Assignment): void {
+    if (a.exitRetryTimer) return
+    const now = Date.now()
+    if (a.exitRetryDeadline === undefined) a.exitRetryDeadline = now + this.reconnectTimeoutMs
+    const remaining = a.exitRetryDeadline - now
+    if (remaining <= 0) {
+      this.abandonTerminalDelivery(a)
+      return
+    }
+    const step = a.exitRetryDelayMs ?? this.exitRetryInitialDelayMs
+    a.exitRetryDelayMs = Math.min(step * 2, this.exitRetryMaxDelayMs)
+    a.exitRetryTimer = setTimeout(() => {
+      a.exitRetryTimer = undefined
+      this.redriveTerminalFrame(a)
+    }, Math.min(step, remaining))
+  }
+
+  /** Ask the worker to rewind to the durable cursor and resend the terminal frame. */
+  private redriveTerminalFrame(a: Assignment): void {
+    const runId = a.spec.runId
+    if (this.runs.get(runId) !== a) return
+    if (!this.isLiveSocket(a.ws)) {
+      // Disconnected in the meantime: reconnect resume owns recovery now, under
+      // the detach deadline, so a stale retry must not shadow it.
+      this.clearExitRedrive(a)
+      this.armReconnectTimerIfDetached(a)
+      return
+    }
+    if (Date.now() >= (a.exitRetryDeadline ?? 0)) {
+      this.abandonTerminalDelivery(a)
+      return
+    }
+    if (a.exitInFlight) {
+      // A resend is already being finalized; asking again would only queue a
+      // duplicate behind it. Wait for that attempt's outcome instead.
+      this.scheduleExitRedrive(a)
+      return
+    }
+    this.sendOn(a.ws, { type: 'run:resume', runId, sequence: a.durableSequence })
+    // Arm the next attempt now: the worker may resend and fail again, or never
+    // answer at all, and both cases must stay bounded.
+    this.scheduleExitRedrive(a)
+  }
+
+  /**
+   * Give up on a terminal frame that never became durable. The worker is told
+   * so it stops retrying and exits visibly non-zero rather than idling for the
+   * lifetime of its task, and the run is failed through the normal path.
+   */
+  private abandonTerminalDelivery(a: Assignment): void {
+    const runId = a.spec.runId
+    if (this.runs.get(runId) !== a) return
+    this.clearExitRedrive(a)
+    const windowMs = this.reconnectTimeoutMs
+    console.error(
+      `[worker-control] Could not persist the terminal result for run ${runId} ` +
+        `within ${windowMs}ms — rejecting the delivery`
+    )
+    if (this.isLiveSocket(a.ws)) {
+      this.sendOn(a.ws, { type: 'run:reject', runId, reason: REJECT_REASON })
+    }
+    this.failDetachedAssignment(
+      a,
+      `terminal result could not be persisted within ${windowMs}ms`
+    )
+  }
+
+  private clearExitRedrive(a: Assignment): void {
+    if (a.exitRetryTimer) {
+      clearTimeout(a.exitRetryTimer)
+      a.exitRetryTimer = undefined
+    }
+    a.exitRetryDelayMs = undefined
+    a.exitRetryDeadline = undefined
   }
 
   private sequenceDecision(a: Assignment, sequence: number): 'apply' | 'duplicate' | 'gap' {
@@ -857,6 +979,8 @@ export class WorkerControlPlane {
 
   private rebindAssignment(assignment: Assignment, ws: WebSocket): void {
     this.clearReconnectTimer(assignment)
+    // This resume supersedes any terminal re-drive armed for the old socket.
+    this.clearExitRedrive(assignment)
     assignment.ws = ws
     this.sendOn(ws, {
       type: 'run:resume',
@@ -937,6 +1061,9 @@ export class WorkerControlPlane {
       }
       if (!a.ws && a.reconnectTimer) continue
       this.clearReconnectTimer(a)
+      // A pending terminal re-drive belongs to the socket that just went away;
+      // the reconnect resume replaces it under the detach deadline.
+      this.clearExitRedrive(a)
       a.ws = null
       this.armReconnectTimer(a)
     }
@@ -960,6 +1087,7 @@ export class WorkerControlPlane {
     const runId = a.spec.runId
     if (this.runs.get(runId) !== a) return
     this.clearReconnectTimer(a)
+    this.clearExitRedrive(a)
     clearTimeout(a.timeout)
     this.runs.delete(runId)
     const err = new Error(`Worker ${a.workerId} ${reason}`)
@@ -971,7 +1099,29 @@ export class WorkerControlPlane {
       stream: 'system',
       text: `[Conduit: worker ${a.workerId} ${reason} — failing this run.]`,
     })
-    a.sink.onExit('failed', null)
+    this.failSink(a, runId)
+  }
+
+  /**
+   * Synthesize a terminal failure into a sink. `onExit` can reject (the runner
+   * propagates a failed status write so a live delivery stays retryable), and on
+   * these give-up paths there is nothing left to retry with — so the rejection
+   * is reported rather than left to crash the process.
+   */
+  private failSink(a: Assignment, runId: string): void {
+    void Promise.resolve()
+      .then(() => a.sink.onExit('failed', null))
+      .catch((err: unknown) => {
+        reporter.captureException(err instanceof Error ? err : new Error(String(err)), {
+          tags: {
+            component: 'worker-control',
+            op: 'failSink',
+            workerId: a.workerId,
+            runId,
+          },
+        })
+        console.error(`[worker-control] Failed to record the failure of run ${runId}:`, err)
+      })
   }
 
   private clearReconnectTimer(a: Assignment): void {
@@ -1051,6 +1201,7 @@ export class WorkerControlPlane {
         tags: { component: 'worker-control', workerId, runId },
       })
       this.clearReconnectTimer(a)
+      this.clearExitRedrive(a)
       if (!a.started) {
         a.fail(err)
       } else {
@@ -1063,7 +1214,7 @@ export class WorkerControlPlane {
             text: `[Conduit: worker ${workerId} ${reason} — failing this run.]`,
           })
         }
-        a.sink.onExit('failed', null)
+        this.failSink(a, runId)
       }
     }
   }
@@ -1076,6 +1227,7 @@ export class WorkerControlPlane {
     this.waiters.clear()
     for (const a of [...this.runs.values()]) {
       this.clearReconnectTimer(a)
+      this.clearExitRedrive(a)
       if (a.exitInFlight) continue
       if (!a.started) {
         a.fail(new Error('Worker control plane is shutting down'))
@@ -1087,7 +1239,7 @@ export class WorkerControlPlane {
           stream: 'system',
           text: `[Conduit: worker ${a.workerId} shutting down — failing this run.]`,
         })
-        a.sink.onExit('failed', null)
+        this.failSink(a, a.spec.runId)
       }
     }
     for (const w of this.workers.values()) {

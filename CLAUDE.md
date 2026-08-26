@@ -94,6 +94,17 @@ output continues, and the delivery cursor is carried forward in a small
 `logs/<runId>.jsonl.cursor` sidecar so ACK and recovery keep advancing without
 growing the log. The sidecar is removed with the run's log artifacts.
 
+**Failed finalization**: if persisting a terminal frame fails (say a transient
+database outage) the server withholds the ACK — but a worker on a healthy socket
+has no reason to resend, since its cursor already covers the frame and nothing
+disconnected. So the server re-drives it: `run:resume` at the durable cursor
+after an exponential backoff (`exitRetryInitialDelayMs`/`exitRetryMaxDelayMs`),
+which makes the worker rewind and resend. Re-drives are bounded by one delivery
+window from the first failure; if the state is still not durable by then the
+delivery is rejected and the run failed, so a one-shot task cannot bill forever.
+A disconnect mid-way cancels the re-drive and hands recovery back to the normal
+reconnect resume under the detach deadline.
+
 **Rejection**: when the server declines a run a worker reports (no recoverable
 record, `workerId` mismatch, or another live socket owns it) it replies
 `run:reject` with a non-specific reason, so the worker stops retrying instead of

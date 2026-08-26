@@ -604,7 +604,10 @@ describe('WorkerControlPlane', () => {
 
   it('does not settle a retry from a late started of the timed-out assignment', async () => {
     await ctx.close()
-    ctx = await startServer({ assignTimeoutMs: 50 })
+    // Comfortably longer than the 40ms "still pending" probe below: with a 50ms
+    // window the retry assignment could lapse mid-probe and reject, which made
+    // this test flaky rather than wrong.
+    ctx = await startServer({ assignTimeoutMs: 200 })
     const worker = await connectWorker(ctx)
     const first = ctx.controlPlane.assign(SPEC, { onEvent: () => {}, onExit: () => {} })
     const firstAssign = await worker.next()
@@ -644,7 +647,7 @@ describe('WorkerControlPlane', () => {
     )
     const handle = await retry
     expect(handle.workspacePath).toBe('/tmp/fresh')
-  }, 400)
+  }, 5_000)
 
   it('rejects pending assignTo waiters when the control plane stops', async () => {
     const pending = ctx.controlPlane.assignTo('ghost', SPEC, { onEvent: () => {}, onExit: () => {} }, 2_000)
@@ -1267,46 +1270,157 @@ describe('WorkerControlPlane detach, rebind, and idempotent ACK', () => {
     expect(events).toEqual([])
   })
 
-  it('withholds the terminal ACK when finalization fails, then ACKs the replay exactly once', async () => {
-    const worker = await connectWorker(ctx)
+  /**
+   * A worker that already sent its terminal frame on a healthy socket has
+   * nothing left to react to: its cursor covers the frame and no disconnect
+   * happened. So the server has to re-drive it — the tests below only resend
+   * when a `run:resume` actually arrives, exactly like the real worker.
+   */
+  async function startRunWithFailingExit(opts: {
+    failTimes: number
+    plane?: ResumablePlaneOptions
+  }): Promise<{
+    worker: { ws: WebSocket; next: (timeoutMs?: number) => Promise<ServerToWorkerMessage> }
+    attempts: string[]
+    exitFrame: Record<string, unknown>
+  }> {
+    await ctx.close()
+    ctx = await startServer({
+      reconnectTimeoutMs: 400,
+      logsDir,
+      exitRetryInitialDelayMs: 20,
+      ...opts.plane,
+    })
+    const worker = await connectWorker(ctx, { workerId: 'w1' })
     const attempts: string[] = []
-    let failNext = true
+    let remainingFailures = opts.failTimes
     const handlePromise = ctx.controlPlane.assign(SPEC, {
       onEvent: () => {},
       onExit: async (status) => {
         attempts.push(status)
-        if (failNext) {
-          failNext = false
+        if (remainingFailures > 0) {
+          remainingFailures--
           throw new Error('db unavailable')
         }
       },
     })
+    void handlePromise.catch(() => {})
     await worker.next()
     worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId, sequence: 1 }))
     expect(await worker.next()).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 1 })
     await handlePromise
-
-    const exitFrame = {
-      type: 'run:exit',
-      runId: SPEC.runId,
-      sequence: 2,
-      status: 'completed',
-      exitCode: 0,
+    return {
+      worker,
+      attempts,
+      exitFrame: {
+        type: 'run:exit',
+        runId: SPEC.runId,
+        sequence: 2,
+        status: 'completed',
+        exitCode: 0,
+      },
     }
+  }
+
+  it('re-drives the worker with run:resume when finalization fails, then ACKs the resent terminal frame once', async () => {
+    const { worker, attempts, exitFrame } = await startRunWithFailingExit({ failTimes: 1 })
+
     worker.ws.send(JSON.stringify(exitFrame))
     await vi.waitFor(() => {
       expect(attempts).toEqual(['completed'])
     })
-    expect(await nextOrTimeout(worker.next, 100)).toBe('timeout')
 
+    // The server must ask for the frame again; the worker never resends unasked.
+    expect(await worker.next(500)).toEqual({
+      type: 'run:resume',
+      runId: SPEC.runId,
+      sequence: 1,
+    })
     worker.ws.send(JSON.stringify(exitFrame))
+
     expect(await worker.next(500)).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 2 })
     expect(attempts).toEqual(['completed', 'completed'])
 
-    // A third replay is answered from the final-ACK record, not re-finalized.
+    // Success clears the retry timer: no further resume, and the assignment is gone.
+    expect(await nextOrTimeout(worker.next, 200)).toBe('timeout')
+    expect(ctx.controlPlane.activeAssignmentCount).toBe(0)
+
+    // A late duplicate is answered from the final-ACK record, not re-finalized.
     worker.ws.send(JSON.stringify(exitFrame))
     expect(await worker.next(500)).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 2 })
     expect(attempts).toEqual(['completed', 'completed'])
+  })
+
+  it('bounds the re-drive by the delivery window, then rejects the delivery without ever ACKing', async () => {
+    const { worker, attempts, exitFrame } = await startRunWithFailingExit({
+      failTimes: Number.POSITIVE_INFINITY,
+      plane: { reconnectTimeoutMs: 400, exitRetryInitialDelayMs: 50, exitRetryMaxDelayMs: 100 },
+    })
+
+    worker.ws.send(JSON.stringify(exitFrame))
+    const seen: ServerToWorkerMessage[] = []
+    const startedAt = Date.now()
+    for (;;) {
+      const msg = await nextOrTimeout(worker.next, 1_500)
+      if (msg === 'timeout') throw new Error(`no terminal outcome; saw ${JSON.stringify(seen)}`)
+      seen.push(msg)
+      if (msg.type === 'run:reject') break
+      // A real worker only resends when told to.
+      if (msg.type === 'run:resume') worker.ws.send(JSON.stringify(exitFrame))
+    }
+    const elapsed = Date.now() - startedAt
+
+    const resumes = seen.filter((m) => m.type === 'run:resume')
+    expect(resumes.length).toBeGreaterThanOrEqual(2) // it really retried
+    expect(resumes.length).toBeLessThanOrEqual(12) // ...without hot-looping
+    expect(elapsed).toBeGreaterThanOrEqual(300) // bounded by the window, not instant
+    expect(seen.filter((m) => m.type === 'run:ack')).toEqual([])
+    // One finalize per delivery (the original plus each resend), then the run is
+    // failed through the normal path so it cannot sit "running" forever.
+    expect(attempts.filter((s) => s === 'completed')).toHaveLength(resumes.length + 1)
+    expect(attempts.at(-1)).toBe('failed')
+
+    const reject = seen.at(-1) as { type: string; runId: string; reason: string }
+    expect(reject.runId).toBe(SPEC.runId)
+    expect(reject.reason).not.toMatch(/db|database|sql/i)
+
+    // Nothing is left running: no assignment, no timer, and no late ACK.
+    expect(ctx.controlPlane.activeAssignmentCount).toBe(0)
+    worker.ws.send(JSON.stringify(exitFrame))
+    expect(await nextOrTimeout(worker.next, 300)).toBe('timeout')
+  })
+
+  it('lets a reconnect drive the resume after a detach instead of a stale retry timer', async () => {
+    const { worker, attempts, exitFrame } = await startRunWithFailingExit({
+      failTimes: 1,
+      plane: { reconnectTimeoutMs: 2_000, exitRetryInitialDelayMs: 150 },
+    })
+
+    worker.ws.send(JSON.stringify(exitFrame))
+    await vi.waitFor(() => {
+      expect(attempts).toEqual(['completed'])
+    })
+    // Drop the socket before the re-drive fires: the reconnect owns recovery now.
+    worker.ws.terminate()
+    await waitDisconnected(ctx)
+
+    const resumed = await connectWorker(ctx, {
+      workerId: 'w1',
+      activeRunIds: [],
+      pendingRunIds: [SPEC.runId],
+    })
+    expect(await resumed.next(500)).toEqual({
+      type: 'run:resume',
+      runId: SPEC.runId,
+      sequence: 1,
+    })
+    resumed.ws.send(JSON.stringify(exitFrame))
+    expect(await resumed.next(500)).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 2 })
+
+    // The stale timer must not fire a second resume on the rebound socket.
+    expect(await nextOrTimeout(resumed.next, 400)).toBe('timeout')
+    expect(attempts).toEqual(['completed', 'completed'])
+    expect(ctx.controlPlane.activeAssignmentCount).toBe(0)
   })
 
   it('keeps the log at its byte cap while still acknowledging and recovering the delivery cursor', async () => {
