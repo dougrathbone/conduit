@@ -51,6 +51,12 @@ export function resolveConnectTimeoutMs(env: NodeJS.ProcessEnv = process.env): n
 /** Import-time default from process.env — factories that don't pass waitMs. */
 export const WORKER_CONNECT_TIMEOUT_MS = resolveConnectTimeoutMs()
 
+export type AppendSequencedEvents = (
+  logPath: string,
+  events: RunEventInit[],
+  sequence: number
+) => Promise<'appended' | 'duplicate' | 'rejected'>
+
 /** Optional constructor injection for timeouts and frame limits. */
 export interface WorkerControlPlaneOptions {
   assignTimeoutMs?: number
@@ -64,6 +70,8 @@ export interface WorkerControlPlaneOptions {
   logsDir?: string
   /** Reconstruct a binding when a reconnecting worker reports a run this process does not hold. */
   recoverRun?: RecoverRun
+  /** Tests inject a gated append to prove per-run serialize-during-fsync. */
+  appendSequencedEvents?: AppendSequencedEvents
 }
 
 export interface RecoverableRunBinding {
@@ -104,6 +112,8 @@ interface Assignment {
   durableSequence: number
   logPath: string
   reconnectTimer?: NodeJS.Timeout
+  /** True while sequenced onExit is awaiting durable finalization. */
+  exitInFlight?: boolean
   settle: (handle: WorkerHandle) => void
   fail: (err: Error) => void
   timeout: NodeJS.Timeout
@@ -136,11 +146,14 @@ export class WorkerControlPlane {
   private readonly reconnectTimeoutMs: number
   private readonly logsDir: string
   private readonly recoverRun?: RecoverRun
+  private readonly appendEvents: AppendSequencedEvents
   private nextAssignmentGeneration = 1
   /** Timed-out assignment identities; a retry on a new generation is not suppressed. */
   private ignoreNextStarted = new Set<StartedSuppression>()
   /** Terminal sequences already applied; lost-ACK replay is acknowledged without re-finalizing. */
   private finalAcks = new Map<string, { workerId: string; sequence: number }>()
+  /** Per-run serialize of decision+append/sink/cursor/ACK across sockets. */
+  private runLocks = new Map<string, Promise<void>>()
 
   constructor(options?: WorkerControlPlaneOptions) {
     this.assignTimeoutMs = options?.assignTimeoutMs ?? resolveAssignTimeoutMs()
@@ -150,6 +163,7 @@ export class WorkerControlPlane {
     this.reconnectTimeoutMs = options?.reconnectTimeoutMs ?? resolveWorkerReconnectTimeoutMs()
     this.logsDir = options?.logsDir ?? LOGS_DIR
     this.recoverRun = options?.recoverRun
+    this.appendEvents = options?.appendSequencedEvents ?? appendSequencedEvents
     this.wss.on('connection', (ws) => this.onConnection(ws))
     this.leaseTimer = setInterval(() => this.checkLeases(), this.leaseMs / 3)
     this.leaseTimer.unref()
@@ -473,18 +487,44 @@ export class WorkerControlPlane {
         break
       }
       case 'run:started': {
-        await this.handleRunStarted(ws, ctx.workerId, msg)
+        await this.enqueueRunWork(msg.runId, () => this.handleRunStarted(ws, ctx.workerId, msg))
         break
       }
       case 'run:event': {
-        await this.handleRunEvent(ws, ctx.workerId, msg)
+        await this.enqueueRunWork(msg.runId, () => this.handleRunEvent(ws, ctx.workerId, msg))
         break
       }
       case 'run:exit': {
-        await this.handleRunExit(ws, ctx.workerId, msg)
+        await this.enqueueRunWork(msg.runId, () => this.handleRunExit(ws, ctx.workerId, msg))
         break
       }
     }
+  }
+
+  private enqueueRunWork<T>(runId: string, work: () => Promise<T>): Promise<T> {
+    const prev = this.runLocks.get(runId) ?? Promise.resolve()
+    const next = prev.then(work, work)
+    this.runLocks.set(
+      runId,
+      next.then(
+        () => undefined,
+        () => undefined
+      )
+    )
+    return next
+  }
+
+  private liveAckSocket(runId: string): WebSocket | null {
+    return this.runs.get(runId)?.ws ?? null
+  }
+
+  private notifySinkEvent(sink: WorkerEventSink, ev: RunEventInit, durable: boolean): void {
+    if (durable && sink.onDurableEvent) sink.onDurableEvent(ev)
+    else sink.onEvent(ev)
+  }
+
+  private socketStillBound(workerId: string, ws: WebSocket): boolean {
+    return ws.readyState === WebSocket.OPEN && this.workers.get(workerId)?.ws === ws
   }
 
   private async handleRunStarted(
@@ -507,17 +547,17 @@ export class WorkerControlPlane {
     const decision = this.sequenceDecision(a, msg.sequence)
     if (decision === 'gap') return
     if (decision === 'duplicate') {
-      this.sendAck(ws, msg.runId, msg.sequence)
+      this.sendAck(this.liveAckSocket(msg.runId), msg.runId, msg.sequence)
       return
     }
-    const persist = await appendSequencedEvents(a.logPath, [], msg.sequence)
+    const persist = await this.appendEvents(a.logPath, [], msg.sequence)
     if (persist === 'rejected') return
     if (!a.started) {
       a.workspacePath = msg.workspacePath
       a.settle(this.buildHandle(msg.runId, a))
     }
     a.durableSequence = msg.sequence
-    this.sendAck(ws, msg.runId, msg.sequence)
+    this.sendAck(this.liveAckSocket(msg.runId), msg.runId, msg.sequence)
   }
 
   private async handleRunEvent(
@@ -535,16 +575,16 @@ export class WorkerControlPlane {
     const decision = this.sequenceDecision(a, msg.sequence)
     if (decision === 'gap') return
     if (decision === 'duplicate') {
-      this.sendAck(ws, msg.runId, msg.sequence)
+      this.sendAck(this.liveAckSocket(msg.runId), msg.runId, msg.sequence)
       return
     }
-    const persist = await appendSequencedEvents(a.logPath, msg.events, msg.sequence)
+    const persist = await this.appendEvents(a.logPath, msg.events, msg.sequence)
     if (persist === 'rejected') return
     if (persist === 'appended') {
-      for (const ev of msg.events) a.sink.onEvent(ev)
+      for (const ev of msg.events) this.notifySinkEvent(a.sink, ev, true)
     }
     a.durableSequence = msg.sequence
-    this.sendAck(ws, msg.runId, msg.sequence)
+    this.sendAck(this.liveAckSocket(msg.runId), msg.runId, msg.sequence)
   }
 
   private async handleRunExit(
@@ -564,14 +604,14 @@ export class WorkerControlPlane {
         clearTimeout(a.timeout)
         this.clearReconnectTimer(a)
         this.runs.delete(msg.runId)
-        a.sink.onExit(msg.status, msg.exitCode)
+        await Promise.resolve(a.sink.onExit(msg.status, msg.exitCode))
       }
       return
     }
     const decision = this.sequenceDecision(a, msg.sequence)
     if (decision === 'gap') return
     if (decision === 'duplicate') {
-      this.sendAck(ws, msg.runId, msg.sequence)
+      this.sendAck(this.liveAckSocket(msg.runId) ?? ws, msg.runId, msg.sequence)
       return
     }
     if (!a.started) {
@@ -582,13 +622,19 @@ export class WorkerControlPlane {
       this.sendAck(ws, msg.runId, msg.sequence)
       return
     }
-    await Promise.resolve(a.sink.onExit(msg.status, msg.exitCode))
-    a.durableSequence = msg.sequence
-    this.finalAcks.set(msg.runId, { workerId: a.workerId, sequence: msg.sequence })
-    clearTimeout(a.timeout)
-    this.clearReconnectTimer(a)
-    this.runs.delete(msg.runId)
-    this.sendAck(ws, msg.runId, msg.sequence)
+    a.exitInFlight = true
+    try {
+      await Promise.resolve(a.sink.onExit(msg.status, msg.exitCode))
+      a.durableSequence = msg.sequence
+      this.finalAcks.set(msg.runId, { workerId: a.workerId, sequence: msg.sequence })
+      const ackWs = this.liveAckSocket(msg.runId) ?? ws
+      clearTimeout(a.timeout)
+      this.clearReconnectTimer(a)
+      this.runs.delete(msg.runId)
+      this.sendAck(ackWs, msg.runId, msg.sequence)
+    } finally {
+      a.exitInFlight = false
+    }
   }
 
   private sequenceDecision(a: Assignment, sequence: number): 'apply' | 'duplicate' | 'gap' {
@@ -629,7 +675,14 @@ export class WorkerControlPlane {
         continue
       }
       const recovered = await this.recoverRun?.(runId, workerId)
+      if (!this.socketStillBound(workerId, ws)) continue
       if (!recovered || recovered.workerId !== workerId) continue
+      const existingAfter = this.runs.get(runId)
+      if (existingAfter) {
+        if (existingAfter.workerId !== workerId) continue
+        this.rebindAssignment(existingAfter, ws)
+        continue
+      }
       await this.installRecoveredBinding(recovered, ws)
     }
   }
@@ -645,7 +698,12 @@ export class WorkerControlPlane {
   }
 
   private async installRecoveredBinding(binding: RecoverableRunBinding, ws: WebSocket): Promise<void> {
+    if (!this.socketStillBound(binding.workerId, ws)) return
     const runId = binding.runId
+    const logPath = path.join(this.logsDir, `${runId}.jsonl`)
+    await this.ensureLogCursor(logPath, binding.durableSequence)
+    if (!this.socketStillBound(binding.workerId, ws)) return
+    if (this.runs.has(runId)) return
     const assignment: Assignment = {
       spec: {
         runId,
@@ -663,14 +721,13 @@ export class WorkerControlPlane {
       workspacePath: binding.handle.workspacePath,
       started: true,
       durableSequence: binding.durableSequence,
-      logPath: path.join(this.logsDir, `${runId}.jsonl`),
+      logPath,
       settle: () => {},
       fail: () => {},
       timeout: setTimeout(() => {}, 0),
     }
     clearTimeout(assignment.timeout)
     this.runs.set(runId, assignment)
-    await this.ensureLogCursor(assignment.logPath, binding.durableSequence)
     this.sendOn(ws, { type: 'run:resume', runId, sequence: binding.durableSequence })
   }
 
@@ -679,7 +736,7 @@ export class WorkerControlPlane {
     if (through <= 0) return
     let highest = await readHighestContiguousSequence(logPath)
     while (highest < through) {
-      const result = await appendSequencedEvents(logPath, [], highest + 1)
+      const result = await this.appendEvents(logPath, [], highest + 1)
       if (result === 'rejected') return
       highest = await readHighestContiguousSequence(logPath)
     }
@@ -689,6 +746,10 @@ export class WorkerControlPlane {
     for (const a of [...this.runs.values()]) {
       if (a.workerId !== workerId) continue
       if (a.ws && a.ws !== ws) continue
+      if (a.exitInFlight) {
+        a.ws = null
+        continue
+      }
       if (!a.started) {
         a.fail(new Error(`Worker ${workerId} disconnected`))
         continue
@@ -794,6 +855,7 @@ export class WorkerControlPlane {
     for (const [runId, a] of [...this.runs.entries()]) {
       if (a.workerId !== workerId) continue
       if (opts.ws && a.ws !== opts.ws) continue
+      if (a.exitInFlight) continue
       const err = new Error(`Worker ${workerId} ${reason}`)
       reporter.captureMessage(err.message, 'warning', {
         tags: { component: 'worker-control', workerId, runId },
@@ -824,6 +886,7 @@ export class WorkerControlPlane {
     this.waiters.clear()
     for (const a of [...this.runs.values()]) {
       this.clearReconnectTimer(a)
+      if (a.exitInFlight) continue
       if (!a.started) {
         a.fail(new Error('Worker control plane is shutting down'))
       } else {

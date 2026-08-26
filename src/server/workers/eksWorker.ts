@@ -104,10 +104,12 @@ export class EksWorkerFactory implements WorkerFactory {
     // sink so it happens on normal exit, failure, and lease-loss alike.
     const wrappedSink: WorkerEventSink = {
       onEvent: (ev) => sink.onEvent(ev),
+      onDurableEvent: sink.onDurableEvent ? (ev) => sink.onDurableEvent!(ev) : undefined,
       onError: (err) => sink.onError?.(err),
       onExit: (status, exitCode) => {
-        sink.onExit(status, exitCode)
+        const result = sink.onExit(status, exitCode)
         void this.deleteJob(jobName, runId)
+        return result
       },
     }
 

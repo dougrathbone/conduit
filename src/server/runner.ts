@@ -19,6 +19,7 @@ import { buildRunFailureReport } from './runFailure'
 import { resolvePushCredential, githubTokenEnvEntry } from './githubApp'
 import { publishRunResult } from './publisher'
 import { buildTriggeredPrompt } from './triggers/promptBuilder'
+import { createRunEventHandlers } from './runEventSink'
 import { reporter } from './observability'
 import { getWorkerFactory } from './workers'
 
@@ -397,14 +398,19 @@ export async function startRunServer(
     })
   }
 
+  const eventHandlers = createRunEventHandlers({
+    write: writeRunEvent,
+    live: (event) => {
+      const summary = summarizeEvent(event)
+      if (summary) lastLine = summary.slice(0, 500)
+      eventBuffer.push(event)
+      scheduleFlush()
+    },
+  })
+
   // Stamp, persist, summarize (for lastLine), and queue an event for broadcast.
   function emitEvent(init: RunEventInit): void {
-    const event: RunEvent = { ...init, t: Date.now() }
-    writeRunEvent(event)
-    const summary = summarizeEvent(event)
-    if (summary) lastLine = summary.slice(0, 500)
-    eventBuffer.push(event)
-    scheduleFlush()
+    eventHandlers.onEvent(init)
   }
 
   function emitSystemMessage(text: string): void {
@@ -501,6 +507,7 @@ export async function startRunServer(
 
   const sink: WorkerEventSink = {
     onEvent: (init) => emitEvent(init),
+    onDurableEvent: eventHandlers.onDurableEvent,
     onError: (err) => {
       // Spawn-level failure (binary not on PATH, etc.)
       console.error(`[server/runner] Spawn error for run ${runId}:`, err)
@@ -508,7 +515,7 @@ export async function startRunServer(
         tags: { component: 'runner', runId, runner: agent.runner },
       })
       emitSystemMessage(`\n[Error: ${err.message}]\n`)
-      finalizeRun('failed', undefined)
+      void finalizeRun('failed', undefined)
     },
     onExit: (status, exitCode) => {
       // Surface failed runs to the error reporter — a non-zero exit (or a
@@ -519,7 +526,7 @@ export async function startRunServer(
         const report = buildRunFailureReport({ runId, runner: agent.runner, exitCode, lastLine })
         reporter.captureMessage(report.message, report.level, report.ctx)
       }
-      finalizeRun(status, exitCode)
+      return finalizeRun(status, exitCode)
     },
   }
 

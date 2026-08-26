@@ -70,9 +70,13 @@ export type WorkerExitStatus = 'completed' | 'failed' | 'stopped'
 export interface WorkerEventSink {
   /** One structured event (unstamped — the orchestrator stamps `t`). */
   onEvent(event: RunEventInit): void
-  /** Terminal state. May fire after onError (spawn error then close); the
-   *  orchestrator's finalize guard makes the second call a no-op. */
-  onExit(status: WorkerExitStatus, exitCode: number | null | undefined): void
+  /**
+   * Event already durably persisted (control-plane delivery log). Implementations
+   * must update live summary/broadcast without writing a second log copy.
+   */
+  onDurableEvent?(event: RunEventInit): void
+  /** Terminal state. May return a promise; the control plane awaits it before ACK. */
+  onExit(status: WorkerExitStatus, exitCode: number | null | undefined): void | Promise<void>
   /** Process-level failure (e.g. binary not on PATH). */
   onError?(err: Error): void
 }

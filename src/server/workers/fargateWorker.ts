@@ -234,10 +234,12 @@ export class FargateWorkerFactory implements WorkerFactory {
 
     const wrappedSink: WorkerEventSink = {
       onEvent: (ev) => sink.onEvent(ev),
+      onDurableEvent: sink.onDurableEvent ? (ev) => sink.onDurableEvent!(ev) : undefined,
       onError: (err) => sink.onError?.(err),
       onExit: (status, exitCode) => {
-        sink.onExit(status, exitCode)
+        const result = sink.onExit(status, exitCode)
         void this.stopTask(taskArn, runId, `run exited (${status})`).catch(() => {})
+        return result
       },
     }
 
