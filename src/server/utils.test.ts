@@ -37,6 +37,8 @@ describe('runLogFromRows', () => {
   })
 
   it('skips delivery-sequence metadata rows when detecting the events format', () => {
+    // Format is inferred from the first *meaningful* row, not the first JSONL
+    // line — a leading `{_deliverySequence}` must not be treated as terminal.
     const log = runLogFromRows([
       { _deliverySequence: 1 },
       { t: 2, kind: 'assistant', text: 'stub-claude received prompt', _deliverySequence: 2 },

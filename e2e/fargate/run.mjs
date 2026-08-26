@@ -24,6 +24,7 @@
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { createRequire } from 'node:module'
 import {
   repoRoot,
   stubBinDir,
@@ -35,6 +36,8 @@ import {
   stopProcess,
   runDriver,
 } from '../lib/harness.mjs'
+
+const { killRecordedTasks } = createRequire(import.meta.url)('./fakeEcs.cjs')
 
 const PORT = Number(process.env.CONDUIT_E2E_PORT) || 7562
 const DB_NAME = process.env.CONDUIT_E2E_DB || 'conduit_e2e_fargate'
@@ -50,39 +53,6 @@ function readState(stateFile) {
 
 function runningCount(state) {
   return Object.values(state.tasks ?? {}).filter((t) => t.lastStatus === 'RUNNING').length
-}
-
-function pidAlive(pid) {
-  if (!pid) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function killProcessGroup(pid, signal = 'SIGKILL') {
-  if (!pid) return
-  try {
-    process.kill(-pid, signal)
-  } catch {
-    try {
-      process.kill(pid, signal)
-    } catch {
-      // already gone
-    }
-  }
-}
-
-/** Kill every simulated task the orchestrator still knows about. Always safe. */
-function killFakeEcsWorkers(stateFile) {
-  const state = readState(stateFile)
-  for (const task of Object.values(state.tasks ?? {})) {
-    for (const pid of [task.supervisorPid, task.pid, task.workerPid]) {
-      if (pidAlive(pid)) killProcessGroup(pid, 'SIGKILL')
-    }
-  }
 }
 
 async function killAbrupt(proc) {
@@ -240,7 +210,7 @@ async function main() {
     if (restartDriver) await killAbrupt(restartDriver)
     if (expiryDriver) await killAbrupt(expiryDriver)
     if (server) await killAbrupt(server)
-    killFakeEcsWorkers(stateFile)
+    killRecordedTasks(stateFile)
     fs.rmSync(dataDir, { recursive: true, force: true })
     console.log('[e2e] Cleanup: killed leftover process groups and removed data dir')
   }

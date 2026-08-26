@@ -4,16 +4,16 @@
  * Loaded by FargateWorkerFactory when CONDUIT_FARGATE_E2E_FAKE_ECS points here.
  * RunTask records the request, invents a local task ARN, and (unless a skip-
  * spawn sentinel is present) launches a detached supervisor that runs
- * `node out/worker/index.js` with the RunTask overrides plus task-definition
- * env (process mode, one-shot, token). The supervisor outlives an abrupt
- * server death, records worker exit codes / reconnect retry timestamps into
- * CONDUIT_FARGATE_E2E_STATE, and is what the replacement process hydrates.
- * StopTask / DescribeTasks track and kill the supervisor process group.
- * lastStatus becomes STOPPED only when the worker process exits (skip-spawn
- * tasks with no process are marked STOPPED immediately).
+ * `node out/worker/index.js`. The supervisor outlives an abrupt server death.
  *
- * A replacement server hydrates existing task PID/status from the state file
- * and must not spawn a duplicate or wipe a surviving worker.
+ * Cross-process writers (server persist + supervisor exit/retry patches) share
+ * CONDUIT_FARGATE_E2E_STATE under a lockfile: re-read, merge, atomic rename.
+ * Merge keeps max seq, union runTasks by ARN, STOPPED dominance, unioned
+ * retryTimestamps, and non-null exit / PID metadata. STOPPED tasks retain
+ * supervisorPid, workerPid, and pgid so cleanup can still kill leaked groups.
+ *
+ * lastStatus becomes STOPPED when the worker exits (skip-spawn tasks with no
+ * process are marked STOPPED immediately on StopTask).
  */
 const { spawn } = require('node:child_process')
 const fs = require('node:fs')
@@ -21,6 +21,8 @@ const path = require('node:path')
 
 const FAKE_ACCOUNT = '000000000000'
 const TASK_ARN_PREFIX = `arn:aws:ecs:local:${FAKE_ACCOUNT}:task/conduit-e2e`
+const LOCK_STALE_MS = 2000
+const LOCK_RETRY_MS = 10
 
 function statePath() {
   return process.env.CONDUIT_FARGATE_E2E_STATE?.trim() || ''
@@ -47,6 +49,10 @@ function pidAlive(pid) {
   }
 }
 
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
 function consumeSkipSpawn() {
   const file = skipSpawnPath()
   if (!file || !fs.existsSync(file)) return false
@@ -67,26 +73,29 @@ function emptySnapshot() {
   return { seq: 0, runTasks: [], tasks: {} }
 }
 
+function coerceSnapshot(parsed) {
+  return {
+    seq: Number(parsed?.seq) || 0,
+    runTasks: Array.isArray(parsed?.runTasks) ? parsed.runTasks : [],
+    tasks: parsed?.tasks && typeof parsed.tasks === 'object' ? parsed.tasks : {},
+  }
+}
+
 function readSnapshot() {
   const dest = statePath()
   if (!dest || !fs.existsSync(dest)) return emptySnapshot()
   try {
-    const parsed = JSON.parse(fs.readFileSync(dest, 'utf8'))
-    return {
-      seq: Number(parsed.seq) || 0,
-      runTasks: Array.isArray(parsed.runTasks) ? parsed.runTasks : [],
-      tasks: parsed.tasks && typeof parsed.tasks === 'object' ? parsed.tasks : {},
-    }
+    return coerceSnapshot(JSON.parse(fs.readFileSync(dest, 'utf8')))
   } catch {
     return emptySnapshot()
   }
 }
 
-function writeSnapshot(snapshot) {
+function writeAtomic(snapshot) {
   const dest = statePath()
   if (!dest) return
   fs.mkdirSync(path.dirname(dest), { recursive: true })
-  const tmp = `${dest}.${process.pid}.tmp`
+  const tmp = `${dest}.${process.pid}.${Date.now()}.tmp`
   fs.writeFileSync(tmp, JSON.stringify(snapshot, null, 2))
   fs.renameSync(tmp, dest)
 }
@@ -96,23 +105,170 @@ function seqFromArn(arn) {
   return m ? Number(m[1]) : 0
 }
 
-function publicTask(t) {
-  const livePid = t.lastStatus === 'STOPPED' ? null : (t.workerPid || t.pid)
+function firstNonNull(...vals) {
+  for (const v of vals) {
+    if (v !== undefined && v !== null && v !== '') return v
+  }
+  return null
+}
+
+function unionTimestamps(a, b) {
+  const nums = [...(Array.isArray(a) ? a : []), ...(Array.isArray(b) ? b : [])]
+    .map((n) => Number(n))
+    .filter((n) => Number.isFinite(n))
+  return [...new Set(nums)].sort((x, y) => x - y)
+}
+
+function asPid(value) {
+  const n = Number(value)
+  return Number.isInteger(n) && n > 0 ? n : null
+}
+
+/** Normalize a task record: supervisorPid / workerPid / pgid are distinct. */
+function normalizeTask(t = {}) {
+  const supervisorPid = asPid(t.supervisorPid)
+  const workerPid = asPid(t.workerPid) || (!t.supervisorPid ? asPid(t.pid) : null)
+  const pgid = asPid(t.pgid) || supervisorPid
   return {
-    lastStatus: t.lastStatus,
-    pid: livePid,
-    supervisorPid: t.supervisorPid ?? null,
-    workerPid: t.workerPid ?? livePid,
-    workerId: t.workerId,
-    runId: t.runId,
-    exitCode: t.exitCode ?? null,
+    lastStatus: t.lastStatus === 'STOPPED' ? 'STOPPED' : t.lastStatus || 'RUNNING',
+    supervisorPid,
+    workerPid,
+    pgid,
+    workerId: t.workerId || '',
+    runId: t.runId || '',
+    exitCode: t.exitCode == null ? null : Number(t.exitCode),
     signal: t.signal ?? null,
-    retryTimestamps: t.retryTimestamps ?? [],
+    retryTimestamps: unionTimestamps(t.retryTimestamps, []),
   }
 }
 
-/** Kill the worker process group so spawned CLI children (stub claude) die too. */
-function killProcessGroup(pid, signal) {
+function mergeTask(disk = {}, incoming = {}) {
+  const a = normalizeTask(disk)
+  const b = normalizeTask(incoming)
+  const stopped = a.lastStatus === 'STOPPED' || b.lastStatus === 'STOPPED'
+  return {
+    lastStatus: stopped ? 'STOPPED' : b.lastStatus || a.lastStatus || 'RUNNING',
+    supervisorPid: firstNonNull(b.supervisorPid, a.supervisorPid),
+    workerPid: firstNonNull(b.workerPid, a.workerPid),
+    pgid: firstNonNull(b.pgid, a.pgid, b.supervisorPid, a.supervisorPid),
+    workerId: b.workerId || a.workerId,
+    runId: b.runId || a.runId,
+    exitCode: firstNonNull(b.exitCode, a.exitCode),
+    signal: firstNonNull(b.signal, a.signal),
+    retryTimestamps: unionTimestamps(a.retryTimestamps, b.retryTimestamps),
+  }
+}
+
+function mergeRunTasks(disk = [], incoming = []) {
+  const map = new Map()
+  for (const rec of [...disk, ...incoming]) {
+    if (!rec || typeof rec !== 'object' || !rec.taskArn) continue
+    const prev = map.get(rec.taskArn) ?? {}
+    map.set(rec.taskArn, { ...prev, ...rec })
+  }
+  return [...map.values()]
+}
+
+function mergeSnapshots(diskInput, incomingInput) {
+  const disk = coerceSnapshot(diskInput)
+  const incoming = coerceSnapshot(incomingInput)
+  const arns = new Set([...Object.keys(disk.tasks), ...Object.keys(incoming.tasks)])
+  const tasks = {}
+  for (const arn of arns) {
+    tasks[arn] = mergeTask(disk.tasks[arn], incoming.tasks[arn])
+  }
+  let seq = Math.max(disk.seq, incoming.seq)
+  for (const rec of [...disk.runTasks, ...incoming.runTasks]) {
+    seq = Math.max(seq, seqFromArn(rec?.taskArn) || 0)
+  }
+  for (const arn of arns) seq = Math.max(seq, seqFromArn(arn) || 0)
+  return {
+    seq,
+    runTasks: mergeRunTasks(disk.runTasks, incoming.runTasks),
+    tasks,
+  }
+}
+
+function lockPath() {
+  const dest = statePath()
+  return dest ? `${dest}.lock` : ''
+}
+
+function readLockPid(file) {
+  try {
+    const n = Number(String(fs.readFileSync(file, 'utf8')).trim())
+    return Number.isInteger(n) && n > 0 ? n : null
+  } catch {
+    return null
+  }
+}
+
+function acquireLock() {
+  const file = lockPath()
+  if (!file) return
+  const start = Date.now()
+  const deadline = start + LOCK_STALE_MS
+  for (;;) {
+    try {
+      const fd = fs.openSync(file, 'wx')
+      fs.writeFileSync(fd, String(process.pid))
+      fs.closeSync(fd)
+      return
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err
+      const holder = readLockPid(file)
+      const stale = Date.now() >= deadline
+      if (!holder || !pidAlive(holder) || stale) {
+        try {
+          fs.unlinkSync(file)
+        } catch {
+          // raced with another steal
+        }
+        if (stale && Date.now() - start > LOCK_STALE_MS + 500) {
+          sleepMs(LOCK_RETRY_MS)
+        }
+        continue
+      }
+      sleepMs(LOCK_RETRY_MS)
+    }
+  }
+}
+
+function releaseLock() {
+  const file = lockPath()
+  if (!file) return
+  const holder = readLockPid(file)
+  if (holder && holder !== process.pid && pidAlive(holder)) return
+  try {
+    fs.unlinkSync(file)
+  } catch {
+    // already gone
+  }
+}
+
+function persistSnapshot(incoming) {
+  const dest = statePath()
+  if (!dest) return
+  acquireLock()
+  try {
+    const disk = readSnapshot()
+    const merged = mergeSnapshots(disk, incoming)
+    writeAtomic(merged)
+  } finally {
+    releaseLock()
+  }
+}
+
+function publicTask(t) {
+  return normalizeTask(t)
+}
+
+function cleanupPidsForTask(task = {}) {
+  const n = normalizeTask(task)
+  return [...new Set([n.pgid, n.supervisorPid, n.workerPid].filter((pid) => Number.isInteger(pid) && pid > 0))]
+}
+
+function killProcessGroup(pid, signal = 'SIGKILL') {
   if (!pid) return
   try {
     process.kill(-pid, signal)
@@ -125,11 +281,26 @@ function killProcessGroup(pid, signal) {
   }
 }
 
-function patchTaskOnDisk(arn, patch) {
+function killRecordedTasks(file) {
+  if (file) process.env.CONDUIT_FARGATE_E2E_STATE = file
   const snapshot = readSnapshot()
-  snapshot.tasks[arn] = { ...(snapshot.tasks[arn] ?? {}), ...patch }
-  writeSnapshot(snapshot)
-  return snapshot.tasks[arn]
+  for (const task of Object.values(snapshot.tasks ?? {})) {
+    const n = normalizeTask(task)
+    // Signal the group even when the leader is already dead — leaked
+    // descendants keep the pgid. pidAlive(leader) is not required.
+    if (n.pgid) killProcessGroup(n.pgid, 'SIGKILL')
+    for (const pid of cleanupPidsForTask(task)) {
+      killProcessGroup(pid, 'SIGKILL')
+    }
+  }
+}
+
+function patchTaskOnDisk(arn, patch) {
+  persistSnapshot({
+    seq: 0,
+    runTasks: [],
+    tasks: { [arn]: patch },
+  })
 }
 
 function runSupervisor(arn) {
@@ -139,28 +310,32 @@ function runSupervisor(arn) {
   })
   patchTaskOnDisk(arn, {
     lastStatus: 'RUNNING',
-    pid: child.pid ?? null,
     workerPid: child.pid ?? null,
     supervisorPid: process.pid,
+    pgid: process.pid,
   })
 
   const noteRetry = (buf) => {
     const text = buf.toString()
     if (!/Disconnected|reconnecting/i.test(text)) return
-    const snapshot = readSnapshot()
-    const current = snapshot.tasks[arn] ?? {}
-    const retryTimestamps = [...(current.retryTimestamps ?? []), Date.now()]
-    patchTaskOnDisk(arn, { retryTimestamps })
+    const current = readSnapshot().tasks[arn] ?? {}
+    patchTaskOnDisk(arn, {
+      retryTimestamps: unionTimestamps(current.retryTimestamps, [Date.now()]),
+      supervisorPid: process.pid,
+      workerPid: child.pid ?? current.workerPid,
+      pgid: process.pid,
+    })
   }
   child.stdout?.on('data', noteRetry)
   child.stderr?.on('data', noteRetry)
   child.on('exit', (code, signal) => {
     patchTaskOnDisk(arn, {
       lastStatus: 'STOPPED',
-      pid: null,
-      workerPid: null,
       exitCode: typeof code === 'number' ? code : 1,
       signal: signal ?? null,
+      supervisorPid: process.pid,
+      workerPid: child.pid ?? null,
+      pgid: process.pid,
     })
     process.exit(typeof code === 'number' ? code : 1)
   })
@@ -171,75 +346,45 @@ function runSupervisor(arn) {
   process.on('SIGINT', () => forward('SIGINT'))
 }
 
-if (require.main === module && process.argv[2] === '--supervise') {
-  runSupervisor(process.argv[3])
-} else {
-  module.exports = { createFakeEcsClient, TASK_ARN_PREFIX, FAKE_ACCOUNT }
-}
-
 function createFakeEcsClient() {
-  /** @type {Map<string, { lastStatus: string, pid: number | null, supervisorPid?: number | null, workerPid?: number | null, workerId: string, runId: string, exitCode?: number | null, signal?: string | null, retryTimestamps?: number[], child?: import('node:child_process').ChildProcess }>} */
+  /** @type {Map<string, ReturnType<typeof normalizeTask> & { child?: import('node:child_process').ChildProcess }>} */
   const tasks = new Map()
   /** @type {object[]} */
   const runTasks = []
   let seq = 0
 
   function persist() {
-    const dest = statePath()
-    if (!dest) return
+    persistSnapshot({
+      seq,
+      runTasks,
+      tasks: Object.fromEntries([...tasks.entries()].map(([arn, t]) => [arn, publicTask(t)])),
+    })
     const disk = readSnapshot()
-    const merged = {}
-    for (const [arn, t] of tasks.entries()) {
-      const d = disk.tasks[arn] ?? {}
-      const retryTimestamps =
-        (d.retryTimestamps?.length ?? 0) > (t.retryTimestamps?.length ?? 0)
-          ? d.retryTimestamps
-          : t.retryTimestamps
-      if (d.exitCode != null && t.exitCode == null) t.exitCode = d.exitCode
-      if (d.signal && !t.signal) t.signal = d.signal
-      if (d.lastStatus === 'STOPPED') t.lastStatus = 'STOPPED'
-      if (d.workerPid && !t.workerPid) t.workerPid = d.workerPid
-      if (d.supervisorPid && !t.supervisorPid) t.supervisorPid = d.supervisorPid
-      if (d.pid && !t.pid) t.pid = d.pid
-      t.retryTimestamps = retryTimestamps ?? []
-      merged[arn] = publicTask(t)
+    seq = Math.max(seq, disk.seq)
+    for (const rec of disk.runTasks) {
+      if (!runTasks.some((r) => r.taskArn === rec.taskArn)) runTasks.push(rec)
     }
     for (const [arn, d] of Object.entries(disk.tasks)) {
-      if (!merged[arn]) merged[arn] = d
+      const cur = tasks.get(arn)
+      if (!cur) {
+        tasks.set(arn, { ...normalizeTask(d) })
+        continue
+      }
+      Object.assign(cur, mergeTask(cur, d))
     }
-    writeSnapshot({ seq, runTasks, tasks: merged })
   }
 
   function refreshTask(arn) {
     const task = tasks.get(arn)
-    if (!task || task.lastStatus === 'STOPPED') return task
+    if (!task) return task
     const disk = readSnapshot().tasks[arn]
-    if (disk) {
-      if (Array.isArray(disk.retryTimestamps)) task.retryTimestamps = disk.retryTimestamps
-      if (disk.exitCode != null) task.exitCode = disk.exitCode
-      if (disk.signal) task.signal = disk.signal
-      if (disk.supervisorPid) task.supervisorPid = disk.supervisorPid
-      if (disk.workerPid) {
-        task.workerPid = disk.workerPid
-        if (task.lastStatus !== 'STOPPED') task.pid = disk.workerPid
-      } else if (disk.pid && task.lastStatus !== 'STOPPED') {
-        task.pid = disk.pid
-      }
-      if (disk.lastStatus === 'STOPPED') {
-        task.lastStatus = 'STOPPED'
-        task.pid = null
-        task.child = undefined
-        persist()
-        return task
-      }
-    }
-    const expectedPid = task.pid || task.supervisorPid || task.workerPid
+    if (disk) Object.assign(task, mergeTask(task, disk))
+    if (task.lastStatus === 'STOPPED') return task
+    const expectedPid = task.supervisorPid || task.workerPid || task.pgid
     if (!expectedPid && !task.child) return task
-    const live = pidAlive(task.pid) || pidAlive(task.supervisorPid) || pidAlive(task.workerPid)
+    const live = pidAlive(task.supervisorPid) || pidAlive(task.workerPid) || pidAlive(task.pgid)
     if (!live) {
       task.lastStatus = 'STOPPED'
-      task.pid = null
-      task.child = undefined
       persist()
     }
     return task
@@ -261,13 +406,11 @@ function createFakeEcsClient() {
     const task = tasks.get(arn)
     if (!task) return
     task.lastStatus = 'STOPPED'
-    task.pid = null
-    task.child = undefined
     persist()
   }
 
   function killChild(task) {
-    const pid = task.supervisorPid || task.pid
+    const pid = task.pgid || task.supervisorPid || task.workerPid
     if (!pid) return
     const child = task.child
     const alreadyDead = !child || child.exitCode !== null || child.signalCode !== null
@@ -306,8 +449,8 @@ function createFakeEcsClient() {
     child.unref()
     const task = tasks.get(arn)
     if (task) {
-      task.pid = child.pid ?? null
       task.supervisorPid = child.pid ?? null
+      task.pgid = child.pid ?? null
       task.child = child
     }
     persist()
@@ -329,20 +472,11 @@ function createFakeEcsClient() {
     }
     for (const [arn, t] of Object.entries(snapshot.tasks)) {
       seq = Math.max(seq, seqFromArn(arn) || 0)
-      const expectedPid = t.pid || t.supervisorPid || t.workerPid
-      const live = pidAlive(t.pid) || pidAlive(t.supervisorPid) || pidAlive(t.workerPid)
-      const lastStatus = expectedPid && !live ? 'STOPPED' : t.lastStatus || (live ? 'RUNNING' : 'STOPPED')
-      tasks.set(arn, {
-        lastStatus,
-        pid: live ? t.pid ?? t.supervisorPid ?? t.workerPid ?? null : expectedPid ? null : t.pid ?? null,
-        supervisorPid: t.supervisorPid ?? null,
-        workerPid: t.workerPid ?? null,
-        workerId: t.workerId,
-        runId: t.runId,
-        exitCode: t.exitCode ?? null,
-        signal: t.signal ?? null,
-        retryTimestamps: t.retryTimestamps ?? [],
-      })
+      const task = normalizeTask(t)
+      const expectedPid = task.supervisorPid || task.workerPid || task.pgid
+      const live = pidAlive(task.supervisorPid) || pidAlive(task.workerPid) || pidAlive(task.pgid)
+      if (expectedPid && !live) task.lastStatus = 'STOPPED'
+      tasks.set(arn, task)
       if (live) watchPid(arn)
     }
   }
@@ -354,14 +488,19 @@ function createFakeEcsClient() {
     const taskArn = `${TASK_ARN_PREFIX}/${String(seq).padStart(8, '0')}`
     const overrides = overrideEnv(input)
     const workerId = overrides.CONDUIT_WORKER_ID || ''
-    const runId = (input.tags ?? []).find((t) => t.key === 'conduit:run-id')?.value || ''
+    const runId = (input.tags ?? []).find((tag) => tag.key === 'conduit:run-id')?.value || ''
     const skip = consumeSkipSpawn()
 
     tasks.set(taskArn, {
       lastStatus: 'RUNNING',
-      pid: null,
+      supervisorPid: null,
+      workerPid: null,
+      pgid: null,
       workerId,
       runId,
+      exitCode: null,
+      signal: null,
+      retryTimestamps: [],
     })
 
     let spawnEnv = null
@@ -393,7 +532,7 @@ function createFakeEcsClient() {
     if (task.lastStatus === 'STOPPED') {
       return { task: { taskArn: arn, lastStatus: 'STOPPED', desiredStatus: 'STOPPED' } }
     }
-    if (!task.pid && !task.child && !task.supervisorPid) {
+    if (!task.supervisorPid && !task.workerPid && !task.child && !task.pgid) {
       markStopped(arn)
       return { task: { taskArn: arn, lastStatus: 'STOPPED', desiredStatus: 'STOPPED' } }
     }
@@ -428,5 +567,21 @@ function createFakeEcsClient() {
       if (name === 'DescribeTasksCommand') return describeTasks(input)
       throw new Error(`fake ECS: unsupported command ${name}`)
     },
+  }
+}
+
+if (require.main === module && process.argv[2] === '--supervise') {
+  runSupervisor(process.argv[3])
+} else if (require.main === module && process.argv[2] === '--persist-patch') {
+  persistSnapshot(JSON.parse(process.argv[3]))
+} else {
+  module.exports = {
+    createFakeEcsClient,
+    mergeSnapshots,
+    persistSnapshot,
+    cleanupPidsForTask,
+    killRecordedTasks,
+    TASK_ARN_PREFIX,
+    FAKE_ACCOUNT,
   }
 }

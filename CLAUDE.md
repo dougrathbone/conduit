@@ -79,21 +79,26 @@ contiguous sequence is ACKed, then resends later frames in order after
 again. Compatibility is fail-safe: a worker without resumable-delivery support
 cannot claim a recoverable assignment.
 
-**Lease and reconnect**: socket close or 75s without a heartbeat (`WORKER_LEASE_MS`)
-detaches the assignment for the reconnect window instead of synthesizing
-immediate failure. The worker retries with capped exponential backoff from the
-first disconnect (default five minutes). One-shot (Fargate/EKS) workers do not
-exit after local process completion until `run:exit` is acknowledged. If the
-window expires, the worker cancels still-active execution and exits non-zero;
-the server appends an explicit reconnect-timeout diagnostic and marks the run
-failed.
+**Lease**: 75s without a hello, heartbeat, or run frame (`WORKER_LEASE_MS`)
+means the worker is dead; its in-memory assignments are failed. That is distinct
+from a socket close, which detaches a started remote assignment for the
+reconnect window instead of synthesizing immediate failure.
+
+**Reconnect**: the worker retries with capped exponential backoff from the first
+disconnect (default five minutes, `CONDUIT_WORKER_RECONNECT_TIMEOUT_MS`, sent on
+every `run:assign`). One-shot (Fargate/EKS) workers do not exit after local
+process completion until `run:exit` is acknowledged. If the window expires, the
+worker cancels still-active execution and exits non-zero.
 
 **Server replacement**: startup reconciliation still fails `local` / missing-kind
 orphans immediately. Remote/eks/fargate runs with a recorded `workerId` stay
-`running` until a matching worker reconnects or `CONDUIT_WORKER_RECONNECT_TIMEOUT_MS`
-elapses. Recovery assumes the existing database and `CONDUIT_DATA_DIR` run-log
-storage survive the web-server process — the same durability already required
-for run history. Discarding both stores is outside this guarantee.
+`running` until a matching worker reconnects or the reconnect window elapses.
+Unadopted remotes fail with
+`Run did not finish — remote worker did not reconnect within <ms>ms after the Conduit server restarted.`
+(not the in-process detach reason). Recovery assumes the existing database and
+`CONDUIT_DATA_DIR` run-log storage survive the web-server process — the same
+durability already required for run history. Discarding both stores is outside
+this guarantee.
 
 **Server env**:
 | Variable | Description |

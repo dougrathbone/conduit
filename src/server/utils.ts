@@ -25,9 +25,12 @@ function readRawLines(runId: string): unknown[] {
 /**
  * Tag parsed log rows by format so the client can pick a renderer. New runs
  * persist structured `RunEvent`s; pre-existing runs persisted ANSI `LogEntry`
- * chunks. The format is inferred from the first row's shape (a `kind` field ⇒
- * events). An empty log is reported as an empty events log so the structured view
- * still renders. Pure (no I/O) so the detection is unit-testable.
+ * chunks. The format is inferred from the first *meaningful* row (a `kind`
+ * field ⇒ events; a `chunk` field ⇒ terminal). Delivery-sequence metadata-only
+ * rows (`_deliverySequence` without `kind`/`chunk`) are skipped so sequenced
+ * remote logs still render as events. An empty log is reported as an empty
+ * events log so the structured view still renders. Pure (no I/O) so the
+ * detection is unit-testable.
  */
 export function runLogFromRows(rows: unknown[]): RunLog {
   const meaningful = rows.filter((row) => isRunEvent(row) || isLegacyLogEntry(row))

@@ -18,7 +18,8 @@ const STATE_PATH = process.env.CONDUIT_FARGATE_E2E_STATE
 const TIMEOUT_MS = Number(process.env.CONDUIT_WORKER_RECONNECT_TIMEOUT_MS) || 1200
 const LOWER_MS = Math.max(800, TIMEOUT_MS - 400)
 const UPPER_MS = Math.max(15_000, TIMEOUT_MS * 8)
-const DIAGNOSTIC = `remote worker did not reconnect within ${TIMEOUT_MS}ms`
+const STARTUP_DIAGNOSTIC = `Run did not finish — remote worker did not reconnect within ${TIMEOUT_MS}ms after the Conduit server restarted.`
+const IN_PROCESS_DETACH = `did not reconnect within ${TIMEOUT_MS}ms`
 const results = []
 const check = (name, ok, detail = '') => {
   results.push({ name, ok, detail })
@@ -86,7 +87,7 @@ async function waitForReconnect(timeoutMs = 45_000) {
   throw lastErr ?? new Error(`replacement server did not accept /ws within ${timeoutMs}ms`)
 }
 
-function attachRpc(ws) {
+function attachRpc(ws, { agentId } = {}) {
   let nextId = 1
   const pending = new Map()
   const statusWaiters = new Map()
@@ -127,21 +128,36 @@ function attachRpc(ws) {
       setTimeout(() => pending.has(id) && (pending.delete(id), reject(new Error(`${channel} timed out`))), 30_000)
     })
 
-  const waitStatus = (runId, statuses, timeoutMs = 90_000) => {
+  const queryRun = async (runId) => {
+    if (!agentId) return null
+    const rows = await invoke('runs:list', agentId)
+    return (rows ?? []).find((r) => r.id === runId) ?? null
+  }
+
+  const waitStatus = async (runId, statuses, timeoutMs = 90_000) => {
+    const current = await queryRun(runId)
+    if (current && statuses.includes(current.status)) return current
     const seen = (statusHistory.get(runId) ?? []).find((p) => statuses.includes(p.status))
-    if (seen) return Promise.resolve(seen)
+    if (seen) return seen
     return new Promise((resolve, reject) => {
+      const finish = (payload) => {
+        if (!payload || !statuses.includes(payload.status)) return false
+        clearTimeout(timer)
+        clearInterval(poll)
+        statusWaiters.delete(runId)
+        resolve(payload)
+        return true
+      }
       const timer = setTimeout(() => {
+        clearInterval(poll)
         statusWaiters.delete(runId)
         reject(new Error(`timed out waiting for ${statuses.join('/')} on ${runId}`))
       }, timeoutMs)
-      statusWaiters.set(runId, (payload) => {
-        if (statuses.includes(payload.status)) {
-          clearTimeout(timer)
-          statusWaiters.delete(runId)
-          resolve(payload)
-        }
-      })
+      statusWaiters.set(runId, finish)
+      const poll = setInterval(() => {
+        void queryRun(runId).then(finish).catch(() => {})
+      }, 200)
+      void queryRun(runId).then(finish).catch(() => {})
     })
   }
 
@@ -156,7 +172,7 @@ function attachRpc(ws) {
       })
     })
 
-  return { invoke, waitStatus, waitEvents }
+  return { invoke, waitStatus, waitEvents, setAgentId: (id) => { agentId = id } }
 }
 
 function waitForClose(ws, timeoutMs = 15_000) {
@@ -173,10 +189,7 @@ function waitForClose(ws, timeoutMs = 15_000) {
 async function waitForPidExit(pid, timeoutMs) {
   const start = Date.now()
   while (Date.now() - start < timeoutMs) {
-    const task = Object.values(readState().tasks ?? {}).find((t) => t.pid === pid || t.workerPid === pid)
-    if (!pidAlive(pid) || task?.lastStatus === 'STOPPED') {
-      return Date.now() - start
-    }
+    if (!pidAlive(pid)) return Date.now() - start
     await sleep(50)
   }
   throw new Error(`worker pid ${pid} still alive after ${timeoutMs}ms`)
@@ -193,20 +206,25 @@ try {
     envVars: {},
     mcpConfig: { mcpServers: {} },
   })
+  rpc.setAgentId(agent.id)
   const run = await rpc.invoke('runs:start', agent.id)
   check('expiry: run started', run?.status === 'running' && run?.workerKind === 'fargate', `id=${run?.id}`)
   await rpc.waitEvents(run.id)
 
   let task = taskForRun(run.id)
   const started = Date.now()
-  while ((!task?.pid || !pidAlive(task.pid)) && Date.now() - started < 10_000) {
+  while ((!task?.workerPid || !pidAlive(task.workerPid)) && Date.now() - started < 10_000) {
     await sleep(50)
     task = taskForRun(run.id)
   }
-  const pid = task?.pid
-  check('expiry: fake ECS recorded a live worker pid', typeof pid === 'number' && pidAlive(pid), `pid=${pid}`)
+  const pid = task?.workerPid
+  check(
+    'expiry: fake ECS recorded a live worker pid',
+    typeof pid === 'number' && pidAlive(pid),
+    `workerPid=${pid} supervisorPid=${task?.supervisorPid}`
+  )
 
-  console.log(`[fargate] EXPIRY_KILL_SERVER runId=${run.id} pid=${pid}`)
+  console.log(`[fargate] EXPIRY_KILL_SERVER runId=${run.id} workerPid=${pid}`)
   await waitForClose(ws)
   const t0 = Date.now()
 
@@ -215,6 +233,11 @@ try {
 
   await waitForPidExit(pid, UPPER_MS)
   const elapsed = Date.now() - t0
+  check(
+    'expiry: worker process actually died',
+    !pidAlive(pid),
+    `pid=${pid} alive=${pidAlive(pid)} elapsed=${elapsed}ms`
+  )
   check(
     'expiry: worker retried until timeout',
     elapsed >= LOWER_MS && elapsed <= UPPER_MS,
@@ -233,14 +256,33 @@ try {
     Array.isArray(after?.retryTimestamps) && after.retryTimestamps.length >= 1,
     `retries=${JSON.stringify(after?.retryTimestamps)}`
   )
+  check(
+    'expiry: STOPPED is not a substitute for pid death',
+    !pidAlive(pid),
+    `lastStatus=${after?.lastStatus} workerPid=${pid}`
+  )
 
   console.log(`[fargate] EXPIRY_START_REPLACEMENT runId=${run.id} elapsed=${elapsed}ms`)
   const ws2 = await waitForReconnect()
-  const rpc2 = attachRpc(ws2)
+  const rpc2 = attachRpc(ws2, { agentId: agent.id })
   const final = await rpc2.waitStatus(run.id, ['failed', 'completed', 'stopped'])
   check('expiry: run failed', final.status === 'failed', `status=${final.status}`)
+  const rows = await rpc2.invoke('runs:list', agent.id)
+  const row = rows.find((r) => r.id === run.id)
   const log = JSON.stringify(await rpc2.invoke('runs:getLog', run.id))
-  check('expiry: reconnect-timeout diagnostic', log.includes(DIAGNOSTIC), log.slice(0, 240))
+  const lastLine = row?.lastLine ?? ''
+  check(
+    'expiry: startup-recovery diagnostic',
+    log.includes(STARTUP_DIAGNOSTIC) && String(lastLine).includes(STARTUP_DIAGNOSTIC),
+    `lastLine=${String(lastLine).slice(0, 240)}`
+  )
+  check(
+    'expiry: diagnostic is not in-process detach',
+    String(lastLine).includes('after the Conduit server restarted') &&
+      String(lastLine).includes(STARTUP_DIAGNOSTIC) &&
+      String(lastLine) !== IN_PROCESS_DETACH,
+    `lastLine=${lastLine}`
+  )
 
   try {
     ws2.close()

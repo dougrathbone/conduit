@@ -250,11 +250,32 @@ try {
   const agentCrash = await createAgent('e2e-fargate-crash', 'E2E_LONG run until the worker dies')
   const runCrash = await invoke('runs:start', agentCrash.id)
   await waitEvents(runCrash.id)
-  const crashTask = Object.values(readState().tasks ?? {}).find((t) => t.runId === runCrash.id && t.pid)
-  check('crash: fake ECS recorded a worker pid', typeof crashTask?.pid === 'number' && crashTask.pid > 0, `pid=${crashTask?.pid}`)
-  if (crashTask?.pid) {
-    process.kill(crashTask.pid, 'SIGKILL')
-    console.log(`[fargate] Sent SIGKILL to worker pid ${crashTask.pid}`)
+  const crashWaitStart = Date.now()
+  let crashTask
+  while (Date.now() - crashWaitStart < 10_000) {
+    crashTask = Object.values(readState().tasks ?? {}).find(
+      (t) => t.runId === runCrash.id && (t.pgid || t.supervisorPid || t.workerPid)
+    )
+    if (crashTask?.pgid || crashTask?.supervisorPid) break
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  const crashGroup = crashTask?.pgid || crashTask?.supervisorPid
+  check(
+    'crash: fake ECS recorded a process group',
+    typeof crashGroup === 'number' && crashGroup > 0,
+    `pgid=${crashTask?.pgid} supervisorPid=${crashTask?.supervisorPid} workerPid=${crashTask?.workerPid}`
+  )
+  if (crashGroup) {
+    try {
+      process.kill(-crashGroup, 'SIGKILL')
+    } catch {
+      try {
+        process.kill(crashGroup, 'SIGKILL')
+      } catch {
+        // already gone
+      }
+    }
+    console.log(`[fargate] Sent SIGKILL to process group ${crashGroup}`)
   }
   const crashFinal = await waitStatus(runCrash.id, ['failed', 'stopped'])
   check('crash: run failed after worker death', crashFinal.status === 'failed', `status=${crashFinal.status}`)

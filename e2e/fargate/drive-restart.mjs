@@ -75,7 +75,7 @@ async function waitForReconnect(timeoutMs = 45_000) {
   throw lastErr ?? new Error(`replacement server did not accept /ws within ${timeoutMs}ms`)
 }
 
-function attachRpc(ws) {
+function attachRpc(ws, { agentId } = {}) {
   let nextId = 1
   const pending = new Map()
   const statusWaiters = new Map()
@@ -120,21 +120,36 @@ function attachRpc(ws) {
       setTimeout(() => pending.has(id) && (pending.delete(id), reject(new Error(`${channel} timed out`))), 30_000)
     })
 
-  const waitStatus = (runId, statuses, timeoutMs = 90_000) => {
+  const queryRun = async (runId) => {
+    if (!agentId) return null
+    const rows = await invoke('runs:list', agentId)
+    return (rows ?? []).find((r) => r.id === runId) ?? null
+  }
+
+  const waitStatus = async (runId, statuses, timeoutMs = 90_000) => {
+    const current = await queryRun(runId)
+    if (current && statuses.includes(current.status)) return current
     const seen = (statusHistory.get(runId) ?? []).find((p) => statuses.includes(p.status))
-    if (seen) return Promise.resolve(seen)
+    if (seen) return seen
     return new Promise((resolve, reject) => {
+      const finish = (payload) => {
+        if (!payload || !statuses.includes(payload.status)) return false
+        clearTimeout(timer)
+        clearInterval(poll)
+        statusWaiters.delete(runId)
+        resolve(payload)
+        return true
+      }
       const timer = setTimeout(() => {
+        clearInterval(poll)
         statusWaiters.delete(runId)
         reject(new Error(`timed out waiting for ${statuses.join('/')} on ${runId}`))
       }, timeoutMs)
-      statusWaiters.set(runId, (payload) => {
-        if (statuses.includes(payload.status)) {
-          clearTimeout(timer)
-          statusWaiters.delete(runId)
-          resolve(payload)
-        }
-      })
+      statusWaiters.set(runId, finish)
+      const poll = setInterval(() => {
+        void queryRun(runId).then(finish).catch(() => {})
+      }, 200)
+      void queryRun(runId).then(finish).catch(() => {})
     })
   }
 
@@ -154,7 +169,7 @@ function attachRpc(ws) {
       })
     })
 
-  return { invoke, waitStatus, waitEventText, eventsByRun }
+  return { invoke, waitStatus, waitEventText, eventsByRun, setAgentId: (id) => { agentId = id } }
 }
 
 function waitForClose(ws, timeoutMs = 15_000) {
@@ -166,11 +181,6 @@ function waitForClose(ws, timeoutMs = 15_000) {
       resolve()
     })
   })
-}
-
-function countNeedle(haystack, needle) {
-  if (!haystack) return 0
-  return haystack.split(needle).length - 1
 }
 
 function waitUntil(predicate, timeoutMs, label) {
@@ -203,6 +213,7 @@ try {
     envVars: {},
     mcpConfig: { mcpServers: {} },
   })
+  rpc.setAgentId(agent.id)
   const run = await rpc.invoke('runs:start', agent.id)
   check('restart: run started', run?.status === 'running' && run?.workerKind === 'fargate', `id=${run?.id}`)
 
@@ -217,7 +228,7 @@ try {
   releaseGate('after')
 
   const ws2 = await waitForReconnect()
-  const rpc2 = attachRpc(ws2)
+  const rpc2 = attachRpc(ws2, { agentId: agent.id })
   const final = await rpc2.waitStatus(run.id, ['completed', 'failed', 'stopped'])
   check('restart: run completed', final.status === 'completed', `status=${final.status} exitCode=${final.exitCode}`)
 
@@ -229,19 +240,22 @@ try {
     `status=${row?.status} exitCode=${row?.exitCode}`
   )
 
-  const log = JSON.stringify(await rpc2.invoke('runs:getLog', run.id))
-  const beforeCount = countNeedle(log, 'RECONNECT_BEFORE')
-  const duringCount = countNeedle(log, 'RECONNECT_DURING')
-  const afterCount = countNeedle(log, 'RECONNECT_AFTER')
-  check('restart: RECONNECT_BEFORE exactly once', beforeCount === 1, `count=${beforeCount}`)
+  const log = await rpc2.invoke('runs:getLog', run.id)
+  const texts = (log?.format === 'events' ? log.events : [])
+    .filter((e) => e.kind === 'assistant' && typeof e.text === 'string')
+    .map((e) => e.text)
+  const beforeCount = texts.filter((t) => t === 'RECONNECT_BEFORE').length
+  const duringCount = texts.filter((t) => t === 'RECONNECT_DURING').length
+  const afterCount = texts.filter((t) => t === 'RECONNECT_AFTER').length
+  check('restart: RECONNECT_BEFORE exactly once', beforeCount === 1, `count=${beforeCount} texts=${JSON.stringify(texts)}`)
   check('restart: RECONNECT_DURING exactly once', duringCount === 1, `count=${duringCount}`)
   check('restart: RECONNECT_AFTER exactly once', afterCount === 1, `count=${afterCount}`)
-  const beforeAt = log.indexOf('RECONNECT_BEFORE')
-  const duringAt = log.indexOf('RECONNECT_DURING')
-  const afterAt = log.indexOf('RECONNECT_AFTER')
+  const beforeAt = texts.indexOf('RECONNECT_BEFORE')
+  const duringAt = texts.indexOf('RECONNECT_DURING')
+  const afterAt = texts.indexOf('RECONNECT_AFTER')
   check(
     'restart: marker order before/during/after',
-    beforeAt >= 0 && duringAt > beforeAt && afterAt > duringAt,
+    beforeCount === 1 && duringCount === 1 && afterCount === 1 && beforeAt < duringAt && duringAt < afterAt,
     `idx=${beforeAt},${duringAt},${afterAt}`
   )
 

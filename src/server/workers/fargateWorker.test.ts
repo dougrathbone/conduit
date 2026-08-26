@@ -241,7 +241,9 @@ describe('fake ECS state hydration', () => {
         tasks: {
           [arn]: {
             lastStatus: 'RUNNING',
-            pid: child.pid,
+            workerPid: child.pid,
+            supervisorPid: child.pid,
+            pgid: child.pid,
             workerId: 'fargate-run-hydrate',
             runId: 'run-hydrate',
           },
@@ -260,9 +262,9 @@ describe('fake ECS state hydration', () => {
     const client = createFakeEcsClient()
 
     const persisted = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as {
-      tasks: Record<string, { lastStatus: string; pid: number | null; runId: string }>
+      tasks: Record<string, { lastStatus: string; workerPid: number | null; runId: string }>
     }
-    expect(persisted.tasks[arn]?.pid).toBe(child.pid)
+    expect(persisted.tasks[arn]?.workerPid).toBe(child.pid)
     expect(persisted.tasks[arn]?.lastStatus).toBe('RUNNING')
 
     class DescribeTasksCommand {
@@ -291,9 +293,9 @@ describe('fake ECS state hydration', () => {
     )) as { tasks: { taskArn: string }[] }
     expect(spawned.tasks[0]?.taskArn).not.toBe(arn)
     const afterRun = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as {
-      tasks: Record<string, { pid: number | null }>
+      tasks: Record<string, { workerPid: number | null }>
     }
-    expect(afterRun.tasks[arn]?.pid).toBe(child.pid)
+    expect(afterRun.tasks[arn]?.workerPid).toBe(child.pid)
   })
 
   it('keeps skip-spawn tasks RUNNING until StopTask so connect-timeout still works', async () => {
@@ -331,6 +333,291 @@ describe('fake ECS state hydration', () => {
       tasks: { lastStatus: string }[]
     }
     expect(described.tasks[0]?.lastStatus).toBe('RUNNING')
+  })
+
+  it('merges concurrent STOPPED exit metadata over a RUNNING persist', () => {
+    const { mergeSnapshots } = requireE2e(e2eModule) as {
+      mergeSnapshots: (disk: object, incoming: object) => {
+        seq: number
+        runTasks: { taskArn: string }[]
+        tasks: Record<
+          string,
+          {
+            lastStatus: string
+            exitCode: number | null
+            retryTimestamps: number[]
+            supervisorPid: number | null
+            workerPid: number | null
+          }
+        >
+      }
+    }
+    const arn = 'arn:aws:ecs:local:000000000000:task/conduit-e2e/00000001'
+    const arn2 = 'arn:aws:ecs:local:000000000000:task/conduit-e2e/00000002'
+    const merged = mergeSnapshots(
+      {
+        seq: 1,
+        runTasks: [{ taskArn: arn, runId: 'r1' }],
+        tasks: {
+          [arn]: {
+            lastStatus: 'RUNNING',
+            supervisorPid: 11,
+            workerPid: 12,
+            retryTimestamps: [100],
+          },
+        },
+      },
+      {
+        seq: 4,
+        runTasks: [{ taskArn: arn2, runId: 'r2' }],
+        tasks: {
+          [arn]: {
+            lastStatus: 'STOPPED',
+            exitCode: 7,
+            retryTimestamps: [200],
+            supervisorPid: 11,
+            workerPid: 12,
+          },
+        },
+      }
+    )
+    expect(merged.seq).toBe(4)
+    expect(merged.runTasks.map((r) => r.taskArn).sort()).toEqual([arn, arn2].sort())
+    expect(merged.tasks[arn]?.lastStatus).toBe('STOPPED')
+    expect(merged.tasks[arn]?.exitCode).toBe(7)
+    expect(merged.tasks[arn]?.retryTimestamps).toEqual([100, 200])
+    expect(merged.tasks[arn]?.supervisorPid).toBe(11)
+    expect(merged.tasks[arn]?.workerPid).toBe(12)
+  })
+
+  it('does not let a later RUNNING write revive a STOPPED task or drop pids', () => {
+    const { mergeSnapshots } = requireE2e(e2eModule) as {
+      mergeSnapshots: (disk: object, incoming: object) => {
+        tasks: Record<
+          string,
+          { lastStatus: string; exitCode: number | null; supervisorPid: number | null; workerPid: number | null }
+        >
+      }
+    }
+    const arn = 'arn:aws:ecs:local:000000000000:task/conduit-e2e/00000001'
+    const merged = mergeSnapshots(
+      {
+        seq: 1,
+        runTasks: [{ taskArn: arn }],
+        tasks: {
+          [arn]: {
+            lastStatus: 'STOPPED',
+            exitCode: 1,
+            supervisorPid: 21,
+            workerPid: 22,
+            retryTimestamps: [1],
+          },
+        },
+      },
+      {
+        seq: 1,
+        runTasks: [{ taskArn: arn }],
+        tasks: {
+          [arn]: { lastStatus: 'RUNNING', supervisorPid: 21, workerPid: null, retryTimestamps: [] },
+        },
+      }
+    )
+    expect(merged.tasks[arn]?.lastStatus).toBe('STOPPED')
+    expect(merged.tasks[arn]?.exitCode).toBe(1)
+    expect(merged.tasks[arn]?.workerPid).toBe(22)
+    expect(merged.tasks[arn]?.supervisorPid).toBe(21)
+  })
+
+  it('hydrates a legacy pid field as workerPid when supervisorPid is absent', () => {
+    const { mergeSnapshots } = requireE2e(e2eModule) as {
+      mergeSnapshots: (disk: object, incoming: object) => {
+        tasks: Record<string, { workerPid: number | null; supervisorPid: number | null }>
+      }
+    }
+    const arn = 'arn:aws:ecs:local:000000000000:task/conduit-e2e/00000001'
+    const merged = mergeSnapshots(
+      {},
+      {
+        seq: 1,
+        runTasks: [{ taskArn: arn }],
+        tasks: { [arn]: { lastStatus: 'RUNNING', pid: 99 } },
+      }
+    )
+    expect(merged.tasks[arn]?.workerPid).toBe(99)
+    expect(merged.tasks[arn]?.supervisorPid).toBeNull()
+  })
+
+  it('child-process writers cannot lose STOPPED exit metadata', async () => {
+    const { persistSnapshot } = requireE2e(e2eModule) as {
+      persistSnapshot: (incoming: object) => void
+    }
+    expect(typeof persistSnapshot).toBe('function')
+    const stateFile = path.join(tmpDir, 'fake-ecs.json')
+    const arn = 'arn:aws:ecs:local:000000000000:task/conduit-e2e/00000001'
+    const arn2 = 'arn:aws:ecs:local:000000000000:task/conduit-e2e/00000002'
+    process.env.CONDUIT_FARGATE_E2E_STATE = stateFile
+    persistSnapshot({
+      seq: 1,
+      runTasks: [{ taskArn: arn, runId: 'r1' }],
+      tasks: {
+        [arn]: {
+          lastStatus: 'RUNNING',
+          supervisorPid: 11,
+          workerPid: 12,
+          retryTimestamps: [100],
+        },
+      },
+    })
+    const go = path.join(tmpDir, 'go')
+    const script = `
+      const fs = require('node:fs')
+      const { persistSnapshot } = require(${JSON.stringify(e2eModule)})
+      const go = process.argv[1]
+      const patch = JSON.parse(process.argv[2])
+      while (!fs.existsSync(go)) {}
+      persistSnapshot(patch)
+    `
+    const stopped = spawn(process.execPath, [
+      '-e',
+      script,
+      go,
+      JSON.stringify({
+        seq: 1,
+        runTasks: [{ taskArn: arn, runId: 'r1' }],
+        tasks: {
+          [arn]: {
+            lastStatus: 'STOPPED',
+            exitCode: 7,
+            retryTimestamps: [200],
+            supervisorPid: 11,
+            workerPid: 12,
+          },
+        },
+      }),
+    ], { env: { ...process.env, CONDUIT_FARGATE_E2E_STATE: stateFile }, stdio: 'ignore' })
+    const running = spawn(process.execPath, [
+      '-e',
+      script,
+      go,
+      JSON.stringify({
+        seq: 4,
+        runTasks: [{ taskArn: arn2, runId: 'r2' }],
+        tasks: {
+          [arn]: { lastStatus: 'RUNNING', supervisorPid: 11, retryTimestamps: [] },
+        },
+      }),
+    ], { env: { ...process.env, CONDUIT_FARGATE_E2E_STATE: stateFile }, stdio: 'ignore' })
+    await new Promise((r) => setTimeout(r, 80))
+    fs.writeFileSync(go, '1')
+    await Promise.all([
+      new Promise((resolve) => stopped.once('exit', resolve)),
+      new Promise((resolve) => running.once('exit', resolve)),
+    ])
+    const snap = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as {
+      seq: number
+      runTasks: { taskArn: string }[]
+      tasks: Record<string, { lastStatus: string; exitCode: number | null; retryTimestamps: number[] }>
+    }
+    expect(snap.tasks[arn]?.lastStatus).toBe('STOPPED')
+    expect(snap.tasks[arn]?.exitCode).toBe(7)
+    expect(snap.tasks[arn]?.retryTimestamps).toEqual([100, 200])
+    expect(snap.seq).toBe(4)
+    expect(snap.runTasks.map((r) => r.taskArn).sort()).toEqual([arn, arn2].sort())
+  })
+
+  it('retains supervisor/worker pids after STOPPED so cleanup can kill leaked descendants', () => {
+    const { persistSnapshot, cleanupPidsForTask } = requireE2e(e2eModule) as {
+      persistSnapshot: (incoming: object) => void
+      cleanupPidsForTask: (task: object) => number[]
+    }
+    const stateFile = path.join(tmpDir, 'fake-ecs.json')
+    process.env.CONDUIT_FARGATE_E2E_STATE = stateFile
+    persistSnapshot({
+      seq: 1,
+      runTasks: [],
+      tasks: {
+        arn1: {
+          lastStatus: 'STOPPED',
+          supervisorPid: 31,
+          workerPid: 32,
+          pgid: 31,
+          exitCode: 1,
+        },
+      },
+    })
+    const snap = JSON.parse(fs.readFileSync(stateFile, 'utf8')) as {
+      tasks: Record<string, { lastStatus: string; supervisorPid: number; workerPid: number; pgid: number }>
+    }
+    expect(snap.tasks.arn1.lastStatus).toBe('STOPPED')
+    expect(snap.tasks.arn1.supervisorPid).toBe(31)
+    expect(snap.tasks.arn1.workerPid).toBe(32)
+    expect(cleanupPidsForTask(snap.tasks.arn1).sort()).toEqual([31, 32])
+  })
+
+  it('kills a leaked worker via retained supervisor pgid when supervisor died before workerPid patch', async () => {
+    const { persistSnapshot, killRecordedTasks } = requireE2e(e2eModule) as {
+      persistSnapshot: (incoming: object) => void
+      killRecordedTasks: (stateFile: string) => void
+    }
+    const stateFile = path.join(tmpDir, 'fake-ecs.json')
+    process.env.CONDUIT_FARGATE_E2E_STATE = stateFile
+    const workerPidFile = path.join(tmpDir, 'worker.pid')
+    child = spawn(
+      process.execPath,
+      [
+        '-e',
+        `
+          const { spawn } = require('node:child_process')
+          const fs = require('node:fs')
+          const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+          fs.writeFileSync(${JSON.stringify(workerPidFile)}, String(worker.pid))
+          setInterval(() => {}, 1000)
+        `,
+      ],
+      { detached: true, stdio: 'ignore' }
+    )
+    child.unref()
+    const supervisor = child
+    const started = Date.now()
+    while (!fs.existsSync(workerPidFile) && Date.now() - started < 5000) {
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    const workerPid = Number(fs.readFileSync(workerPidFile, 'utf8'))
+    expect(workerPid).toBeGreaterThan(0)
+    persistSnapshot({
+      seq: 1,
+      runTasks: [],
+      tasks: {
+        leak: {
+          lastStatus: 'STOPPED',
+          supervisorPid: supervisor.pid,
+          pgid: supervisor.pid,
+          workerPid: null,
+        },
+      },
+    })
+    try {
+      process.kill(supervisor.pid!, 'SIGKILL')
+    } catch {
+      // already gone
+    }
+    await new Promise((r) => setTimeout(r, 50))
+    try {
+      process.kill(workerPid, 0)
+    } catch {
+      throw new Error('worker died with supervisor; test needs a leaked descendant')
+    }
+    killRecordedTasks(stateFile)
+    const deadSince = Date.now()
+    while (Date.now() - deadSince < 2000) {
+      try {
+        process.kill(workerPid, 0)
+        await new Promise((r) => setTimeout(r, 20))
+      } catch {
+        break
+      }
+    }
+    expect(() => process.kill(workerPid, 0)).toThrow()
   })
 })
 
