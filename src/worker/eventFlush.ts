@@ -1,6 +1,7 @@
 import type { RunEventInit } from '../shared/types'
-import type { WorkerRunEventMessage } from '../shared/workerControl'
+import type { ReliableRunFrame, WorkerRunEventMessage } from '../shared/workerControl'
 import { chunkRunEvents } from './eventBatch'
+import type { ReliableDeliveryQueue } from './reliableDelivery'
 
 export interface EventFlushQueue {
   push(ev: RunEventInit): void
@@ -11,10 +12,14 @@ export interface EventFlushQueue {
 /**
  * Serializes run:event flushes so a second drain cannot interleave with an
  * in-flight chunk send, and so onExit can wait for trailing events.
+ *
+ * When a reliable delivery queue is provided, chunked batches are enqueued
+ * there and retained until ACK — a successful WebSocket write is not delivery.
  */
 export function createEventFlushQueue(opts: {
   runId: string
-  send: (frame: WorkerRunEventMessage) => Promise<void>
+  send: (frame: WorkerRunEventMessage | ReliableRunFrame) => Promise<void>
+  delivery?: Pick<ReliableDeliveryQueue, 'enqueue' | 'drain'>
 }): EventFlushQueue {
   const buffer: RunEventInit[] = []
   let scheduled = false
@@ -24,8 +29,16 @@ export function createEventFlushQueue(opts: {
     scheduled = false
     while (buffer.length > 0) {
       const events = buffer.splice(0)
-      for (const frame of chunkRunEvents(opts.runId, events)) {
-        await opts.send(frame)
+      const frames = chunkRunEvents(opts.runId, events)
+      if (opts.delivery) {
+        for (const frame of frames) {
+          opts.delivery.enqueue(frame)
+        }
+        await opts.delivery.drain((frame) => opts.send(frame))
+      } else {
+        for (const frame of frames) {
+          await opts.send(frame)
+        }
       }
     }
   }

@@ -29,8 +29,15 @@ describe('one-shot lifecycle plans', () => {
     expect(planAfterRunExit({})).toBe('idle')
   })
 
-  it('one-shot workers exit after disconnect and after the assigned run', () => {
-    expect(planAfterDisconnect(oneShot)).toBe('exit')
-    expect(planAfterRunExit(oneShot)).toBe('exit')
+  it('one-shot workers reconnect after disconnect so unacked frames are not abandoned', () => {
+    expect(planAfterDisconnect(oneShot)).toBe('reconnect')
+  })
+
+  it('one-shot workers wait to exit while any assigned run still has pending reliable delivery', () => {
+    expect(planAfterRunExit(oneShot, { hasPendingDelivery: true })).toBe('idle')
+  })
+
+  it('one-shot workers exit only after pending reliable delivery is acknowledged', () => {
+    expect(planAfterRunExit(oneShot, { hasPendingDelivery: false })).toBe('exit')
   })
 })

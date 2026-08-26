@@ -15,6 +15,9 @@
  *   worker → server  run:started       (workspace resolved, execution live)
  *   worker → server  run:event         (batched structured events)
  *   worker → server  run:exit          (terminal state)
+ *   server → worker  run:ack           (highest contiguous sequence applied)
+ *   server → worker  run:resume        (replay from this durable cursor)
+ *   server → worker  run:reject        (frame/assignment refused)
  *   server → worker  run:cancel        (stop request)
  *
  * Lease semantics: if the server hears nothing from a worker (hello, heartbeat,
@@ -40,9 +43,10 @@ export interface WorkerHelloMessage {
   type: 'worker:hello'
   workerId: string
   capabilities: WorkerCapabilities
-  /** Run ids still executing on this worker across a reconnect (informational;
-   *  the server cannot re-adopt their event streams after a restart). */
+  /** Run ids still executing on this worker across a reconnect. */
   activeRunIds: string[]
+  /** Run ids with unacked delivery, including local-complete runs waiting for ACK. */
+  pendingRunIds?: string[]
 }
 
 export interface WorkerHeartbeatMessage {
@@ -54,6 +58,8 @@ export interface WorkerHeartbeatMessage {
 export interface WorkerRunStartedMessage {
   type: 'run:started'
   runId: string
+  /** Per-run delivery sequence. Required for resumable delivery; optional for legacy frames. */
+  sequence?: number
   workspacePath?: string
   /** Echo of the assignId from run:assign; rejects stale starts after a retry. */
   assignId?: string
@@ -62,15 +68,25 @@ export interface WorkerRunStartedMessage {
 export interface WorkerRunEventMessage {
   type: 'run:event'
   runId: string
+  /** Per-run delivery sequence. Required for resumable delivery; optional for legacy frames. */
+  sequence?: number
   events: RunEventInit[]
 }
 
 export interface WorkerRunExitMessage {
   type: 'run:exit'
   runId: string
+  /** Per-run delivery sequence. Required for resumable delivery; optional for legacy frames. */
+  sequence?: number
   status: WorkerExitStatus
   exitCode?: number | null
 }
+
+/** Sequenced run frames retained by the worker until the server ACKs them. */
+export type ReliableRunFrame =
+  | (WorkerRunStartedMessage & { sequence: number })
+  | (WorkerRunEventMessage & { sequence: number })
+  | (WorkerRunExitMessage & { sequence: number })
 
 export type WorkerToServerMessage =
   | WorkerHelloMessage
@@ -86,6 +102,8 @@ export interface ServerRunAssignMessage {
   spec: RunSpec
   /** Per-assignment token the worker echoes on run:started. */
   assignId: string
+  /** Server-authoritative reconnect window for this assignment, in milliseconds. */
+  reconnectTimeoutMs?: number
 }
 
 export interface ServerRunCancelMessage {
@@ -93,7 +111,30 @@ export interface ServerRunCancelMessage {
   runId: string
 }
 
-export type ServerToWorkerMessage = ServerRunAssignMessage | ServerRunCancelMessage
+export interface ServerRunAckMessage {
+  type: 'run:ack'
+  runId: string
+  sequence: number
+}
+
+export interface ServerRunResumeMessage {
+  type: 'run:resume'
+  runId: string
+  sequence: number
+}
+
+export interface ServerRunRejectMessage {
+  type: 'run:reject'
+  runId: string
+  reason: string
+}
+
+export type ServerToWorkerMessage =
+  | ServerRunAssignMessage
+  | ServerRunCancelMessage
+  | ServerRunAckMessage
+  | ServerRunResumeMessage
+  | ServerRunRejectMessage
 
 // ── Tuning ──────────────────────────────────────────────────────────────────
 
@@ -106,6 +147,14 @@ export const WORKER_LEASE_MS = 75_000
 export const WORKER_MAX_MESSAGE_BYTES = 1_048_576
 /** Reject run:event batches larger than this. */
 export const WORKER_MAX_EVENT_BATCH = 256
+/** Default worker reconnect window while retrying unacked delivery. */
+export const DEFAULT_WORKER_RECONNECT_TIMEOUT_MS = 300_000
+
+/** Positive milliseconds from CONDUIT_WORKER_RECONNECT_TIMEOUT_MS, else 300_000. */
+export function resolveWorkerReconnectTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const n = Number(env.CONDUIT_WORKER_RECONNECT_TIMEOUT_MS)
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_WORKER_RECONNECT_TIMEOUT_MS
+}
 
 export type WorkerMessageParseFailure = 'malformed' | 'invalid' | 'oversized-batch'
 
@@ -127,6 +176,18 @@ function isRunEventInit(value: unknown): value is RunEventInit {
   return isRecord(value) && typeof value.kind === 'string'
 }
 
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+}
+
+function readOptionalSequence(
+  value: Record<string, unknown>
+): { ok: true; sequence?: number } | { ok: false } {
+  if (value.sequence === undefined) return { ok: true }
+  if (!isPositiveSafeInteger(value.sequence)) return { ok: false }
+  return { ok: true, sequence: value.sequence }
+}
+
 /** Parse and structurally validate a worker→server control-plane frame. */
 export function parseWorkerToServerMessage(raw: string): WorkerMessageParseResult {
   let value: unknown
@@ -146,7 +207,8 @@ export function parseWorkerToServerMessage(raw: string): WorkerMessageParseResul
         !isRecord(value.capabilities) ||
         !isStringArray(value.capabilities.runners) ||
         typeof value.capabilities.version !== 'string' ||
-        !isStringArray(value.activeRunIds)
+        !isStringArray(value.activeRunIds) ||
+        (value.pendingRunIds !== undefined && !isStringArray(value.pendingRunIds))
       ) {
         return { ok: false, error: 'invalid' }
       }
@@ -160,6 +222,7 @@ export function parseWorkerToServerMessage(raw: string): WorkerMessageParseResul
             version: value.capabilities.version,
           },
           activeRunIds: value.activeRunIds,
+          pendingRunIds: isStringArray(value.pendingRunIds) ? value.pendingRunIds : [],
         },
       }
     }
@@ -182,11 +245,14 @@ export function parseWorkerToServerMessage(raw: string): WorkerMessageParseResul
       if (value.assignId !== undefined && (typeof value.assignId !== 'string' || value.assignId.length === 0)) {
         return { ok: false, error: 'invalid' }
       }
+      const sequence = readOptionalSequence(value)
+      if (!sequence.ok) return { ok: false, error: 'invalid' }
       return {
         ok: true,
         message: {
           type: 'run:started',
           runId: value.runId,
+          sequence: sequence.sequence,
           workspacePath: value.workspacePath,
           assignId: value.assignId,
         },
@@ -202,7 +268,12 @@ export function parseWorkerToServerMessage(raw: string): WorkerMessageParseResul
       if (!value.events.every(isRunEventInit)) {
         return { ok: false, error: 'invalid' }
       }
-      return { ok: true, message: { type: 'run:event', runId: value.runId, events: value.events } }
+      const sequence = readOptionalSequence(value)
+      if (!sequence.ok) return { ok: false, error: 'invalid' }
+      return {
+        ok: true,
+        message: { type: 'run:event', runId: value.runId, sequence: sequence.sequence, events: value.events },
+      }
     }
     case 'run:exit': {
       if (
@@ -220,11 +291,14 @@ export function parseWorkerToServerMessage(raw: string): WorkerMessageParseResul
       ) {
         return { ok: false, error: 'invalid' }
       }
+      const sequence = readOptionalSequence(value)
+      if (!sequence.ok) return { ok: false, error: 'invalid' }
       return {
         ok: true,
         message: {
           type: 'run:exit',
           runId: value.runId,
+          sequence: sequence.sequence,
           status: value.status as WorkerExitStatus,
           exitCode: value.exitCode as number | null | undefined,
         },

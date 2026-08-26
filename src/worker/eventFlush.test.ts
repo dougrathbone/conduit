@@ -1,15 +1,16 @@
 import { describe, it, expect } from 'vitest'
 import type { RunEventInit } from '../shared/types'
-import type { WorkerRunEventMessage } from '../shared/workerControl'
 import { createEventFlushQueue } from './eventFlush'
+import { createReliableDeliveryQueue } from './reliableDelivery'
 
 function raw(text: string): RunEventInit {
   return { kind: 'raw', stream: 'stdout', text }
 }
 
 describe('createEventFlushQueue', () => {
-  it('serializes flushes so onExit waits for in-flight chunks and does not reorder', async () => {
-    const sent: string[] = []
+  it('enqueues chunked batches onto the reliable spool so a socket write is not treated as delivery', async () => {
+    const delivery = createReliableDeliveryQueue()
+    const written: string[] = []
     let release!: () => void
     const gate = new Promise<void>((r) => {
       release = r
@@ -17,8 +18,9 @@ describe('createEventFlushQueue', () => {
     let first = true
     const queue = createEventFlushQueue({
       runId: 'run-1',
-      send: async (frame: WorkerRunEventMessage) => {
-        sent.push(...frame.events.map((e) => e.text ?? ''))
+      delivery,
+      send: async (frame) => {
+        written.push(...frame.events.map((e) => e.text ?? ''))
         if (first) {
           first = false
           await gate
@@ -27,13 +29,17 @@ describe('createEventFlushQueue', () => {
     })
 
     queue.push(raw('a'))
-    await viWaitFor(() => sent.length === 1)
+    await viWaitFor(() => written.length === 1)
     queue.push(raw('b'))
     const flushed = queue.flush()
-    expect(sent).toEqual(['a'])
+    expect(written).toEqual(['a'])
+    expect(delivery.pending().map((frame) => frame.sequence)).toEqual([1])
     release()
     await flushed
-    expect(sent).toEqual(['a', 'b'])
+    expect(written).toEqual(['a', 'b'])
+    expect(delivery.pending().map((frame) => frame.sequence)).toEqual([1, 2])
+    delivery.acknowledge(1)
+    expect(delivery.pending().map((frame) => frame.sequence)).toEqual([2])
   })
 })
 
