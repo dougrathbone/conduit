@@ -80,12 +80,27 @@ export interface RecoverableRunBinding {
   sink: WorkerEventSink
   handle: WorkerHandle
   durableSequence: number
+  /** Invoked only after this binding is installed on a still-live worker socket. */
+  onAdopted?: () => void
+  /** Invoked when recovery completed but the socket died before install. */
+  onAbandoned?: () => void
 }
 
-export type RecoverRun = (
-  runId: string,
+/** Matching remote run already terminal in the DB — ACK replay without a live sink. */
+export interface RecoveredTerminalRun {
+  kind: 'terminal'
+  runId: string
   workerId: string
-) => Promise<RecoverableRunBinding | undefined>
+  durableSequence: number
+}
+
+export type RecoverRunResult = RecoverableRunBinding | RecoveredTerminalRun | undefined
+
+export type RecoverRun = (runId: string, workerId: string) => Promise<RecoverRunResult>
+
+export function isRecoveredTerminalRun(result: RecoverRunResult): result is RecoveredTerminalRun {
+  return !!result && 'kind' in result && result.kind === 'terminal'
+}
 
 interface ConnectedWorker {
   workerId: string
@@ -152,6 +167,8 @@ export class WorkerControlPlane {
   private ignoreNextStarted = new Set<StartedSuppression>()
   /** Terminal sequences already applied; lost-ACK replay is acknowledged without re-finalizing. */
   private finalAcks = new Map<string, { workerId: string; sequence: number }>()
+  /** Replacement-process terminal recoveries: ACK frames without a live sink. */
+  private terminalRuns = new Map<string, { workerId: string; durableSequence: number }>()
   /** Per-run serialize of decision+append/sink/cursor/ACK across sockets. */
   private runLocks = new Map<string, Promise<void>>()
 
@@ -539,6 +556,7 @@ export class WorkerControlPlane {
     msg: { runId: string; sequence?: number; workspacePath?: string; assignId?: string }
   ): Promise<void> {
     if (this.ackIfFinalized(ws, workerId, msg.runId, msg.sequence)) return
+    if (this.ackIfTerminalRecovery(ws, workerId, msg.runId, msg.sequence)) return
     const a = this.ownedAssignment(msg.runId, ws)
     if (!a) return
     if (msg.assignId && msg.assignId !== a.assignId) return
@@ -572,6 +590,7 @@ export class WorkerControlPlane {
     msg: { runId: string; sequence?: number; events: RunEventInit[] }
   ): Promise<void> {
     if (this.ackIfFinalized(ws, workerId, msg.runId, msg.sequence)) return
+    if (this.ackIfTerminalRecovery(ws, workerId, msg.runId, msg.sequence)) return
     const a = this.ownedAssignment(msg.runId, ws)
     if (!a) return
     if (msg.sequence === undefined) {
@@ -599,6 +618,7 @@ export class WorkerControlPlane {
     msg: { runId: string; sequence?: number; status: WorkerExitStatus; exitCode?: number | null }
   ): Promise<void> {
     if (this.ackIfFinalized(ws, workerId, msg.runId, msg.sequence)) return
+    if (this.ackIfTerminalRecovery(ws, workerId, msg.runId, msg.sequence)) return
     const a = this.ownedAssignment(msg.runId, ws)
     if (!a) return
     if (msg.sequence === undefined) {
@@ -666,6 +686,30 @@ export class WorkerControlPlane {
     return true
   }
 
+  private ackIfTerminalRecovery(
+    ws: WebSocket,
+    workerId: string | undefined,
+    runId: string,
+    sequence: number | undefined
+  ): boolean {
+    if (sequence === undefined || !workerId) return false
+    const term = this.terminalRuns.get(runId)
+    if (!term || term.workerId !== workerId) return false
+    const prev = this.finalAcks.get(runId)?.sequence ?? term.durableSequence
+    this.finalAcks.set(runId, { workerId, sequence: Math.max(prev, sequence) })
+    this.sendAck(ws, runId, sequence)
+    return true
+  }
+
+  private notifyRecoveryOutcome(
+    recovered: RecoverRunResult,
+    adopted: boolean
+  ): void {
+    if (!recovered || isRecoveredTerminalRun(recovered)) return
+    if (adopted) recovered.onAdopted?.()
+    else recovered.onAbandoned?.()
+  }
+
   private async adoptPendingRuns(workerId: string, ws: WebSocket, pendingRunIds: string[]): Promise<void> {
     for (const runId of pendingRunIds) {
       const done = this.finalAcks.get(runId)
@@ -681,15 +725,30 @@ export class WorkerControlPlane {
         continue
       }
       const recovered = await this.recoverRun?.(runId, workerId)
-      if (!this.socketStillBound(workerId, ws)) continue
-      if (!recovered || recovered.workerId !== workerId) continue
-      const existingAfter = this.runs.get(runId)
-      if (existingAfter) {
-        if (existingAfter.workerId !== workerId) continue
-        this.rebindAssignment(existingAfter, ws)
+      if (!this.socketStillBound(workerId, ws)) {
+        this.notifyRecoveryOutcome(recovered, false)
         continue
       }
-      await this.installRecoveredBinding(recovered, ws)
+      if (!recovered || recovered.workerId !== workerId) {
+        this.notifyRecoveryOutcome(recovered, false)
+        continue
+      }
+      if (isRecoveredTerminalRun(recovered)) {
+        this.installTerminalRecovery(recovered, ws)
+        continue
+      }
+      const existingAfter = this.runs.get(runId)
+      if (existingAfter) {
+        if (existingAfter.workerId !== workerId) {
+          this.notifyRecoveryOutcome(recovered, false)
+          continue
+        }
+        this.rebindAssignment(existingAfter, ws)
+        this.notifyRecoveryOutcome(recovered, true)
+        continue
+      }
+      const installed = await this.installRecoveredBinding(recovered, ws)
+      this.notifyRecoveryOutcome(recovered, installed)
     }
   }
 
@@ -703,13 +762,32 @@ export class WorkerControlPlane {
     })
   }
 
-  private async installRecoveredBinding(binding: RecoverableRunBinding, ws: WebSocket): Promise<void> {
-    if (!this.socketStillBound(binding.workerId, ws)) return
+  private installTerminalRecovery(recovered: RecoveredTerminalRun, ws: WebSocket): void {
+    this.terminalRuns.set(recovered.runId, {
+      workerId: recovered.workerId,
+      durableSequence: recovered.durableSequence,
+    })
+    this.finalAcks.set(recovered.runId, {
+      workerId: recovered.workerId,
+      sequence: recovered.durableSequence,
+    })
+    this.sendOn(ws, {
+      type: 'run:resume',
+      runId: recovered.runId,
+      sequence: recovered.durableSequence,
+    })
+  }
+
+  private async installRecoveredBinding(binding: RecoverableRunBinding, ws: WebSocket): Promise<boolean> {
+    if (!this.socketStillBound(binding.workerId, ws)) return false
     const runId = binding.runId
     const logPath = path.join(this.logsDir, `${runId}.jsonl`)
     await this.ensureLogCursor(logPath, binding.durableSequence)
-    if (!this.socketStillBound(binding.workerId, ws)) return
-    if (this.runs.has(runId)) return
+    if (!this.socketStillBound(binding.workerId, ws)) return false
+    if (this.runs.has(runId)) {
+      const existing = this.runs.get(runId)
+      return existing?.workerId === binding.workerId
+    }
     const assignment: Assignment = {
       spec: {
         runId,
@@ -735,6 +813,7 @@ export class WorkerControlPlane {
     clearTimeout(assignment.timeout)
     this.runs.set(runId, assignment)
     this.sendOn(ws, { type: 'run:resume', runId, sequence: binding.durableSequence })
+    return true
   }
 
   /** Fill missing prefix markers so resume never sits above a gapped log. */
@@ -916,6 +995,7 @@ export class WorkerControlPlane {
     this.workers.clear()
     this.ignoreNextStarted.clear()
     this.finalAcks.clear()
+    this.terminalRuns.clear()
   }
 }
 

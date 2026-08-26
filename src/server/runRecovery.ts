@@ -6,9 +6,9 @@
  * reconnect window; a matching RecoverRun reconstructs the runner pipeline
  * from the durable log cursor. Unadopted remotes fail once when the timer fires.
  */
-import type { ExecutionRun, RunnerType } from '../shared/types'
+import type { ExecutionRun, RunnerType, RunStatus } from '../shared/types'
 import type { WorkerHandle } from '../shared/worker'
-import type { RecoverableRunBinding } from './workerControl'
+import type { RecoverableRunBinding, RecoverRunResult } from './workerControl'
 import { peekWorkerControlPlane } from './workerControl'
 import { getRun, getOrphanedRuns, updateRun, updateRunIfRunning } from '../main/db/queries/runs'
 import { getAgent } from '../main/db/queries/agents'
@@ -28,6 +28,11 @@ const LOCAL_RESTART_MESSAGE =
   '✗ Run did not finish — the Conduit process exited mid-run (deploy, crash, ' +
   'out-of-memory, or disk-pressure eviction). Marked failed on restart.'
 
+const REMOTE_NO_WORKER_MESSAGE =
+  '✗ Run did not finish — this remote run had no recorded worker identity when the Conduit server restarted. Marked failed on restart.'
+
+const TERMINAL_STATUSES = new Set<RunStatus>(['completed', 'failed', 'stopped'])
+
 export interface ReconcileOrphanedRunsOptions {
   reconnectTimeoutMs: number
   recoverableKinds?: readonly string[]
@@ -39,26 +44,64 @@ export interface OrphanReconcileHandle {
   adopted(runId: string): void
 }
 
+type ExpiryClaim = 'pending' | 'adopting' | 'adopted' | 'expiring'
+
+interface PendingExpiry {
+  timer: NodeJS.Timeout
+  claim: ExpiryClaim
+  expiredWhileAdopting: boolean
+}
+
 const recoveredBindings = new Map<string, RecoverableRunBinding>()
-const pendingExpiry = new Map<string, { timer: NodeJS.Timeout; cancelled: boolean }>()
+const pendingExpiry = new Map<string, PendingExpiry>()
 let activeReconcile: OrphanReconcileHandle | null = null
 
+function recoverableKindSet(kinds?: readonly string[]): Set<string> {
+  return new Set(kinds ?? DEFAULT_RECOVERABLE_KINDS)
+}
+
+function isRecoverableKind(kind: string | undefined, kinds: ReadonlySet<string>): boolean {
+  return typeof kind === 'string' && kinds.has(kind)
+}
+
+function hasWorkerIdentity(run: ExecutionRun): boolean {
+  return typeof run.workerId === 'string' && run.workerId.length > 0
+}
+
 function isRecoverable(run: ExecutionRun, kinds: ReadonlySet<string>): boolean {
-  return (
-    run.status === 'running' &&
-    typeof run.workerKind === 'string' &&
-    kinds.has(run.workerKind) &&
-    typeof run.workerId === 'string' &&
-    run.workerId.length > 0
-  )
+  return run.status === 'running' && isRecoverableKind(run.workerKind, kinds) && hasWorkerIdentity(run)
+}
+
+function matchesRemoteWorker(run: ExecutionRun, workerId: string, kinds: ReadonlySet<string>): boolean {
+  return isRecoverableKind(run.workerKind, kinds) && hasWorkerIdentity(run) && run.workerId === workerId
+}
+
+function immediateFailMessage(run: ExecutionRun, kinds: ReadonlySet<string>): string {
+  if (isRecoverableKind(run.workerKind, kinds) && !hasWorkerIdentity(run)) {
+    return REMOTE_NO_WORKER_MESSAGE
+  }
+  return LOCAL_RESTART_MESSAGE
 }
 
 function clearExpiry(runId: string): void {
   const pending = pendingExpiry.get(runId)
   if (!pending) return
-  pending.cancelled = true
+  pending.claim = 'adopted'
   clearTimeout(pending.timer)
   pendingExpiry.delete(runId)
+}
+
+function beginAdoption(runId: string): void {
+  const pending = pendingExpiry.get(runId)
+  if (!pending) return
+  if (pending.claim === 'adopted') return
+  pending.claim = 'adopting'
+}
+
+function releaseAdoptionToPending(runId: string): void {
+  const pending = pendingExpiry.get(runId)
+  if (!pending || pending.claim !== 'adopting') return
+  pending.claim = 'pending'
 }
 
 export function stopOrphanReconciliation(): void {
@@ -76,26 +119,41 @@ async function failUnadoptedRemote(
   broadcast: BroadcastFn
 ): Promise<void> {
   const pending = pendingExpiry.get(run.id)
-  if (!pending || pending.cancelled) return
-  pendingExpiry.delete(run.id)
-  if (recoveredBindings.has(run.id) || getActiveRunIds().has(run.id)) return
+  if (!pending) return
+  if (pending.claim === 'adopting' || pending.claim === 'adopted') {
+    pending.expiredWhileAdopting = true
+    return
+  }
+  if (pending.claim !== 'pending') return
+  pending.claim = 'expiring'
 
   const current = await getRun(run.id)
-  if (!current || current.status !== 'running') return
-  if (recoveredBindings.has(run.id) || getActiveRunIds().has(run.id)) return
+  if (pending.claim !== 'expiring') return
+  if (!current || current.status !== 'running') {
+    pendingExpiry.delete(run.id)
+    return
+  }
+  if (getActiveRunIds().has(run.id)) {
+    pending.claim = 'pending'
+    return
+  }
 
   const text = reconnectExpiryMessage(reconnectTimeoutMs)
-  appendRunLog(run.id, text, run.logPath)
-
   const endedAt = Date.now()
   const durationMs = endedAt - run.startedAt
+  if (pending.claim !== 'expiring') return
   const updated = await updateRunIfRunning(run.id, {
     status: 'failed',
     endedAt,
     durationMs,
     lastLine: text.slice(0, 500),
   })
-  if (!updated) return
+  if (!updated) {
+    if (pending.claim === 'expiring') pending.claim = 'pending'
+    return
+  }
+  pendingExpiry.delete(run.id)
+  appendRunLog(run.id, text, run.logPath)
 
   broadcast('run:statusChange', {
     runId: run.id,
@@ -135,7 +193,6 @@ async function bindRecoveredRun(
       peekWorkerControlPlane()?.requestCancel(run.id)
     },
   }
-  orch.register(handle)
 
   const sink = {
     ...orch.sink,
@@ -151,8 +208,17 @@ async function bindRecoveredRun(
     sink,
     handle,
     durableSequence,
+    onAdopted: () => {
+      orch.register(handle)
+      recoveredBindings.set(run.id, binding)
+      clearExpiry(run.id)
+    },
+    onAbandoned: () => {
+      orch.abort()
+      recoveredBindings.delete(run.id)
+      releaseAdoptionToPending(run.id)
+    },
   }
-  recoveredBindings.set(run.id, binding)
   return binding
 }
 
@@ -165,21 +231,45 @@ export async function recoverRemoteRun(
   runId: string,
   workerId: string,
   broadcast: BroadcastFn
-): Promise<RecoverableRunBinding | undefined> {
-  const run = await getRun(runId)
-  if (!run) return undefined
-  if (!isRecoverable(run, new Set(DEFAULT_RECOVERABLE_KINDS))) return undefined
-  if (run.workerId !== workerId) return undefined
+): Promise<RecoverRunResult> {
+  beginAdoption(runId)
+  try {
+    const run = await getRun(runId)
+    const kinds = recoverableKindSet()
+    if (!run || !matchesRemoteWorker(run, workerId, kinds)) {
+      releaseAdoptionToPending(runId)
+      return undefined
+    }
 
-  const binding = await bindRecoveredRun(run, broadcast)
-  clearExpiry(runId)
-  return binding
+    if (run.status !== 'running') {
+      releaseAdoptionToPending(runId)
+      if (!TERMINAL_STATUSES.has(run.status)) return undefined
+      return {
+        kind: 'terminal',
+        runId: run.id,
+        workerId,
+        durableSequence: await readHighestContiguousSequence(run.logPath),
+      }
+    }
+
+    const binding = await bindRecoveredRun(run, broadcast)
+    const latest = await getRun(runId)
+    if (!latest || latest.status !== 'running') {
+      binding.onAbandoned?.()
+      return undefined
+    }
+    releaseAdoptionToPending(runId)
+    return binding
+  } catch (err) {
+    releaseAdoptionToPending(runId)
+    throw err
+  }
 }
 
 export async function reconcileOrphanedRuns(
   opts: ReconcileOrphanedRunsOptions
 ): Promise<OrphanReconcileHandle> {
-  const recoverableKinds = new Set(opts.recoverableKinds ?? DEFAULT_RECOVERABLE_KINDS)
+  const recoverableKinds = recoverableKindSet(opts.recoverableKinds)
   const orphaned = await getOrphanedRuns()
   const immediate: ExecutionRun[] = []
   const pending: ExecutionRun[] = []
@@ -189,7 +279,8 @@ export async function reconcileOrphanedRuns(
   }
 
   for (const run of immediate) {
-    appendRunLog(run.id, LOCAL_RESTART_MESSAGE, run.logPath)
+    const text = immediateFailMessage(run, recoverableKinds)
+    appendRunLog(run.id, text, run.logPath)
     await updateRun(run.id, { status: 'failed', endedAt: Date.now() })
   }
   if (immediate.length > 0) {
@@ -220,7 +311,7 @@ export async function reconcileOrphanedRuns(
       void failUnadoptedRemote(run, opts.reconnectTimeoutMs, opts.broadcast)
     }, opts.reconnectTimeoutMs)
     timer.unref()
-    pendingExpiry.set(run.id, { timer, cancelled: false })
+    pendingExpiry.set(run.id, { timer, claim: 'pending', expiredWhileAdopting: false })
   }
 
   activeReconcile = handle

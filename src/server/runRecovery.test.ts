@@ -17,6 +17,9 @@ const RECONNECT_MS = 1250
 const EXPIRY_MESSAGE =
   'Run did not finish — remote worker did not reconnect within 1250ms after the Conduit server restarted.'
 
+const REMOTE_NO_WORKER_MESSAGE =
+  '✗ Run did not finish — this remote run had no recorded worker identity when the Conduit server restarted. Marked failed on restart.'
+
 const runs = new Map<string, ExecutionRun>()
 const getRun = vi.fn(async (id: string) => runs.get(id) ?? null)
 const updateRun = vi.fn(async (id: string, data: Partial<ExecutionRun>) => {
@@ -79,7 +82,7 @@ vi.mock('./observability', () => ({
   },
 }))
 
-import { recoverRemoteRun, reconcileOrphanedRuns } from './runRecovery'
+import { recoverRemoteRun, reconcileOrphanedRuns, stopOrphanReconciliation } from './runRecovery'
 import { getActiveRunIds, stopRun } from './runner'
 
 const RECOVERABLE = ['remote', 'eks', 'fargate'] as const
@@ -119,6 +122,7 @@ describe('reconcileOrphanedRuns', () => {
     updateRunIfRunning.mockClear()
     publishRunResult.mockClear()
     captureMessage.mockClear()
+    getAgent.mockClear()
     broadcasts.length = 0
     vi.useFakeTimers()
     vi.setSystemTime(2_000_000)
@@ -189,14 +193,94 @@ describe('reconcileOrphanedRuns', () => {
     }
   })
 
-  it('removes an adopted run from expiry handling', async () => {
-    const run = addRun({ id: 'adopt-1', workerKind: 'remote', workerId: 'worker-1' })
-    const handle = await reconcile()
+  it('fails a remote orphan with an empty workerId immediately using a remote-identity diagnostic', async () => {
+    const orphan = addRun({ id: 'remote-no-worker', workerKind: 'remote', workerId: '' })
+    await reconcile()
+
+    expect(runs.get(orphan.id)?.status).toBe('failed')
+    expect(fs.readFileSync(orphan.logPath, 'utf8')).toContain(REMOTE_NO_WORKER_MESSAGE)
+    expect(fs.readFileSync(orphan.logPath, 'utf8')).not.toContain(LOCAL_RESTART_MESSAGE)
+  })
+
+  it('stopOrphanReconciliation prevents expiry of still-running remote orphans', async () => {
+    const run = addRun({ id: 'stop-expiry', workerKind: 'remote', workerId: 'worker-1' })
+    await reconcile()
+    stopOrphanReconciliation()
+
+    await vi.advanceTimersByTimeAsync(RECONNECT_MS + 5_000)
+
+    expect(runs.get(run.id)?.status).toBe('running')
+    expect(failedUpdatesFor(run.id)).toHaveLength(0)
+    expect(fs.readFileSync(run.logPath, 'utf8')).not.toContain(EXPIRY_MESSAGE)
+  })
+
+  it('does not fail or write a diagnostic when adoption and expiry overlap', async () => {
+    const run = addRun({ id: 'race-1', workerKind: 'remote', workerId: 'worker-1' })
+    await reconcile()
+
+    let releaseAgent!: () => void
+    const agentHeld = new Promise<void>((resolve) => {
+      releaseAgent = resolve
+    })
+    getAgent.mockImplementationOnce(async () => {
+      await agentHeld
+      return {
+        id: run.agentId,
+        name: 'Test agent',
+        runner: 'claude' as const,
+        prompt: 'hi',
+        envVars: {},
+        mcpConfig: { mcpServers: {} },
+        createdAt: 1,
+        updatedAt: 1,
+      }
+    })
+
+    const recoverP = recoverRemoteRun(run.id, 'worker-1', (channel, payload) =>
+      broadcasts.push([channel, payload])
+    )
+    await vi.waitFor(() => {
+      expect(getAgent).toHaveBeenCalled()
+    })
+
+    await vi.advanceTimersByTimeAsync(RECONNECT_MS)
+    expect(runs.get(run.id)?.status).toBe('running')
+    expect(fs.readFileSync(run.logPath, 'utf8')).not.toContain(EXPIRY_MESSAGE)
+
+    releaseAgent()
+    const binding = await recoverP
+    expect(binding && 'sink' in binding).toBe(true)
+    if (binding && 'onAdopted' in binding) binding.onAdopted?.()
+
+    await vi.advanceTimersByTimeAsync(RECONNECT_MS)
+    expect(runs.get(run.id)?.status).toBe('running')
+    expect(failedUpdatesFor(run.id)).toHaveLength(0)
+    expect(fs.readFileSync(run.logPath, 'utf8')).not.toContain(EXPIRY_MESSAGE)
+  })
+
+  it('keeps expiry armed and skips active-process registration until the plane installs the binding', async () => {
+    const run = addRun({ id: 'no-install', workerKind: 'remote', workerId: 'worker-1' })
+    await reconcile()
     const broadcast = (channel: string, payload: unknown) => broadcasts.push([channel, payload])
 
     const binding = await recoverRemoteRun(run.id, 'worker-1', broadcast)
-    expect(binding).toBeDefined()
-    handle.adopted(run.id)
+    expect(binding && 'sink' in binding).toBe(true)
+    expect(getActiveRunIds().has(run.id)).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(RECONNECT_MS)
+    expect(runs.get(run.id)?.status).toBe('failed')
+    expect(fs.readFileSync(run.logPath, 'utf8')).toContain(EXPIRY_MESSAGE)
+    if (binding && 'onAbandoned' in binding) binding.onAbandoned?.()
+  })
+
+  it('removes an adopted run from expiry handling after onAdopted', async () => {
+    const run = addRun({ id: 'adopt-1', workerKind: 'remote', workerId: 'worker-1' })
+    await reconcile()
+    const broadcast = (channel: string, payload: unknown) => broadcasts.push([channel, payload])
+
+    const binding = await recoverRemoteRun(run.id, 'worker-1', broadcast)
+    expect(binding && 'onAdopted' in binding).toBe(true)
+    if (binding && 'onAdopted' in binding) binding.onAdopted?.()
 
     await vi.advanceTimersByTimeAsync(RECONNECT_MS + 5_000)
 
@@ -262,13 +346,17 @@ describe('recoverRemoteRun', () => {
     expect(binding).toMatchObject({ runId: run.id, workerId: 'worker-1' })
     expect(binding!.durableSequence).toBe(2)
     expect(binding!.durableSequence).toBe(await readHighestContiguousSequence(run.logPath))
-    expect(binding!.handle.workerId).toBe('worker-1')
+    expect(binding && 'handle' in binding && binding.handle.workerId).toBe('worker-1')
+    if (binding && 'onAbandoned' in binding) binding.onAbandoned?.()
   })
 
   it('updates lastLine from durable events without writing a second log copy', async () => {
     const run = await seedRemote()
     const before = fs.readFileSync(run.logPath, 'utf8')
     const binding = (await recoverRemoteRun(run.id, 'worker-1', broadcast))!
+    expect('sink' in binding).toBe(true)
+    if (!('sink' in binding)) return
+    binding.onAdopted?.()
 
     binding.sink.onDurableEvent!({ kind: 'raw', stream: 'stdout', text: 'post-recover line' })
     expect(fs.readFileSync(run.logPath, 'utf8')).toBe(before)
@@ -281,6 +369,9 @@ describe('recoverRemoteRun', () => {
   it('routes stop through the recovered handle so cancel can use the rebound socket', async () => {
     const run = await seedRemote()
     const binding = (await recoverRemoteRun(run.id, 'worker-1', broadcast))!
+    expect('sink' in binding).toBe(true)
+    if (!('sink' in binding)) return
+    binding.onAdopted?.()
     const cancel = vi.spyOn(binding.handle, 'cancel')
 
     await stopRun(run.id)
@@ -290,6 +381,9 @@ describe('recoverRemoteRun', () => {
   it('persists terminal status, exit code, and duration and publishes exactly once even on replay', async () => {
     const run = await seedRemote()
     const binding = (await recoverRemoteRun(run.id, 'worker-1', broadcast))!
+    expect('sink' in binding).toBe(true)
+    if (!('sink' in binding)) return
+    binding.onAdopted?.()
 
     await binding.sink.onExit('completed', 0)
     await binding.sink.onExit('completed', 0)
@@ -303,7 +397,24 @@ describe('recoverRemoteRun', () => {
     expect(broadcasts.filter(([ch, p]) => ch === 'run:statusChange' && (p as { status: string }).status === 'completed')).toHaveLength(1)
   })
 
-  it('returns undefined for local, terminal, missing, and worker-mismatch runs', async () => {
+  it('returns a terminal recovery result for a matching completed remote run', async () => {
+    const run = await seedRemote({
+      id: 'done-run',
+      status: 'completed',
+      exitCode: 0,
+    })
+    const result = await recoverRemoteRun(run.id, 'worker-1', broadcast)
+    expect(result).toEqual({
+      kind: 'terminal',
+      runId: run.id,
+      workerId: 'worker-1',
+      durableSequence: 2,
+    })
+    expect(getActiveRunIds().has(run.id)).toBe(false)
+    expect(publishRunResult).not.toHaveBeenCalled()
+  })
+
+  it('returns undefined for local, missing, and worker-mismatch runs', async () => {
     const tmp = tmpDir()
     temps.push(tmp)
 
@@ -313,26 +424,18 @@ describe('recoverRemoteRun', () => {
       workerKind: 'local',
       workerId: 'worker-1',
     })
-    const terminal = fixture({
-      id: 'done-run',
-      logPath: path.join(tmp.dir, 'done.jsonl'),
-      status: 'completed',
-      workerKind: 'remote',
-      workerId: 'worker-1',
-    })
     const mismatch = fixture({
       id: 'other-worker',
       logPath: path.join(tmp.dir, 'other.jsonl'),
       workerKind: 'remote',
       workerId: 'worker-1',
     })
-    for (const run of [local, terminal, mismatch]) {
+    for (const run of [local, mismatch]) {
       fs.writeFileSync(run.logPath, '')
       runs.set(run.id, run)
     }
 
     expect(await recoverRemoteRun(local.id, 'worker-1', broadcast)).toBeUndefined()
-    expect(await recoverRemoteRun(terminal.id, 'worker-1', broadcast)).toBeUndefined()
     expect(await recoverRemoteRun('missing-run', 'worker-1', broadcast)).toBeUndefined()
     expect(await recoverRemoteRun(mismatch.id, 'impostor', broadcast)).toBeUndefined()
   })

@@ -15,6 +15,7 @@ import {
   resolveAssignTimeoutMs,
   resolveConnectTimeoutMs,
   type WorkerControlPlaneOptions,
+  type RecoverRunResult,
 } from './workerControl'
 import type { RunSpec, WorkerEventSink, WorkerHandle } from '../shared/worker'
 import type { ServerToWorkerMessage } from '../shared/workerControl'
@@ -52,7 +53,7 @@ type RecoverRunBinding = {
 type ResumablePlaneOptions = WorkerControlPlaneOptions & {
   reconnectTimeoutMs?: number
   logsDir?: string
-  recoverRun?: (runId: string, workerId: string) => Promise<RecoverRunBinding | undefined>
+  recoverRun?: (runId: string, workerId: string) => Promise<RecoverRunResult>
   appendSequencedEvents?: (
     logPath: string,
     events: import('../shared/types').RunEventInit[],
@@ -1248,6 +1249,8 @@ describe('WorkerControlPlane detach, rebind, and idempotent ACK', () => {
       releaseRecover = resolve
     })
     let recoverCalls = 0
+    const adopted: string[] = []
+    const abandoned: string[] = []
     const recoverRun: ResumablePlaneOptions['recoverRun'] = async (runId, workerId) => {
       recoverCalls++
       await recoverHeld
@@ -1257,6 +1260,8 @@ describe('WorkerControlPlane detach, rebind, and idempotent ACK', () => {
         durableSequence: 1,
         sink: { onEvent: () => {}, onExit: () => {} },
         handle: { runId, workerId, ephemeral: false, cancel: async () => {} },
+        onAdopted: () => adopted.push(runId),
+        onAbandoned: () => abandoned.push(runId),
       }
     }
     ctx = await startServer({ reconnectTimeoutMs: 400, logsDir, recoverRun })
@@ -1269,10 +1274,69 @@ describe('WorkerControlPlane detach, rebind, and idempotent ACK', () => {
     releaseRecover()
     await new Promise((r) => setTimeout(r, 40))
     expect(await nextOrTimeout(first.next, 40)).toBe('timeout')
+    expect(adopted).toEqual([])
+    expect(abandoned).toEqual([SPEC.runId])
 
     const second = await connectWorker(ctx, { workerId: 'w1', pendingRunIds: [SPEC.runId] })
     expect(await second.next()).toEqual({ type: 'run:resume', runId: SPEC.runId, sequence: 1 })
     expect(recoverCalls).toBe(2)
+    expect(adopted).toEqual([SPEC.runId])
+  })
+
+  it('ACKs a replacement-process terminal run:exit without re-finalizing', async () => {
+    await ctx.close()
+    const exits: string[] = []
+    const recoverRun: ResumablePlaneOptions['recoverRun'] = async (runId, workerId) => {
+      if (runId !== SPEC.runId || workerId !== 'w1') return undefined
+      return { kind: 'terminal', runId, workerId, durableSequence: 2 }
+    }
+    ctx = await startServer({ reconnectTimeoutMs: 400, logsDir, recoverRun })
+    const worker = await connectWorker(ctx, { workerId: 'w1', pendingRunIds: [SPEC.runId] })
+    expect(await worker.next()).toEqual({ type: 'run:resume', runId: SPEC.runId, sequence: 2 })
+    worker.ws.send(
+      JSON.stringify({
+        type: 'run:exit',
+        runId: SPEC.runId,
+        sequence: 3,
+        status: 'completed',
+        exitCode: 0,
+      })
+    )
+    expect(await worker.next()).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 3 })
+    expect(exits).toEqual([])
+
+    worker.ws.send(
+      JSON.stringify({
+        type: 'run:exit',
+        runId: SPEC.runId,
+        sequence: 3,
+        status: 'completed',
+        exitCode: 0,
+      })
+    )
+    expect(await worker.next()).toEqual({ type: 'run:ack', runId: SPEC.runId, sequence: 3 })
+    expect(exits).toEqual([])
+  })
+
+  it('does not adopt a terminal recovery for a mismatched workerId', async () => {
+    await ctx.close()
+    const recoverRun: ResumablePlaneOptions['recoverRun'] = async (runId, workerId) => {
+      if (workerId !== 'w1') return undefined
+      return { kind: 'terminal', runId, workerId, durableSequence: 2 }
+    }
+    ctx = await startServer({ reconnectTimeoutMs: 400, logsDir, recoverRun })
+    const impostor = await connectWorker(ctx, { workerId: 'impostor', pendingRunIds: [SPEC.runId] })
+    expect(await nextOrTimeout(impostor.next, 80)).toBe('timeout')
+    impostor.ws.send(
+      JSON.stringify({
+        type: 'run:exit',
+        runId: SPEC.runId,
+        sequence: 3,
+        status: 'completed',
+        exitCode: 0,
+      })
+    )
+    expect(await nextOrTimeout(impostor.next, 80)).toBe('timeout')
   })
 })
 
