@@ -258,6 +258,57 @@ describe('reconcileOrphanedRuns', () => {
     expect(fs.readFileSync(run.logPath, 'utf8')).not.toContain(EXPIRY_MESSAGE)
   })
 
+  it('fails exactly once when expiry elapses during adoption and recovery then abandons', async () => {
+    const run = addRun({ id: 'abandon-after-expiry', workerKind: 'remote', workerId: 'worker-1' })
+    await reconcile()
+
+    let releaseAgent!: () => void
+    const agentHeld = new Promise<void>((resolve) => {
+      releaseAgent = resolve
+    })
+    getAgent.mockImplementationOnce(async () => {
+      await agentHeld
+      return {
+        id: run.agentId,
+        name: 'Test agent',
+        runner: 'claude' as const,
+        prompt: 'hi',
+        envVars: {},
+        mcpConfig: { mcpServers: {} },
+        createdAt: 1,
+        updatedAt: 1,
+      }
+    })
+
+    const recoverP = recoverRemoteRun(run.id, 'worker-1', (channel, payload) =>
+      broadcasts.push([channel, payload])
+    )
+    await vi.waitFor(() => {
+      expect(getAgent).toHaveBeenCalled()
+    })
+
+    await vi.advanceTimersByTimeAsync(RECONNECT_MS)
+    expect(runs.get(run.id)?.status).toBe('running')
+    expect(fs.readFileSync(run.logPath, 'utf8')).not.toContain(EXPIRY_MESSAGE)
+    expect(getActiveRunIds().has(run.id)).toBe(false)
+
+    releaseAgent()
+    const binding = await recoverP
+    expect(binding && 'sink' in binding).toBe(true)
+    expect(getActiveRunIds().has(run.id)).toBe(false)
+    if (binding && 'onAbandoned' in binding) binding.onAbandoned?.()
+
+    await vi.waitFor(() => {
+      expect(runs.get(run.id)?.status).toBe('failed')
+    })
+    expect(fs.readFileSync(run.logPath, 'utf8')).toContain(EXPIRY_MESSAGE)
+    expect(failedUpdatesFor(run.id)).toHaveLength(1)
+    expect(getActiveRunIds().has(run.id)).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(RECONNECT_MS * 4)
+    expect(failedUpdatesFor(run.id)).toHaveLength(1)
+  })
+
   it('keeps expiry armed and skips active-process registration until the plane installs the binding', async () => {
     const run = addRun({ id: 'no-install', workerKind: 'remote', workerId: 'worker-1' })
     await reconcile()
@@ -268,9 +319,12 @@ describe('reconcileOrphanedRuns', () => {
     expect(getActiveRunIds().has(run.id)).toBe(false)
 
     await vi.advanceTimersByTimeAsync(RECONNECT_MS)
-    expect(runs.get(run.id)?.status).toBe('failed')
-    expect(fs.readFileSync(run.logPath, 'utf8')).toContain(EXPIRY_MESSAGE)
     if (binding && 'onAbandoned' in binding) binding.onAbandoned?.()
+    await vi.waitFor(() => {
+      expect(runs.get(run.id)?.status).toBe('failed')
+    })
+    expect(fs.readFileSync(run.logPath, 'utf8')).toContain(EXPIRY_MESSAGE)
+    expect(getActiveRunIds().has(run.id)).toBe(false)
   })
 
   it('removes an adopted run from expiry handling after onAdopted', async () => {

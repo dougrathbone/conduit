@@ -50,6 +50,9 @@ interface PendingExpiry {
   timer: NodeJS.Timeout
   claim: ExpiryClaim
   expiredWhileAdopting: boolean
+  run: ExecutionRun
+  reconnectTimeoutMs: number
+  broadcast: BroadcastFn
 }
 
 const recoveredBindings = new Map<string, RecoverableRunBinding>()
@@ -94,14 +97,18 @@ function clearExpiry(runId: string): void {
 function beginAdoption(runId: string): void {
   const pending = pendingExpiry.get(runId)
   if (!pending) return
-  if (pending.claim === 'adopted') return
+  if (pending.claim === 'adopted' || pending.claim === 'expiring') return
   pending.claim = 'adopting'
 }
 
-function releaseAdoptionToPending(runId: string): void {
+/** Live recovery stays `adopting` until onAdopted/onAbandoned. */
+function abandonAdoption(runId: string): void {
   const pending = pendingExpiry.get(runId)
-  if (!pending || pending.claim !== 'adopting') return
+  if (!pending) return
+  if (pending.claim === 'adopted' || pending.claim === 'expiring') return
   pending.claim = 'pending'
+  if (!pending.expiredWhileAdopting) return
+  void failUnadoptedRemote(pending.run, pending.reconnectTimeoutMs, pending.broadcast)
 }
 
 export function stopOrphanReconciliation(): void {
@@ -216,7 +223,7 @@ async function bindRecoveredRun(
     onAbandoned: () => {
       orch.abort()
       recoveredBindings.delete(run.id)
-      releaseAdoptionToPending(run.id)
+      abandonAdoption(run.id)
     },
   }
   return binding
@@ -237,12 +244,12 @@ export async function recoverRemoteRun(
     const run = await getRun(runId)
     const kinds = recoverableKindSet()
     if (!run || !matchesRemoteWorker(run, workerId, kinds)) {
-      releaseAdoptionToPending(runId)
+      abandonAdoption(runId)
       return undefined
     }
 
     if (run.status !== 'running') {
-      releaseAdoptionToPending(runId)
+      abandonAdoption(runId)
       if (!TERMINAL_STATUSES.has(run.status)) return undefined
       return {
         kind: 'terminal',
@@ -258,10 +265,9 @@ export async function recoverRemoteRun(
       binding.onAbandoned?.()
       return undefined
     }
-    releaseAdoptionToPending(runId)
     return binding
   } catch (err) {
-    releaseAdoptionToPending(runId)
+    abandonAdoption(runId)
     throw err
   }
 }
@@ -311,7 +317,14 @@ export async function reconcileOrphanedRuns(
       void failUnadoptedRemote(run, opts.reconnectTimeoutMs, opts.broadcast)
     }, opts.reconnectTimeoutMs)
     timer.unref()
-    pendingExpiry.set(run.id, { timer, claim: 'pending', expiredWhileAdopting: false })
+    pendingExpiry.set(run.id, {
+      timer,
+      claim: 'pending',
+      expiredWhileAdopting: false,
+      run,
+      reconnectTimeoutMs: opts.reconnectTimeoutMs,
+      broadcast: opts.broadcast,
+    })
   }
 
   activeReconcile = handle
