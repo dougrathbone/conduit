@@ -1,6 +1,8 @@
 import type { ReliableRunFrame } from '../shared/workerControl'
 
-export type UnsequencedRunFrame = Omit<ReliableRunFrame, 'sequence'>
+type DistributiveOmit<T, K extends PropertyKey> = T extends T ? Omit<T, K> : never
+
+export type UnsequencedRunFrame = DistributiveOmit<ReliableRunFrame, 'sequence'>
 
 /**
  * Per-run send callback used by `drain`.

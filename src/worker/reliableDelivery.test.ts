@@ -166,6 +166,22 @@ describe('reliable run-frame protocol', () => {
 })
 
 describe('ReliableDeliveryQueue', () => {
+  it('preserves workspacePath and assignId on an enqueued run:started frame', () => {
+    const queue = createReliableDeliveryQueue()
+    const frame = queue.enqueue({
+      type: 'run:started',
+      runId: 'run-1',
+      workspacePath: '/tmp/ws',
+      assignId: 'assign-1',
+    })
+    expect(frame).toMatchObject({
+      type: 'run:started',
+      sequence: 1,
+      workspacePath: '/tmp/ws',
+      assignId: 'assign-1',
+    })
+  })
+
   it('allocates sequences once and drops only prefix frames covered by a contiguous ACK of sent frames', async () => {
     const queue = createReliableDeliveryQueue()
     queue.enqueue(started())

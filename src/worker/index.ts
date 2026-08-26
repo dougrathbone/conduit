@@ -31,14 +31,23 @@ import type {
   WorkerCapabilities,
   WorkerToServerMessage,
 } from '../shared/workerControl'
-import { WORKER_HEARTBEAT_INTERVAL_MS } from '../shared/workerControl'
+import { DEFAULT_WORKER_RECONNECT_TIMEOUT_MS, WORKER_HEARTBEAT_INTERVAL_MS } from '../shared/workerControl'
 import { LocalWorkerFactory } from '../server/workers/localWorker'
 import { deleteMcpConfig } from '../main/utils/mcpConfigFile'
 import { deleteClaudeConfig } from '../main/utils/claudeConfig'
 import { deleteWorkspace } from '../main/execution/workspace'
 import { removeWorktree } from '../server/gitOps'
-import { isWorkerOneShot, planAfterDisconnect, planAfterRunExit } from './oneShot'
+import { isWorkerOneShot, planAfterRunExit } from './oneShot'
 import { createEventFlushQueue } from './eventFlush'
+import { createReliableDeliveryQueue, type ReliableDeliveryQueue } from './reliableDelivery'
+import {
+  createReconnectPolicy,
+  expireDeliveryRecovery,
+  hasPendingDelivery,
+  pendingRunIds,
+  recordLocalExit,
+  replayFromCursor,
+} from './reconnectPolicy'
 import { createIdempotentShutdown, sendWsJson } from './wsSend'
 
 const SERVER_URL = process.env.CONDUIT_SERVER_URL?.trim()
@@ -63,13 +72,14 @@ const STALE_WORKSPACE_GRACE_MS = 6 * 60 * 60 * 1000 // 6h
 
 const factory = new LocalWorkerFactory()
 const handles = new Map<string, WorkerHandle>()
+const deliveryQueues = new Map<string, ReliableDeliveryQueue>()
+const policy = createReconnectPolicy({ timeoutMs: DEFAULT_WORKER_RECONNECT_TIMEOUT_MS })
 
 let ws: WebSocket | null = null
 let heartbeat: NodeJS.Timeout | null = null
-let reconnectDelayMs = 1000
 let shuttingDown = false
-/** Set on the first run:assign. One-shot workers exit after this run (or if
- *  the socket drops after assignment); pooled workers ignore the flag. */
+/** Set on the first run:assign. One-shot workers still reconnect until terminal
+ *  delivery is acknowledged; they do not exit on a dropped control plane. */
 let acceptedAssignment = false
 
 function send(msg: WorkerToServerMessage, timeoutMs?: number): Promise<void> {
@@ -145,13 +155,33 @@ function sweepStaleArtifacts(): void {
   }
 }
 
+function maybeExitAfterDelivery(): void {
+  if (
+    planAfterRunExit(process.env, { hasPendingDelivery: hasPendingDelivery(deliveryQueues) }) === 'exit'
+  ) {
+    void shutdown(0)
+  }
+}
+
+async function drainOrDefer(delivery: ReliableDeliveryQueue): Promise<void> {
+  try {
+    await delivery.drain((frame) => send(frame))
+  } catch {
+    // Socket write failed; run:resume after reconnect replays unwritten frames.
+  }
+}
+
 async function execute(spec: RunSpec, assignId?: string): Promise<void> {
   const runId = spec.runId
   console.log(`[worker] Starting run ${runId} (${spec.runner}, workspace: ${spec.workspace.kind})`)
 
+  const delivery = createReliableDeliveryQueue()
+  deliveryQueues.set(runId, delivery)
+
   const events = createEventFlushQueue({
     runId,
     send: (frame) => send(frame),
+    delivery,
   })
 
   const sink: WorkerEventSink = {
@@ -163,13 +193,13 @@ async function execute(spec: RunSpec, assignId?: string): Promise<void> {
     },
     onExit: (status, exitCode) => {
       void (async () => {
-        await events.flush()
         const handle = handles.get(runId)
         handles.delete(runId)
-        await send({ type: 'run:exit', runId, status, exitCode })
+        await recordLocalExit(events, delivery, { type: 'run:exit', runId, status, exitCode })
+        await drainOrDefer(delivery)
         console.log(`[worker] Run ${runId} exited: ${status} (code ${exitCode ?? 'n/a'})`)
         if (handle) cleanupAfterRun(runId, handle)
-        if (planAfterRunExit() === 'exit') await shutdown()
+        maybeExitAfterDelivery()
       })()
     },
   }
@@ -177,20 +207,58 @@ async function execute(spec: RunSpec, assignId?: string): Promise<void> {
   try {
     const handle = await factory.startRun(spec, sink)
     handles.set(runId, handle)
-    void send({ type: 'run:started', runId, workspacePath: handle.workspacePath, assignId })
+    delivery.enqueue({ type: 'run:started', runId, workspacePath: handle.workspacePath, assignId })
+    await drainOrDefer(delivery)
   } catch (err) {
     // Prep failed (clone, config write, spawn args) — the factory rolled back
     // its partial work; tell the server so the run is marked failed.
     console.error(`[worker] Failed to start run ${runId}:`, err)
-    await events.flush()
-    await send({
+    await recordLocalExit(events, delivery, {
       type: 'run:exit',
       runId,
       status: 'failed',
       exitCode: null,
     })
-    if (planAfterRunExit() === 'exit') await shutdown()
+    await drainOrDefer(delivery)
+    maybeExitAfterDelivery()
   }
+}
+
+function applyAck(runId: string, sequence: number): void {
+  const delivery = deliveryQueues.get(runId)
+  if (!delivery) return
+  policy.noteAdopted()
+  delivery.acknowledge(sequence)
+  if (delivery.terminalAcknowledged) {
+    deliveryQueues.delete(runId)
+    maybeExitAfterDelivery()
+  }
+}
+
+function applyResume(runId: string, sequence: number): void {
+  const delivery = deliveryQueues.get(runId)
+  if (!delivery) return
+  policy.noteAdopted()
+  void replayFromCursor(delivery, sequence, (frame) => send(frame)).catch(() => {
+    // Disconnect during replay; the next resume retries from the durable cursor.
+  })
+}
+
+async function expireRecovery(): Promise<void> {
+  shuttingDown = true
+  policy.cancel()
+  const pending = pendingRunIds(handles.keys(), deliveryQueues)
+  console.error(
+    `[worker] Delivery recovery expired — giving up on run(s): ${pending.join(', ') || '(none)'}`
+  )
+  const result = await expireDeliveryRecovery({ handles, pendingRunIds: pending })
+  handles.clear()
+  try {
+    ws?.close(1001, 'delivery recovery expired')
+  } catch {
+    // best-effort
+  }
+  await shutdown(result.exitCode)
 }
 
 function connect(): void {
@@ -201,12 +269,29 @@ function connect(): void {
   ws = sock
 
   sock.on('open', () => {
-    reconnectDelayMs = 1000
+    policy.noteOpen()
     const caps = detectCapabilities()
+    const activeRunIds = [...handles.keys()]
+    const pending = pendingRunIds(activeRunIds, deliveryQueues)
     console.log(`[worker] Connected to ${SERVER_URL} as ${WORKER_ID} (runners: ${caps.runners.join(', ') || 'none'})`)
-    void send({ type: 'worker:hello', workerId: WORKER_ID, capabilities: caps, activeRunIds: [...handles.keys()] })
+    void send({
+      type: 'worker:hello',
+      workerId: WORKER_ID,
+      capabilities: caps,
+      activeRunIds,
+      pendingRunIds: pending,
+    }).catch((err) => {
+      console.error('[worker] hello failed:', err)
+    })
+    if (pending.length === 0) policy.noteAdopted()
     heartbeat = setInterval(() => {
-      void send({ type: 'worker:heartbeat', workerId: WORKER_ID, activeRunIds: [...handles.keys()] })
+      void send({
+        type: 'worker:heartbeat',
+        workerId: WORKER_ID,
+        activeRunIds: [...handles.keys()],
+      }).catch(() => {
+        // Heartbeat write failures are retried on the next interval or reconnect.
+      })
     }, WORKER_HEARTBEAT_INTERVAL_MS)
   })
 
@@ -225,10 +310,19 @@ function connect(): void {
         return
       }
       acceptedAssignment = true
+      if (typeof msg.reconnectTimeoutMs === 'number') {
+        policy.setTimeoutMs(msg.reconnectTimeoutMs)
+      }
       void execute(msg.spec, msg.assignId)
     } else if (msg.type === 'run:cancel') {
       console.log(`[worker] Cancel requested for run ${msg.runId}`)
       void handles.get(msg.runId)?.cancel()
+    } else if (msg.type === 'run:ack') {
+      applyAck(msg.runId, msg.sequence)
+    } else if (msg.type === 'run:resume') {
+      applyResume(msg.runId, msg.sequence)
+    } else if (msg.type === 'run:reject') {
+      console.warn(`[worker] run:reject ${msg.runId}: ${msg.reason}`)
     }
   })
 
@@ -237,19 +331,12 @@ function connect(): void {
     heartbeat = null
     ws = null
     if (shuttingDown) return
-    // One-shot: exit once a run was assigned so a dropped control plane does
-    // not leave a billed Fargate task reconnecting. Before assignment, keep
-    // reconnecting so startup blips can still complete assignTo.
-    if (planAfterDisconnect() === 'exit' && acceptedAssignment) {
-      console.warn(`[worker] Disconnected (${code} ${reason}) — one-shot worker exiting`)
-      void shutdown()
-      return
-    }
-    // Pooled (and one-shot pre-assignment): runs keep executing locally;
-    // events drop while disconnected and run:exit is delivered on reconnect.
-    console.warn(`[worker] Disconnected (${code} ${reason}) — reconnecting in ${reconnectDelayMs}ms`)
-    setTimeout(connect, reconnectDelayMs)
-    reconnectDelayMs = Math.min(reconnectDelayMs * 2, 30_000)
+    const recovering = handles.size > 0 || deliveryQueues.size > 0
+    if (recovering) policy.noteDisconnect()
+    console.warn(`[worker] Disconnected (${code} ${reason}) — reconnecting`)
+    policy.scheduleReconnect(connect, () => {
+      void expireRecovery()
+    })
   })
 
   sock.on('error', (err) => {
@@ -257,9 +344,11 @@ function connect(): void {
   })
 }
 
-const shutdown = createIdempotentShutdown(async () => {
+const shutdown = createIdempotentShutdown(async (exitCode) => {
   shuttingDown = true
+  policy.cancel()
   if (heartbeat) clearInterval(heartbeat)
+  heartbeat = null
   console.log(`[worker] Shutting down — cancelling ${handles.size} active run(s)`)
   await factory.shutdown()
   handles.clear()
@@ -270,7 +359,7 @@ const shutdown = createIdempotentShutdown(async () => {
   }
   // Give the close frame a moment to flush before exiting.
   await new Promise<void>((resolve) => setTimeout(resolve, 500))
-  process.exit(0)
+  process.exit(exitCode)
 })
 
 process.on('SIGINT', () => void shutdown())
