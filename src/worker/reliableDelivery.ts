@@ -19,6 +19,8 @@ export interface ReliableDeliveryQueue {
   acknowledge(sequence: number): void
   resumeAfter(sequence: number): void
   drain(send: ReliableDeliverySend): Promise<void>
+  /** Stop sending until a later resumeAfter applies a cursor for this connection. */
+  holdSends(): void
   pending(): ReliableRunFrame[]
   readonly terminalAcknowledged: boolean
 }
@@ -35,6 +37,7 @@ export function createReliableDeliveryQueue(): ReliableDeliveryQueue {
   let sentThrough = 0
   let terminalSequence: number | null = null
   let terminalAcked = false
+  let sendsHeld = false
   let chain: Promise<void> = Promise.resolve()
 
   const highestEnqueued = (): number => nextSequence - 1
@@ -61,14 +64,24 @@ export function createReliableDeliveryQueue(): ReliableDeliveryQueue {
     }
   }
 
-  const resumeAfter = (sequence: number): void => {
+  const applyResume = (sequence: number): void => {
     if (!Number.isSafeInteger(sequence) || sequence < 0) return
     if (sequence > highestEnqueued()) return
     sentThrough = sequence
+    sendsHeld = false
+  }
+
+  const resumeAfter = (sequence: number): void => {
+    chain = chain.then(
+      () => applyResume(sequence),
+      () => applyResume(sequence)
+    )
   }
 
   const drainOnce = async (send: ReliableDeliverySend): Promise<void> => {
+    if (sendsHeld) return
     while (true) {
+      if (sendsHeld) return
       const next = frames.find((frame) => frame.sequence > ackedThrough && frame.sequence > sentThrough)
       if (!next) return
       try {
@@ -77,7 +90,8 @@ export function createReliableDeliveryQueue(): ReliableDeliveryQueue {
         // Leave sentThrough unchanged so the next drain retries this frame.
         throw err
       }
-      if (next.sequence > sentThrough) sentThrough = next.sequence
+      if (next.sequence === Math.max(ackedThrough, sentThrough) + 1) sentThrough = next.sequence
+      if (sendsHeld) return
     }
   }
 
@@ -94,6 +108,9 @@ export function createReliableDeliveryQueue(): ReliableDeliveryQueue {
     acknowledge,
     resumeAfter,
     drain,
+    holdSends: () => {
+      sendsHeld = true
+    },
     pending: () => frames.filter((frame) => frame.sequence > ackedThrough),
     get terminalAcknowledged() {
       return terminalAcked

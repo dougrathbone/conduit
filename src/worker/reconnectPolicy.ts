@@ -1,5 +1,6 @@
 import type { WorkerRunExitMessage } from '../shared/workerControl'
 import type { EventFlushQueue } from './eventFlush'
+import { planAfterRunExit } from './oneShot'
 import type { ReliableDeliveryQueue, ReliableDeliverySend } from './reliableDelivery'
 
 export const RECONNECT_INITIAL_DELAY_MS = 1_000
@@ -12,13 +13,14 @@ export interface ReconnectClock {
 }
 
 export interface ReconnectPolicy {
-  noteDisconnect(): void
+  noteDisconnect(runIds?: Iterable<string>): void
   noteOpen(): void
-  /** Ends the current outage after run:resume or a covering ACK. */
-  noteAdopted(): void
+  /** Mark one pending run adopted (resume) or terminally handled (ACK/reject). */
+  noteHandled(runId: string): void
   isExpired(): boolean
   remainingMs(): number
   setTimeoutMs(ms: number): void
+  resetBackoff(): void
   scheduleReconnect(onReconnect: () => void, onExpired: () => void): void
   cancel(): void
 }
@@ -31,8 +33,8 @@ const systemClock: ReconnectClock = {
 
 /**
  * Capped exponential reconnect delays with one deadline measured from the first
- * disconnect. A TCP/WebSocket open does not reset that deadline; only adoption
- * (resume or covering ACK) does.
+ * disconnect. A TCP/WebSocket open does not reset that deadline; it clears only
+ * after every pending run is resumed or terminally handled.
  */
 export function createReconnectPolicy(opts: {
   timeoutMs: number
@@ -46,6 +48,7 @@ export function createReconnectPolicy(opts: {
   let timeoutMs = opts.timeoutMs
   let delayMs = initialDelayMs
   let outageStartedAt: number | null = null
+  let awaiting = new Set<string>()
   let timer: unknown = null
 
   const cancel = (): void => {
@@ -62,22 +65,39 @@ export function createReconnectPolicy(opts: {
 
   const isExpired = (): boolean => outageStartedAt !== null && remainingMs() === 0
 
+  const clearOutage = (): void => {
+    outageStartedAt = null
+    awaiting = new Set()
+    delayMs = initialDelayMs
+    cancel()
+  }
+
   return {
-    noteDisconnect(): void {
+    noteDisconnect(runIds: Iterable<string> = []): void {
+      const ids = [...runIds]
+      if (ids.length === 0) return
       if (outageStartedAt === null) outageStartedAt = clock.now()
+      awaiting = new Set(ids)
     },
     noteOpen(): void {
       cancel()
     },
-    noteAdopted(): void {
-      cancel()
-      outageStartedAt = null
-      delayMs = initialDelayMs
+    noteHandled(runId: string): void {
+      if (awaiting.size === 0) return
+      awaiting.delete(runId)
+      if (awaiting.size === 0) clearOutage()
     },
     isExpired,
     remainingMs,
     setTimeoutMs(ms: number): void {
       if (Number.isFinite(ms) && ms > 0) timeoutMs = ms
+    },
+    resetBackoff(): void {
+      delayMs = initialDelayMs
+      if (awaiting.size === 0) {
+        outageStartedAt = null
+        cancel()
+      }
     },
     cancel,
     scheduleReconnect(onReconnect, onExpired): void {
@@ -123,13 +143,58 @@ export function shutdownExitCode(opts: { deliveryExpired: boolean }): 0 | 1 {
   return opts.deliveryExpired ? 1 : 0
 }
 
+export function shouldShutdownAfterDelivery(opts: {
+  shuttingDown: boolean
+  hasPendingDelivery: boolean
+  env?: NodeJS.ProcessEnv
+}): boolean {
+  if (opts.shuttingDown) return false
+  return planAfterRunExit(opts.env, { hasPendingDelivery: opts.hasPendingDelivery }) === 'exit'
+}
+
+export function holdAllSends(
+  queues: Map<string, Pick<ReliableDeliveryQueue, 'holdSends'>>
+): void {
+  for (const queue of queues.values()) queue.holdSends()
+}
+
+export type DeliveryAckKind = 'ignored' | 'prefix' | 'terminal'
+
+export function applyDeliveryAck(
+  delivery: Pick<ReliableDeliveryQueue, 'acknowledge' | 'pending' | 'terminalAcknowledged'>,
+  sequence: number
+): DeliveryAckKind {
+  const wasTerminal = delivery.terminalAcknowledged
+  const pendingBefore = delivery.pending().length
+  delivery.acknowledge(sequence)
+  if (delivery.terminalAcknowledged && !wasTerminal) return 'terminal'
+  if (delivery.pending().length < pendingBefore) return 'prefix'
+  return 'ignored'
+}
+
+export async function rejectAssignedRun<H extends { cancel(): Promise<void> }>(opts: {
+  runId: string
+  handles: Map<string, H>
+  deliveryQueues: Map<string, unknown>
+}): Promise<{ cancelled: boolean; removed: boolean; handle?: H }> {
+  const handle = opts.handles.get(opts.runId)
+  const removed = opts.deliveryQueues.delete(opts.runId)
+  opts.handles.delete(opts.runId)
+  if (handle) await handle.cancel()
+  return { cancelled: Boolean(handle), removed, handle }
+}
+
 /** Flush trailing events, then enqueue the terminal frame after them. */
 export async function recordLocalExit(
   events: Pick<EventFlushQueue, 'flush'>,
   delivery: Pick<ReliableDeliveryQueue, 'enqueue'>,
   frame: Omit<WorkerRunExitMessage, 'sequence'>
 ): Promise<void> {
-  await events.flush()
+  try {
+    await events.flush()
+  } catch {
+    // Send failures are deferred; buffered events should already be on the spool.
+  }
   delivery.enqueue(frame)
 }
 

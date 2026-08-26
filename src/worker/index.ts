@@ -37,16 +37,20 @@ import { deleteMcpConfig } from '../main/utils/mcpConfigFile'
 import { deleteClaudeConfig } from '../main/utils/claudeConfig'
 import { deleteWorkspace } from '../main/execution/workspace'
 import { removeWorktree } from '../server/gitOps'
-import { isWorkerOneShot, planAfterRunExit } from './oneShot'
+import { isWorkerOneShot } from './oneShot'
 import { createEventFlushQueue } from './eventFlush'
 import { createReliableDeliveryQueue, type ReliableDeliveryQueue } from './reliableDelivery'
 import {
   createReconnectPolicy,
   expireDeliveryRecovery,
   hasPendingDelivery,
+  holdAllSends,
   pendingRunIds,
   recordLocalExit,
+  rejectAssignedRun,
   replayFromCursor,
+  applyDeliveryAck,
+  shouldShutdownAfterDelivery,
 } from './reconnectPolicy'
 import { createIdempotentShutdown, sendWsJson } from './wsSend'
 
@@ -157,10 +161,15 @@ function sweepStaleArtifacts(): void {
 
 function maybeExitAfterDelivery(): void {
   if (
-    planAfterRunExit(process.env, { hasPendingDelivery: hasPendingDelivery(deliveryQueues) }) === 'exit'
+    !shouldShutdownAfterDelivery({
+      shuttingDown,
+      hasPendingDelivery: hasPendingDelivery(deliveryQueues),
+      env: process.env,
+    })
   ) {
-    void shutdown(0)
+    return
   }
+  void shutdown(0)
 }
 
 async function drainOrDefer(delivery: ReliableDeliveryQueue): Promise<void> {
@@ -193,6 +202,7 @@ async function execute(spec: RunSpec, assignId?: string): Promise<void> {
     },
     onExit: (status, exitCode) => {
       void (async () => {
+        if (!deliveryQueues.has(runId)) return
         const handle = handles.get(runId)
         handles.delete(runId)
         await recordLocalExit(events, delivery, { type: 'run:exit', runId, status, exitCode })
@@ -227,9 +237,9 @@ async function execute(spec: RunSpec, assignId?: string): Promise<void> {
 function applyAck(runId: string, sequence: number): void {
   const delivery = deliveryQueues.get(runId)
   if (!delivery) return
-  policy.noteAdopted()
-  delivery.acknowledge(sequence)
-  if (delivery.terminalAcknowledged) {
+  const kind = applyDeliveryAck(delivery, sequence)
+  if (kind === 'terminal') {
+    policy.noteHandled(runId)
     deliveryQueues.delete(runId)
     maybeExitAfterDelivery()
   }
@@ -238,10 +248,18 @@ function applyAck(runId: string, sequence: number): void {
 function applyResume(runId: string, sequence: number): void {
   const delivery = deliveryQueues.get(runId)
   if (!delivery) return
-  policy.noteAdopted()
+  policy.noteHandled(runId)
   void replayFromCursor(delivery, sequence, (frame) => send(frame)).catch(() => {
     // Disconnect during replay; the next resume retries from the durable cursor.
   })
+}
+
+async function applyReject(runId: string, reason: string): Promise<void> {
+  console.warn(`[worker] run:reject ${runId}: ${reason}`)
+  const result = await rejectAssignedRun({ runId, handles, deliveryQueues })
+  if (result.handle) cleanupAfterRun(runId, result.handle)
+  policy.noteHandled(runId)
+  maybeExitAfterDelivery()
 }
 
 async function expireRecovery(): Promise<void> {
@@ -283,7 +301,7 @@ function connect(): void {
     }).catch((err) => {
       console.error('[worker] hello failed:', err)
     })
-    if (pending.length === 0) policy.noteAdopted()
+    if (pending.length === 0) policy.resetBackoff()
     heartbeat = setInterval(() => {
       void send({
         type: 'worker:heartbeat',
@@ -322,7 +340,7 @@ function connect(): void {
     } else if (msg.type === 'run:resume') {
       applyResume(msg.runId, msg.sequence)
     } else if (msg.type === 'run:reject') {
-      console.warn(`[worker] run:reject ${msg.runId}: ${msg.reason}`)
+      void applyReject(msg.runId, msg.reason)
     }
   })
 
@@ -332,7 +350,10 @@ function connect(): void {
     ws = null
     if (shuttingDown) return
     const recovering = handles.size > 0 || deliveryQueues.size > 0
-    if (recovering) policy.noteDisconnect()
+    if (recovering) {
+      holdAllSends(deliveryQueues)
+      policy.noteDisconnect(pendingRunIds(handles.keys(), deliveryQueues))
+    }
     console.warn(`[worker] Disconnected (${code} ${reason}) — reconnecting`)
     policy.scheduleReconnect(connect, () => {
       void expireRecovery()

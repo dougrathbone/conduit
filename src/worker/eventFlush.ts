@@ -34,10 +34,19 @@ export function createEventFlushQueue(opts: {
         for (const frame of frames) {
           opts.delivery.enqueue(frame)
         }
-        await opts.delivery.drain((frame) => opts.send(frame))
+        try {
+          await opts.delivery.drain((frame) => opts.send(frame))
+        } catch {
+          // Defer send failure; frames stay on the spool until resume/replay.
+        }
       } else {
-        for (const frame of frames) {
-          await opts.send(frame)
+        try {
+          for (const frame of frames) {
+            await opts.send(frame)
+          }
+        } catch {
+          buffer.unshift(...events)
+          return
         }
       }
     }

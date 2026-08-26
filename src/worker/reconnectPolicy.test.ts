@@ -7,9 +7,13 @@ import {
   createReconnectPolicy,
   expireDeliveryRecovery,
   hasPendingDelivery,
+  holdAllSends,
   pendingRunIds,
   recordLocalExit,
+  rejectAssignedRun,
   replayFromCursor,
+  applyDeliveryAck,
+  shouldShutdownAfterDelivery,
   shutdownExitCode,
 } from './reconnectPolicy'
 
@@ -52,7 +56,7 @@ describe('ReconnectPolicy backoff', () => {
       })
     }
 
-    policy.noteDisconnect()
+    policy.noteDisconnect(['run-1'])
     policy.scheduleReconnect(connect, () => {
       throw new Error('deadline should not expire in this test')
     })
@@ -92,7 +96,7 @@ describe('ReconnectPolicy outage deadline', () => {
     vi.useFakeTimers()
     vi.setSystemTime(0)
     const policy = createReconnectPolicy({ timeoutMs: 5_000, clock: injectedClock() })
-    policy.noteDisconnect()
+    policy.noteDisconnect(['run-1'])
     expect(policy.isExpired()).toBe(false)
 
     vi.advanceTimersByTime(1_000)
@@ -111,7 +115,7 @@ describe('ReconnectPolicy outage deadline', () => {
     const policy = createReconnectPolicy({ timeoutMs: 500, clock: injectedClock() })
     const reconnects: number[] = []
     const expiries: number[] = []
-    policy.noteDisconnect()
+    policy.noteDisconnect(['run-1'])
     policy.scheduleReconnect(
       () => reconnects.push(Date.now()),
       () => expiries.push(Date.now())
@@ -127,11 +131,27 @@ describe('ReconnectPolicy outage deadline', () => {
     vi.useFakeTimers()
     vi.setSystemTime(0)
     const policy = createReconnectPolicy({ timeoutMs: 5_000, clock: injectedClock() })
-    policy.noteDisconnect()
+    policy.noteDisconnect(['run-1'])
     vi.advanceTimersByTime(2_000)
     policy.noteOpen()
-    policy.noteAdopted()
-    policy.noteDisconnect()
+    policy.noteHandled('run-1')
+    policy.noteDisconnect(['run-1'])
+    vi.advanceTimersByTime(4_999)
+    expect(policy.isExpired()).toBe(false)
+    vi.advanceTimersByTime(1)
+    expect(policy.isExpired()).toBe(true)
+  })
+
+  it('resets the outage only after every pending run is resumed or terminally handled', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const policy = createReconnectPolicy({ timeoutMs: 5_000, clock: injectedClock() })
+    policy.noteDisconnect(['run-a', 'run-b'])
+    policy.noteHandled('run-a')
+    vi.advanceTimersByTime(1_000)
+    expect(policy.isExpired()).toBe(false)
+    policy.noteHandled('run-b')
+    policy.noteDisconnect(['run-c'])
     vi.advanceTimersByTime(4_999)
     expect(policy.isExpired()).toBe(false)
     vi.advanceTimersByTime(1)
@@ -277,6 +297,124 @@ describe('local exit and ACK-gated shutdown', () => {
     release()
     await Promise.all([firstDrain, secondDrain])
     expect(sent).toEqual([1, 2, 3])
+  })
+
+  it('holds reconnect drain until run:resume so a new socket does not skip the server cursor', async () => {
+    const delivery = createReliableDeliveryQueue()
+    delivery.enqueue(started('run-1'))
+    delivery.enqueue(event('run-1', 'a'))
+    await delivery.drain(async () => {})
+    holdAllSends(new Map([['run-1', delivery]]))
+    const sent: number[] = []
+    await delivery.drain(async (frame) => {
+      sent.push(frame.sequence)
+    })
+    expect(sent).toEqual([])
+    expect(delivery.pending().map((frame) => frame.sequence)).toEqual([1, 2])
+    await replayFromCursor(delivery, 1, async (frame) => {
+      sent.push(frame.sequence)
+    })
+    expect(sent).toEqual([2])
+  })
+})
+
+describe('pooled-worker outage adoption', () => {
+  it('does not reset the worker-wide deadline when only run A resumes and run B is still pending', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const policy = createReconnectPolicy({ timeoutMs: 5_000, clock: injectedClock() })
+    policy.noteDisconnect(['run-a', 'run-b'])
+    vi.advanceTimersByTime(1_000)
+    policy.noteOpen()
+    policy.noteHandled('run-a')
+    vi.advanceTimersByTime(3_999)
+    expect(policy.isExpired()).toBe(false)
+    vi.advanceTimersByTime(1)
+    expect(policy.isExpired()).toBe(true)
+  })
+
+  it('does not reset the outage deadline on a stale or non-covering ACK', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const policy = createReconnectPolicy({ timeoutMs: 5_000, clock: injectedClock() })
+    const a = createReliableDeliveryQueue()
+    a.enqueue(started('run-a'))
+    a.enqueue(event('run-a', 'x'))
+    const b = createReliableDeliveryQueue()
+    b.enqueue(started('run-b'))
+    await a.drain(async () => {})
+    policy.noteDisconnect(['run-a', 'run-b'])
+    policy.noteOpen()
+    expect(applyDeliveryAck(a, 1)).toBe('prefix')
+    expect(applyDeliveryAck(a, 1)).toBe('ignored')
+    expect(a.terminalAcknowledged).toBe(false)
+    vi.advanceTimersByTime(5_000)
+    expect(policy.isExpired()).toBe(true)
+    expect(b.pending().map((frame) => frame.sequence)).toEqual([1])
+  })
+
+  it('resets the outage only after every pending run is resumed or terminally handled', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(0)
+    const policy = createReconnectPolicy({ timeoutMs: 5_000, clock: injectedClock() })
+    policy.noteDisconnect(['run-a', 'run-b'])
+    policy.noteHandled('run-a')
+    vi.advanceTimersByTime(1_000)
+    expect(policy.isExpired()).toBe(false)
+    policy.noteHandled('run-b')
+    policy.noteDisconnect(['run-c'])
+    vi.advanceTimersByTime(4_999)
+    expect(policy.isExpired()).toBe(false)
+    vi.advanceTimersByTime(1)
+    expect(policy.isExpired()).toBe(true)
+  })
+})
+
+describe('run:reject terminal handling', () => {
+  it('removes a rejected run, cancels its handle, and allows one-shot exit once no pending delivery remains', async () => {
+    const oneShot = { CONDUIT_WORKER_ONE_SHOT: 'true' }
+    const cancelled: string[] = []
+    const handles = new Map([
+      [
+        'run-1',
+        {
+          cancel: async (): Promise<void> => {
+            cancelled.push('run-1')
+          },
+        },
+      ],
+    ])
+    const delivery = createReliableDeliveryQueue()
+    delivery.enqueue(started('run-1'))
+    delivery.enqueue(exit('run-1'))
+    const queues = new Map([['run-1', delivery]])
+
+    const result = await rejectAssignedRun({
+      runId: 'run-1',
+      handles,
+      deliveryQueues: queues,
+    })
+    expect(cancelled).toEqual(['run-1'])
+    expect(result.removed).toBe(true)
+    expect(queues.has('run-1')).toBe(false)
+    expect(handles.has('run-1')).toBe(false)
+    expect(hasPendingDelivery(queues)).toBe(false)
+    expect(planAfterRunExit(oneShot, { hasPendingDelivery: hasPendingDelivery(queues) })).toBe('exit')
+  })
+})
+
+describe('shouldShutdownAfterDelivery', () => {
+  it('does not request one-shot exit when shutdown is already in progress', () => {
+    const oneShot = { CONDUIT_WORKER_ONE_SHOT: 'true' }
+    expect(
+      shouldShutdownAfterDelivery({ shuttingDown: true, hasPendingDelivery: false, env: oneShot })
+    ).toBe(false)
+    expect(
+      shouldShutdownAfterDelivery({ shuttingDown: false, hasPendingDelivery: false, env: oneShot })
+    ).toBe(true)
+    expect(
+      shouldShutdownAfterDelivery({ shuttingDown: false, hasPendingDelivery: true, env: oneShot })
+    ).toBe(false)
   })
 })
 

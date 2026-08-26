@@ -288,6 +288,33 @@ describe('ReliableDeliveryQueue', () => {
     expect(queue.pending().map((frame) => frame.sequence)).toEqual([1, 2, 3])
   })
 
+  it('does not skip a pending range when resumeAfter races an in-flight drain', async () => {
+    const queue = createReliableDeliveryQueue()
+    queue.enqueue(started())
+    queue.enqueue(event('a'))
+    queue.enqueue(exit())
+    const sent: number[] = []
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const send = async (frame: ReliableRunFrame): Promise<void> => {
+      sent.push(frame.sequence)
+      if (frame.sequence === 3 && sent.filter((s) => s === 3).length === 1) {
+        await gate
+      }
+    }
+
+    const first = queue.drain(send)
+    await viWaitFor(() => sent.length === 3)
+    expect(sent).toEqual([1, 2, 3])
+    queue.resumeAfter(0)
+    const replay = queue.drain(send)
+    release()
+    await Promise.all([first, replay])
+    expect(sent).toEqual([1, 2, 3, 1, 2, 3])
+  })
+
   it('does not advance sentThrough when send rejects, so a later drain retries the unwritten frame', async () => {
     const queue = createReliableDeliveryQueue()
     queue.enqueue(started())

@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import type { RunEventInit } from '../shared/types'
 import { createEventFlushQueue } from './eventFlush'
 import { createReliableDeliveryQueue } from './reliableDelivery'
+import { recordLocalExit, replayFromCursor } from './reconnectPolicy'
 
 function raw(text: string): RunEventInit {
   return { kind: 'raw', stream: 'stdout', text }
@@ -40,6 +41,52 @@ describe('createEventFlushQueue', () => {
     expect(delivery.pending().map((frame) => frame.sequence)).toEqual([1, 2])
     delivery.acknowledge(1)
     expect(delivery.pending().map((frame) => frame.sequence)).toEqual([2])
+  })
+
+  it('push with a rejecting send does not unhandled-reject, and local exit still enqueues after events for later resume', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason)
+    }
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const delivery = createReliableDeliveryQueue()
+      const events = createEventFlushQueue({
+        runId: 'run-1',
+        delivery,
+        send: async () => {
+          throw new Error('WebSocket is not open')
+        },
+      })
+      delivery.enqueue({ type: 'run:started', runId: 'run-1' })
+      events.push(raw('a'))
+      await events.flush()
+      events.push(raw('b'))
+      await events.flush()
+      expect(unhandled).toEqual([])
+
+      await recordLocalExit(events, delivery, {
+        type: 'run:exit',
+        runId: 'run-1',
+        status: 'completed',
+        exitCode: 0,
+      })
+      expect(delivery.pending().map((frame) => frame.type)).toEqual([
+        'run:started',
+        'run:event',
+        'run:event',
+        'run:exit',
+      ])
+
+      const sent: string[] = []
+      await replayFromCursor(delivery, 0, async (frame) => {
+        if (frame.type === 'run:event') sent.push(frame.events[0]?.text ?? '')
+        else sent.push(frame.type)
+      })
+      expect(sent).toEqual(['run:started', 'a', 'b', 'run:exit'])
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
   })
 })
 
