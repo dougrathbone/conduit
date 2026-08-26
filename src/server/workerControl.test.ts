@@ -635,6 +635,58 @@ describe('WorkerControlPlane', () => {
   })
 })
 
+describe('WorkerControlPlane lease', () => {
+  let ctx: TestCtx
+  afterEach(async () => {
+    await ctx?.close()
+    delete process.env.CONDUIT_WORKER_TOKEN
+  })
+
+  it('keeps a started run alive when run:event frames arrive without heartbeats', async () => {
+    ctx = await startServer({ leaseMs: 80 })
+    const worker = await connectWorker(ctx)
+    let exit: { status: string } | undefined
+    const handlePromise = ctx.controlPlane.assign(SPEC, {
+      onEvent: () => {},
+      onExit: (status) => {
+        exit = { status }
+      },
+    })
+    await worker.next()
+    worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId }))
+    await handlePromise
+
+    const pump = setInterval(() => {
+      worker.ws.send(
+        JSON.stringify({
+          type: 'run:event',
+          runId: SPEC.runId,
+          events: [{ kind: 'raw', stream: 'stdout', text: 'still working' }],
+        })
+      )
+    }, 25)
+    await new Promise((r) => setTimeout(r, 250))
+    clearInterval(pump)
+
+    expect(exit).toBeUndefined()
+    expect(ctx.controlPlane.connectedWorkerCount).toBe(1)
+  })
+
+  it('fails a started run when the worker is silent past the lease', async () => {
+    ctx = await startServer({ leaseMs: 80 })
+    const worker = await connectWorker(ctx)
+    const exited = new Promise<string>((resolve) => {
+      void ctx.controlPlane.assign(SPEC, {
+        onEvent: () => {},
+        onExit: (status) => resolve(status),
+      })
+    })
+    await worker.next()
+    worker.ws.send(JSON.stringify({ type: 'run:started', runId: SPEC.runId }))
+    await expect(exited).resolves.toBe('failed')
+  })
+})
+
 describe('worker control timeouts from supplied env', () => {
   it('reads assign and connect timeouts from the supplied env, not import-time globals', () => {
     expect(resolveAssignTimeoutMs({ CONDUIT_WORKER_ASSIGN_TIMEOUT_MS: '1500' })).toBe(1_500)

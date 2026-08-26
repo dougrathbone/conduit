@@ -8,6 +8,8 @@
  * dispatches the RunSpec to that exact worker via assignTo. When the run exits
  * (or is cancelled/fails) the task is stopped and DescribeTasks confirms
  * STOPPED. Factory shutdown stops every in-flight task the same way.
+ * Stop verification waits 60s — Fargate's default stopTimeout is 30s of
+ * SIGTERM before SIGKILL, so a 15s wait false-failed every StopTask.
  *
  * CONDUIT_WORKER_TOKEN: prefer baking it into the task definition as a
  * Secrets Manager secret (task def `secrets`), so it never appears in
@@ -58,7 +60,10 @@ import { reporter } from '../observability'
 export const FARGATE_WORKER_CPU = '2048'
 export const FARGATE_WORKER_MEMORY_MIB = '8192'
 
-const STOP_VERIFY_TIMEOUT_MS = 15_000
+/** Fargate default container stopTimeout: SIGTERM, then SIGKILL after 30s. */
+export const FARGATE_DEFAULT_STOP_TIMEOUT_MS = 30_000
+/** Must exceed {@link FARGATE_DEFAULT_STOP_TIMEOUT_MS}; DEACTIVATING is not STOPPED. */
+export const STOP_VERIFY_TIMEOUT_MS = 60_000
 const STOP_ATTEMPTS = 3
 const STOP_BACKOFF_MS = 50
 const UNCLEAN_RETRY_MS = 30_000

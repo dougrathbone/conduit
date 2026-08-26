@@ -4,8 +4,10 @@ import type { ECSClient } from '@aws-sdk/client-ecs'
 import type { RunSpec, WorkerEventSink, WorkerHandle } from '../../shared/worker'
 import type { WorkerControlPlane } from '../workerControl'
 import {
+  FARGATE_DEFAULT_STOP_TIMEOUT_MS,
   FARGATE_WORKER_CPU,
   FARGATE_WORKER_MEMORY_MIB,
+  STOP_VERIFY_TIMEOUT_MS,
   FargateWorkerFactory,
   buildFargateEcsClientConfig,
   isAllowlistedE2eModule,
@@ -211,6 +213,35 @@ describe('FargateWorkerFactory', () => {
     factory = new FargateWorkerFactory(cp.plane, baseConfig(), ecs as unknown as ECSClient, {
       uncleanRetryMs: 0,
     })
+  })
+
+  it('waits longer than Fargate default stopTimeout before giving up on STOPPED', () => {
+    expect(STOP_VERIFY_TIMEOUT_MS).toBeGreaterThan(FARGATE_DEFAULT_STOP_TIMEOUT_MS)
+  })
+
+  it('waits through DEACTIVATING until DescribeTasks reports STOPPED', async () => {
+    factory = new FargateWorkerFactory(cp.plane, baseConfig(), ecs as unknown as ECSClient, {
+      uncleanRetryMs: 0,
+      stopVerifyTimeoutMs: 400,
+      stopBackoffMs: 5,
+      stopAttempts: 1,
+    })
+    let describes = 0
+    const original = ecs.send.bind(ecs)
+    ecs.send = async (command) => {
+      if (command.constructor.name === 'DescribeTasksCommand') {
+        describes++
+        ecs.calls.push({ name: 'DescribeTasksCommand', input: (command.input ?? {}) as Record<string, unknown> })
+        if (describes < 3) {
+          return { tasks: [{ taskArn: TASK_ARN, lastStatus: 'DEACTIVATING', desiredStatus: 'STOPPED' }] }
+        }
+        return { tasks: [{ taskArn: TASK_ARN, lastStatus: 'STOPPED', desiredStatus: 'STOPPED' }] }
+      }
+      return original(command)
+    }
+    const handle = await factory.startRun(SPEC, sink)
+    await expect(handle.cancel()).resolves.toBeUndefined()
+    expect(describes).toBeGreaterThanOrEqual(3)
   })
 
   it('sends an exact RunTask shape with startedBy, tags, and 2 vCPU / 8192 MiB', async () => {

@@ -51,6 +51,8 @@ export interface WorkerControlPlaneOptions {
   assignTimeoutMs?: number
   connectTimeoutMs?: number
   maxMessageBytes?: number
+  /** Lease window; tests inject a short value. Default `WORKER_LEASE_MS`. */
+  leaseMs?: number
 }
 
 interface ConnectedWorker {
@@ -102,6 +104,7 @@ export class WorkerControlPlane {
   private readonly assignTimeoutMs: number
   private readonly connectTimeoutMs: number
   private readonly maxMessageBytes: number
+  private readonly leaseMs: number
   private nextAssignmentGeneration = 1
   /** Timed-out assignment identities; a retry on a new generation is not suppressed. */
   private ignoreNextStarted = new Set<StartedSuppression>()
@@ -110,8 +113,9 @@ export class WorkerControlPlane {
     this.assignTimeoutMs = options?.assignTimeoutMs ?? resolveAssignTimeoutMs()
     this.connectTimeoutMs = options?.connectTimeoutMs ?? resolveConnectTimeoutMs()
     this.maxMessageBytes = options?.maxMessageBytes ?? WORKER_MAX_MESSAGE_BYTES
+    this.leaseMs = options?.leaseMs ?? WORKER_LEASE_MS
     this.wss.on('connection', (ws) => this.onConnection(ws))
-    this.leaseTimer = setInterval(() => this.checkLeases(), WORKER_LEASE_MS / 3)
+    this.leaseTimer = setInterval(() => this.checkLeases(), this.leaseMs / 3)
     this.leaseTimer.unref()
   }
 
@@ -321,6 +325,13 @@ export class WorkerControlPlane {
         rejectSocket(1008, 'hello required')
         return
       }
+      // Any valid frame from a registered socket is liveness. Heartbeats can
+      // sit behind large run:event sends on a single-threaded worker, so a
+      // busy run that is still streaming must not look dead.
+      if (workerId) {
+        const w = this.workers.get(workerId)
+        if (w && w.ws === ws) w.lastHeartbeat = Date.now()
+      }
 
       switch (msg.type) {
         case 'worker:hello': {
@@ -465,7 +476,7 @@ export class WorkerControlPlane {
   private checkLeases(): void {
     const now = Date.now()
     for (const w of [...this.workers.values()]) {
-      if (now - w.lastHeartbeat > WORKER_LEASE_MS) {
+      if (now - w.lastHeartbeat > this.leaseMs) {
         this.workers.delete(w.workerId)
         try {
           w.ws.close(4001, 'lease expired')

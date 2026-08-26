@@ -17,9 +17,11 @@
  *   worker → server  run:exit          (terminal state)
  *   server → worker  run:cancel        (stop request)
  *
- * Lease semantics: if the server misses heartbeats from a worker for longer
- * than the lease window, it treats the worker as dead and fails its active
- * runs (via a synthesized run:exit to the run's event sink).
+ * Lease semantics: if the server hears nothing from a worker (hello, heartbeat,
+ * run:started, run:event, or run:exit) for longer than the lease window, it
+ * treats the worker as dead and fails its active runs. Inbound run:event
+ * frames count as liveness so a busy worker whose heartbeats are queued
+ * behind large event sends is not expired.
  */
 import type { RunnerType } from './types'
 import type { RunSpec, WorkerExitStatus } from './worker'
