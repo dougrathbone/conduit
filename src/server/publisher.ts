@@ -7,23 +7,69 @@ import { readRunOutputText } from './utils'
 /**
  * Publish target is a dumb delivery channel — the agent controls the content.
  *
- * Convention: if the agent's stdout contains a block delimited by
+ * Convention: if the agent's stdout contains a publish block, only that
+ * content is posted. Canonical delimiters:
  *   <!--CONDUIT:PUBLISH-->
  *   ...content...
  *   <!--/CONDUIT:PUBLISH-->
- * then only that content is posted. Otherwise the full stdout output is sent.
+ *
+ * Parsing is intentionally forgiving: HTML-escaped comments, extra
+ * whitespace, `<!--CONDUIT:END-->`, and a repeated opening tag as a closer
+ * all count. Once an opening marker is present the surrounding narration is
+ * never used as a fallback — a malformed block skips publishing rather than
+ * dumping the full run.
+ *
+ * Agents that never emit a publish marker still deliver their full stdout.
  */
 
-const PUBLISH_START = '<!--CONDUIT:PUBLISH-->'
-const PUBLISH_END = '<!--/CONDUIT:PUBLISH-->'
+const PUBLISH_MARKER_RE =
+  /(?:<!--|&lt;!--)\s*(\/?)\s*CONDUIT\s*:\s*(\/?)\s*(PUBLISH|END)\s*(?:-->|--&gt;)/gi
 
-function extractPublishContent(stdout: string): string | null {
-  const startIdx = stdout.indexOf(PUBLISH_START)
-  if (startIdx === -1) return null
-  const contentStart = startIdx + PUBLISH_START.length
-  const endIdx = stdout.indexOf(PUBLISH_END, contentStart)
-  if (endIdx === -1) return null
-  return stdout.slice(contentStart, endIdx).trim()
+interface PublishMarker {
+  index: number
+  end: number
+  kind: 'open' | 'close'
+}
+
+function findPublishMarkers(text: string): PublishMarker[] {
+  const markers: PublishMarker[] = []
+  const re = new RegExp(PUBLISH_MARKER_RE.source, 'gi')
+  let match: RegExpExecArray | null
+  while ((match = re.exec(text)) !== null) {
+    const slashBefore = match[1] === '/'
+    const slashAfter = match[2] === '/'
+    const name = match[3].toUpperCase()
+    const kind: PublishMarker['kind'] =
+      name === 'END' || slashBefore || slashAfter ? 'close' : 'open'
+    markers.push({ index: match.index, end: match.index + match[0].length, kind })
+    if (match[0].length === 0) re.lastIndex += 1
+  }
+  return markers
+}
+
+/**
+ * Text to deliver to publish targets, or `null` to skip delivery.
+ *
+ * Exported for unit tests.
+ */
+export function resolveRunPublishMessage(stdout: string): string | null {
+  if (!stdout) return null
+
+  const markers = findPublishMarkers(stdout)
+  if (markers.length === 0) return stdout
+
+  const opens = markers.filter((m) => m.kind === 'open')
+  if (opens.length === 0) return stdout
+
+  for (let i = opens.length - 1; i >= 0; i--) {
+    const open = opens[i]
+    const next = markers.find((m) => m.index >= open.end)
+    const raw = next ? stdout.slice(open.end, next.index) : stdout.slice(open.end)
+    const content = raw.trim()
+    if (content) return content
+  }
+
+  return null
 }
 
 // ── Slack ────────────────────────────────────────────────────────────────────
@@ -299,7 +345,9 @@ export async function publishRunResult(
 
   if (!fullStdout) return
 
-  const publishContent = extractPublishContent(fullStdout) ?? fullStdout
+  const publishContent = resolveRunPublishMessage(fullStdout)
+  if (!publishContent) return
+
   const message = publishContent.length > 39000
     ? publishContent.slice(0, 39000) + '\n…(truncated)'
     : publishContent

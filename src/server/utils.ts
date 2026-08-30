@@ -60,7 +60,7 @@ function stripAnsi(text: string): string {
 
 /**
  * The run's textual output for publish-target delivery. For structured logs this
- * is the assistant narration (which carries any `<!--CONDUIT:PUBLISH-->` markers),
+ * is the assistant narration (which carries any publish-block markers),
  * falling back to raw stdout/system text; for old terminal logs it's the
  * ANSI-stripped stdout — matching the pre-structured behaviour.
  */
