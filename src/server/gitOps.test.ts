@@ -68,9 +68,22 @@ describe('isDiskFullError', () => {
     expect(isDiskFullError('error: ... No space left on device')).toBe(true)
     expect(isDiskFullError('spawn git ENOSPC')).toBe(true)
   })
+  // git's config writer drops the errno, so this out-of-space failure arrives
+  // with no "No space left on device" to match on.
+  it('detects a config write that ran out of space', () => {
+    expect(
+      isDiskFullError(
+        'git remote failed (exit 128): error: failed to write new configuration file ' +
+          "/data/repos/9f7404af-a623-4d35-9a59-267aeb88389f/config.lock\n" +
+          "fatal: could not set 'remote.origin.url' to 'https://***@github.com/acme/widgets.git'"
+      )
+    ).toBe(true)
+  })
   it('is false for unrelated failures', () => {
     expect(isDiskFullError("fatal: 'master' is already checked out")).toBe(false)
     expect(isDiskFullError('fatal: repository not found')).toBe(false)
+    // A lock that could not be *taken* is contention or permissions, not space.
+    expect(isDiskFullError('error: could not lock config file config: File exists')).toBe(false)
   })
 })
 

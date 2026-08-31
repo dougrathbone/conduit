@@ -236,9 +236,35 @@ export async function fetchRepo(
   await runGit(['fetch', authUrl, branchFetchRefspec(branch)], { cwd: clonePath })
 }
 
-/** True when a git error indicates the filesystem is out of space (ENOSPC). */
+/**
+ * True when a git error indicates the filesystem is out of space.
+ *
+ * Most such failures carry an errno string ("No space left on device"), but
+ * git's config writer does not: a failed write is reported through its
+ * `write_error()` helper, which formats with `error()` rather than
+ * `error_errno()`, so the errno is dropped and all the operator sees is
+ *
+ *   error: failed to write new configuration file /data/repos/<id>/config.lock
+ *   fatal: could not set 'remote.origin.url' to 'https://***@github.com/…'
+ *
+ * That message is only reachable *after* git created and opened the lock file,
+ * so it is neither a permission problem nor a stale lock — both of those fail
+ * earlier with "could not lock config file". The write itself failed, which in
+ * practice means the volume is full or over quota.
+ */
 export function isDiskFullError(message: string): boolean {
-  return /no space left on device|\bENOSPC\b/i.test(message)
+  return (
+    /no space left on device|\bENOSPC\b/i.test(message) ||
+    /failed to write new configuration file/i.test(message)
+  )
+}
+
+/** Actionable operator-facing replacement for a raw git out-of-space dump. */
+export function diskFullMessage(action: string): string {
+  return (
+    `Not enough disk space to ${action}. ` +
+    'Free space on the Conduit server or increase its data volume, then retry.'
+  )
 }
 
 /** True when a git error is `git gc` refusing to run because another gc holds
@@ -281,11 +307,7 @@ export async function createWorktree(
     await removeWorktree(clonePath, worktreePath).catch(() => {})
     const message = err instanceof Error ? err.message : String(err)
     if (isDiskFullError(message)) {
-      throw new Error(
-        'Not enough disk space to create a worktree for this repository. ' +
-        'Free space on the Conduit server or increase its data volume, then retry.',
-        { cause: err }
-      )
+      throw new Error(diskFullMessage('create a worktree for this repository'), { cause: err })
     }
     throw err instanceof Error ? err : new Error(message)
   }

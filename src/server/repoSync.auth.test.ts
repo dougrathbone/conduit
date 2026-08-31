@@ -17,7 +17,8 @@ vi.mock('../main/db/queries/repositories', () => ({
 vi.mock('./githubApp', () => ({
   resolveRepoToken: vi.fn(),
 }))
-vi.mock('./gitOps', () => ({
+vi.mock('./gitOps', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./gitOps')>()),
   cloneRepo: vi.fn(),
   fetchRepo: vi.fn(),
 }))
@@ -106,6 +107,32 @@ describe('RepoSyncService credential failures', () => {
       boom,
       expect.objectContaining({ tags: expect.objectContaining({ op: 'clone' }) })
     )
+  })
+
+  // A full data volume used to reach the owner as a raw git dump naming an
+  // internal lock file, which says nothing about what to do next.
+  it('replaces an out-of-space git failure with an actionable syncError', async () => {
+    vi.mocked(resolveRepoToken).mockResolvedValue('ghs_token')
+    vi.mocked(cloneRepo).mockRejectedValue(
+      new Error(
+        'git remote failed (exit 128): error: failed to write new configuration file ' +
+          '/data/repos/repo-1/config.lock'
+      )
+    )
+
+    await new RepoSyncService(vi.fn()).syncRepo(PAT_REPO.id)
+
+    expect(updateRepository).toHaveBeenCalledWith(PAT_REPO.id, {
+      syncStatus: 'error',
+      syncError: expect.stringMatching(/not enough disk space to clone this repository/i),
+    })
+    // Reported as a message so every repo's out-of-space failure groups as one
+    // issue, with the raw git text kept as context.
+    expect(reporter.captureException).not.toHaveBeenCalled()
+    const [message, level, ctx] = vi.mocked(reporter.captureMessage).mock.calls[0]
+    expect(message).toMatch(/disk space/i)
+    expect(level).toBe('error')
+    expect(ctx?.extra?.gitError).toMatch(/failed to write new configuration file/)
   })
 
   // The clone can only be fetched for a branch it is told to fetch — see
