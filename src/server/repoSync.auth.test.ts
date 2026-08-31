@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 import type { Repository } from '../shared/types'
 
 // Stub the impure dependencies (persistence, git, auth, reporter) so importing
@@ -23,7 +26,7 @@ import { RepoSyncService } from './repoSync'
 import { reporter } from './observability'
 import { getRepository, updateRepository } from '../main/db/queries/repositories'
 import { resolveRepoToken } from './githubApp'
-import { cloneRepo } from './gitOps'
+import { cloneRepo, fetchRepo } from './gitOps'
 
 const PAT_REPO: Repository = {
   id: 'repo-1',
@@ -102,6 +105,28 @@ describe('RepoSyncService credential failures', () => {
     expect(reporter.captureException).toHaveBeenCalledWith(
       boom,
       expect.objectContaining({ tags: expect.objectContaining({ op: 'clone' }) })
+    )
+  })
+
+  // The clone can only be fetched for a branch it is told to fetch — see
+  // branchFetchRefspec — so the repo's default branch has to reach fetchRepo.
+  it('syncs an existing clone against the repo default branch', async () => {
+    const clonePath = fs.mkdtempSync(path.join(os.tmpdir(), 'conduit-repo-sync-'))
+    vi.mocked(getRepository).mockResolvedValue({ ...PAT_REPO, syncStatus: 'ready', clonePath })
+    vi.mocked(resolveRepoToken).mockResolvedValue('ghs_token')
+
+    try {
+      await new RepoSyncService(vi.fn()).syncRepo(PAT_REPO.id)
+    } finally {
+      fs.rmSync(clonePath, { recursive: true, force: true })
+    }
+
+    expect(cloneRepo).not.toHaveBeenCalled()
+    expect(fetchRepo).toHaveBeenCalledWith(
+      clonePath,
+      PAT_REPO.url,
+      PAT_REPO.defaultBranch,
+      'ghs_token'
     )
   })
 })

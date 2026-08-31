@@ -146,7 +146,7 @@ export class RepoSyncService {
         // Repo exists on disk — do a fetch
         await this.updateStatus(repoId, 'syncing')
         try {
-          await fetchRepo(repo.clonePath, repo.url, token)
+          await fetchRepo(repo.clonePath, repo.url, repo.defaultBranch, token)
           await this.recordSyncSuccess(repoId)
         } catch (err) {
           await this.recordSyncFailure(repoId, err, 'fetch')
