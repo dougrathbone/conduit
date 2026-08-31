@@ -1,6 +1,6 @@
 import * as fs from 'fs'
 import { listRepositories, getRepository, updateRepository } from '../main/db/queries/repositories'
-import { cloneRepo, fetchRepo } from './gitOps'
+import { cloneRepo, fetchRepo, isDiskFullError, diskFullMessage } from './gitOps'
 import { resolveRepoToken } from './githubApp'
 import { DEV_CONTEXT } from './auth/config'
 import { reporter } from './observability'
@@ -34,6 +34,11 @@ export function nextSyncBackoff(prev: SyncFailureState | undefined, now: number)
 /** True while a repo is still inside its backoff window and must be skipped. */
 export function isInSyncBackoff(state: SyncFailureState | undefined, now: number): boolean {
   return state !== undefined && now < state.nextAttemptAt
+}
+
+/** How to describe the failed sync step in an operator-facing message. */
+function syncAction(op: string): string {
+  return op === 'clone' ? 'clone this repository' : 'sync this repository'
 }
 
 /**
@@ -146,7 +151,7 @@ export class RepoSyncService {
         // Repo exists on disk — do a fetch
         await this.updateStatus(repoId, 'syncing')
         try {
-          await fetchRepo(repo.clonePath, repo.url, token)
+          await fetchRepo(repo.clonePath, repo.url, repo.defaultBranch, token)
           await this.recordSyncSuccess(repoId)
         } catch (err) {
           await this.recordSyncFailure(repoId, err, 'fetch')
@@ -176,6 +181,11 @@ export class RepoSyncService {
    * `expected` failures are user-fixable misconfigurations (e.g. a PAT-auth repo
    * with no global PAT configured): the owner sees them via `syncError`, so they
    * go out as a warning-level message instead of an error-level exception.
+   *
+   * An out-of-space failure is reported as a message rather than an exception:
+   * the raw git text embeds the clone's path, which splinters one operational
+   * problem into a separate Sentry issue per repository. The raw text is kept as
+   * context.
    */
   private async recordSyncFailure(
     repoId: string,
@@ -185,11 +195,15 @@ export class RepoSyncService {
   ): Promise<void> {
     const prev = this.failures.get(repoId)
     this.failures.set(repoId, nextSyncBackoff(prev, Date.now()))
-    const message = err instanceof Error ? err.message : String(err)
+    const raw = err instanceof Error ? err.message : String(err)
+    const diskFull = isDiskFullError(raw)
+    const message = diskFull ? diskFullMessage(syncAction(op)) : raw
     if (!prev) {
       const tags = { component: 'repoSync', repoId, op }
       if (opts?.expected) {
         reporter.captureMessage(message, 'warning', { tags })
+      } else if (diskFull) {
+        reporter.captureMessage(message, 'error', { tags, extra: { gitError: raw } })
       } else {
         reporter.captureException(err, { tags })
       }

@@ -162,18 +162,109 @@ export async function cloneRepo(
 }
 
 /**
- * Fetch latest changes into a bare clone.
+ * The refspec a bare-clone sync has to fetch with, for one branch.
+ *
+ * `git clone --bare` copies the remote's heads straight to local heads and, as
+ * its own documentation states, creates "neither remote-tracking branches nor
+ * the related configuration variables" — there is no `remote.origin.fetch`. A
+ * plain `git fetch origin` in such a clone therefore has no refspec to apply: it
+ * downloads objects, writes FETCH_HEAD, and leaves `refs/heads/<branch>` exactly
+ * where the original clone left it. Sync reported success on every cycle while
+ * the clone never moved, so every run worktreed the repository as it stood when
+ * it was first added. Naming the destination explicitly is what actually
+ * advances the branch; `+` keeps an upstream force-push from failing the sync.
+ * Run worktrees are detached (see {@link createWorktree}), so this branch is
+ * never checked out anywhere and updating it is always allowed.
  */
-export async function fetchRepo(clonePath: string, url: string, pat?: string): Promise<void> {
-  const authUrl = buildAuthUrl(url, pat)
-  // Set the remote URL in case the PAT changed, then fetch
-  await runGit(['remote', 'set-url', 'origin', authUrl], { cwd: clonePath })
-  await runGit(['fetch', '--prune', 'origin'], { cwd: clonePath })
+export function branchFetchRefspec(branch: string): string {
+  return `+refs/heads/${branch}:refs/heads/${branch}`
 }
 
-/** True when a git error indicates the filesystem is out of space (ENOSPC). */
+/**
+ * Point the stored `remote.origin.url` at the current credential — best-effort,
+ * and only when it actually differs.
+ *
+ * The sync no longer depends on this (see {@link fetchRepo}), but other paths
+ * read the stored remote: `git lfs fetch` inside a run's worktree resolves
+ * `origin` from this same config, so a private LFS repo needs a usable token
+ * there. It must never fail the sync, though, because rewriting `config` is the
+ * step that breaks first when the data volume fills: git rewrites the whole file
+ * through `config.lock`, so a failed write aborted the sync before git had even
+ * tried to fetch — and an already-up-to-date repo needs no space at all.
+ */
+async function refreshStoredOriginUrl(clonePath: string, authUrl: string): Promise<void> {
+  // `git config --get` exits non-zero when the key is unset; that's "differs".
+  const stored = await runGit(['config', '--get', 'remote.origin.url'], { cwd: clonePath }).catch(
+    () => undefined
+  )
+  if (stored === authUrl) return
+  try {
+    await runGit(['remote', 'set-url', 'origin', authUrl], { cwd: clonePath })
+  } catch (err) {
+    console.warn(
+      `[gitOps] could not update the stored origin URL for ${clonePath}: ` +
+        `${err instanceof Error ? err.message : String(err)}`
+    )
+  }
+}
+
+/**
+ * Fetch latest changes for `branch` into a bare clone.
+ *
+ * The credential goes straight to the fetch as a URL instead of being written to
+ * the clone's config first. Persisting it was the only reason a routine sync
+ * wrote to `<clone>/config`, and that write also contends with the per-run
+ * {@link configureWorktreeGit} calls, which land in the very same shared config
+ * file; naming the URL per-invocation makes the fetch independent of both. (A
+ * `-c remote.origin.url=…` override does *not* substitute here: `url` is a
+ * multi-valued remote key, so a command-line value is appended to the stored
+ * list rather than replacing it, and git still dials the stored URL first.)
+ */
+export async function fetchRepo(
+  clonePath: string,
+  url: string,
+  branch: string,
+  pat?: string
+): Promise<void> {
+  const authUrl = buildAuthUrl(url, pat)
+  await refreshStoredOriginUrl(clonePath, authUrl)
+  // No `--prune`: with an explicit refspec it would delete the clone's only
+  // branch the moment the branch disappears upstream, leaving a clone nothing
+  // can be worktreed from. Without it that case fails loudly ("couldn't find
+  // remote ref") and the last good ref survives. A single-branch bare clone has
+  // no other refs to prune anyway.
+  await runGit(['fetch', authUrl, branchFetchRefspec(branch)], { cwd: clonePath })
+}
+
+/**
+ * True when a git error indicates the filesystem is out of space.
+ *
+ * Most such failures carry an errno string ("No space left on device"), but
+ * git's config writer does not: a failed write is reported through its
+ * `write_error()` helper, which formats with `error()` rather than
+ * `error_errno()`, so the errno is dropped and all the operator sees is
+ *
+ *   error: failed to write new configuration file /data/repos/<id>/config.lock
+ *   fatal: could not set 'remote.origin.url' to 'https://***@github.com/…'
+ *
+ * That message is only reachable *after* git created and opened the lock file,
+ * so it is neither a permission problem nor a stale lock — both of those fail
+ * earlier with "could not lock config file". The write itself failed, which in
+ * practice means the volume is full or over quota.
+ */
 export function isDiskFullError(message: string): boolean {
-  return /no space left on device|\bENOSPC\b/i.test(message)
+  return (
+    /no space left on device|\bENOSPC\b/i.test(message) ||
+    /failed to write new configuration file/i.test(message)
+  )
+}
+
+/** Actionable operator-facing replacement for a raw git out-of-space dump. */
+export function diskFullMessage(action: string): string {
+  return (
+    `Not enough disk space to ${action}. ` +
+    'Free space on the Conduit server or increase its data volume, then retry.'
+  )
 }
 
 /** True when a git error is `git gc` refusing to run because another gc holds
@@ -216,11 +307,7 @@ export async function createWorktree(
     await removeWorktree(clonePath, worktreePath).catch(() => {})
     const message = err instanceof Error ? err.message : String(err)
     if (isDiskFullError(message)) {
-      throw new Error(
-        'Not enough disk space to create a worktree for this repository. ' +
-        'Free space on the Conduit server or increase its data volume, then retry.',
-        { cause: err }
-      )
+      throw new Error(diskFullMessage('create a worktree for this repository'), { cause: err })
     }
     throw err instanceof Error ? err : new Error(message)
   }
