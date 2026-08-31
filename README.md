@@ -205,6 +205,8 @@ Your formatted summary here (supports **markdown** and [links](url))
 <!--/CONDUIT:PUBLISH-->
 ```
 
+Parsing accepts a few common agent mistakes (HTML-escaped comments, `<!--CONDUIT:END-->`, a repeated opening tag as the closer, or a missing closer). Once an opening marker appears, surrounding run narration is never used as a fallback.
+
 For Slack, markdown is converted to mrkdwn; for email, to HTML. Webhooks receive `{ content, agent, runId, timestamp }`.
 
 ### GitHub App authentication
