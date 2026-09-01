@@ -48,6 +48,12 @@ export interface RunSpec {
   /** Final prompt (trigger context already folded in). Written to the CLI's stdin. */
   prompt: string
   /**
+   * Files to write into the workspace after it is materialized (Conduit-wide
+   * prompt files). Paths are workspace-relative; the worker creates parent
+   * directories. Existing files are prepended to, not overwritten.
+   */
+  workspaceFiles?: { path: string; content: string; name: string }[]
+  /**
    * Env overlay applied on top of the worker's own process env — agent
    * envVars, the runner API key, GH_TOKEN, timeout vars. Resolved server-side
    * (DB credentials, GitHub App mint) so workers never touch the secrets store.

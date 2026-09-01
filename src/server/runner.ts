@@ -19,6 +19,8 @@ import { buildRunFailureReport } from './runFailure'
 import { resolvePushCredential, githubTokenEnvEntry } from './githubApp'
 import { publishRunResult } from './publisher'
 import { buildTriggeredPrompt } from './triggers/promptBuilder'
+import { listEnabledGlobalPromptComponents } from '../main/db/queries/globalPromptComponents'
+import { applyGlobalPromptComponents, workspaceFilesFromComponents } from '../shared/promptComponents'
 import { createRunEventHandlers } from './runEventSink'
 import { resolveRunLogMaxBytes } from './runDeliveryLog'
 import { reporter } from './observability'
@@ -578,13 +580,16 @@ export async function startRunServer(
 
   // 6. Build the fully-resolved RunSpec and hand execution to the worker
   //    factory. Events stream back through the sink into the pipeline above.
+  const agentPrompt = triggerContext ? buildTriggeredPrompt(agent.prompt, triggerContext) : agent.prompt
+  const promptComponents = await listEnabledGlobalPromptComponents()
   const spec: RunSpec = {
     runId,
     agentId,
     runner: agent.runner,
     model: agent.model,
     effort: agent.effort,
-    prompt: triggerContext ? buildTriggeredPrompt(agent.prompt, triggerContext) : agent.prompt,
+    prompt: applyGlobalPromptComponents(agentPrompt, promptComponents),
+    workspaceFiles: workspaceFilesFromComponents(promptComponents),
     env: await buildRunnerEnvOverlay(agent, startedBy, pushToken),
     mcpConfigContent,
     strictMcpConfig: agent.runner === 'claude' ? !agent.enableRepoMcps : undefined,

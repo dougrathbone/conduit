@@ -174,7 +174,7 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
   const { data: allRepos = [] } = useRepositories()
   const { data: triggers = [] } = useTriggers(agentId)
   useRepoSyncEvents()
-  const { setShowPublishTargets, setShowRepositories } = useUIStore()
+  const { setShowPublishTargets, setShowRepositories, setShowPromptComponents } = useUIStore()
 
   const [draft, setDraft] = useState<Partial<AgentConfig>>({})
   const [saveState, setSaveState] = useState<SaveState>('idle')
@@ -438,6 +438,16 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
 
         {/* Prompt — the heart of the agent */}
         <CollapsibleSection title="Prompt" hero summary={promptSummary}>
+          <p className="text-[11px] text-[var(--text-secondary)] mb-2">
+            Conduit-wide instructions and files are prepended automatically.{' '}
+            <button
+              type="button"
+              className="text-[var(--accent)] hover:underline"
+              onClick={() => setShowPromptComponents(true)}
+            >
+              Manage prompt components
+            </button>
+          </p>
           <PromptEditor
             value={draft.prompt ?? ''}
             onChange={(v) => handleChange('prompt', v)}

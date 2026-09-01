@@ -2,6 +2,14 @@ import { create } from 'zustand'
 
 type Theme = 'dark' | 'light' | 'system'
 
+const exclusiveOff = {
+  showGlobalMcpManager: false,
+  showPublishTargets: false,
+  showRepositories: false,
+  showSettings: false,
+  showPromptComponents: false,
+}
+
 interface UIState {
   selectedAgentId: string | null
   activeRunId: string | null
@@ -13,6 +21,7 @@ interface UIState {
   showPublishTargets: boolean
   showRepositories: boolean
   showSettings: boolean
+  showPromptComponents: boolean
   // Actions
   selectAgent: (id: string | null) => void
   setActiveRun: (id: string | null) => void
@@ -23,6 +32,7 @@ interface UIState {
   setShowPublishTargets: (show: boolean) => void
   setShowRepositories: (show: boolean) => void
   setShowSettings: (show: boolean) => void
+  setShowPromptComponents: (show: boolean) => void
 }
 
 function applyTheme(theme: Theme) {
@@ -82,21 +92,31 @@ interface UrlState {
   publishTargets: boolean
   repositories: boolean
   settings: boolean
+  promptComponents: boolean
 }
 
 function readUrlState(): UrlState {
-  const empty: UrlState = { agentId: null, runId: null, globalMcps: false, publishTargets: false, repositories: false, settings: false }
+  const empty: UrlState = {
+    agentId: null,
+    runId: null,
+    globalMcps: false,
+    publishTargets: false,
+    repositories: false,
+    settings: false,
+    promptComponents: false,
+  }
   if (typeof window === 'undefined') return empty
   const path = window.location.pathname
   const globalMcps = path === '/global-mcps'
   const publishTargets = path === '/publish-targets'
   const repositories = path === '/repositories'
   const settings = path === '/settings'
+  const promptComponents = path === '/prompt-components'
   // /agents/:agentId/runs/:runId (deep link to a run) or /agents/:agentId
   const runMatch = path.match(/^\/agents\/([^/]+)\/runs\/([^/]+)$/)
   if (runMatch) return { ...empty, agentId: runMatch[1], runId: runMatch[2] }
   const agentMatch = path.match(/^\/agents\/([^/]+)$/)
-  return { ...empty, agentId: agentMatch ? agentMatch[1] : null, globalMcps, publishTargets, repositories, settings }
+  return { ...empty, agentId: agentMatch ? agentMatch[1] : null, globalMcps, publishTargets, repositories, settings, promptComponents }
 }
 
 function pushUrl(path: string) {
@@ -117,13 +137,14 @@ export const useUIStore = create<UIState>((set, get) => ({
   showPublishTargets: initialUrl.publishTargets,
   showRepositories: initialUrl.repositories,
   showSettings: initialUrl.settings,
+  showPromptComponents: initialUrl.promptComponents,
 
   // activeRunId/viewedRunId belong to the agent they were selected under, so
   // they're cleared here — otherwise the new agent's runs tab opens on a run
   // from the previous one.
   selectAgent: (id) => {
     pushUrl(id ? `/agents/${id}` : '/')
-    set({ selectedAgentId: id, activeRunId: null, viewedRunId: null, showGlobalMcpManager: false, showPublishTargets: false, showRepositories: false, showSettings: false })
+    set({ selectedAgentId: id, activeRunId: null, viewedRunId: null, ...exclusiveOff })
   },
 
   setViewedRun: (id) => {
@@ -145,22 +166,27 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   setShowGlobalMcpManager: (show) => {
     pushUrl(show ? '/global-mcps' : '/')
-    set({ showGlobalMcpManager: show, showPublishTargets: false, showRepositories: false, showSettings: false })
+    set({ ...exclusiveOff, showGlobalMcpManager: show })
   },
 
   setShowPublishTargets: (show) => {
     pushUrl(show ? '/publish-targets' : '/')
-    set({ showPublishTargets: show, showGlobalMcpManager: false, showRepositories: false, showSettings: false })
+    set({ ...exclusiveOff, showPublishTargets: show })
   },
 
   setShowRepositories: (show) => {
     pushUrl(show ? '/repositories' : '/')
-    set({ showRepositories: show, showGlobalMcpManager: false, showPublishTargets: false, showSettings: false })
+    set({ ...exclusiveOff, showRepositories: show })
   },
 
   setShowSettings: (show) => {
     pushUrl(show ? '/settings' : '/')
-    set({ showSettings: show, showGlobalMcpManager: false, showPublishTargets: false, showRepositories: false })
+    set({ ...exclusiveOff, showSettings: show })
+  },
+
+  setShowPromptComponents: (show) => {
+    pushUrl(show ? '/prompt-components' : '/')
+    set({ ...exclusiveOff, showPromptComponents: show })
   },
 
   setTheme: (theme) => {
@@ -196,6 +222,7 @@ if (typeof window !== 'undefined') {
       showPublishTargets: s.publishTargets,
       showRepositories: s.repositories,
       showSettings: s.settings,
+      showPromptComponents: s.promptComponents,
     })
   })
 }

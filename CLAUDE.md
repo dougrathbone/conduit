@@ -225,6 +225,14 @@ per-run configs post-run plus a startup sweep (6h grace). Runs record
 any workspace/config they created when `startRun` throws; `fixedDir` workspaces
 are local-only.
 
+## Conduit-wide prompt components
+
+Enabled rows in `global_prompt_components` are applied to **every** run (same
+injection model as global MCPs — sharing only controls who can see/edit them
+in the UI). Instructions are prepended to the prompt; files are written into
+the materialized workspace (`RunSpec.workspaceFiles`) and also inlined in the
+prompt. Path validation lives in `src/shared/promptComponents.ts`.
+
 ## Key Patterns
 
 **Adding a new entity type** — follow the publish targets pattern:
