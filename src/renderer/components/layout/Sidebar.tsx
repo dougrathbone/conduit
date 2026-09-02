@@ -1,5 +1,5 @@
 import React from 'react'
-import { Plus, Sun, Moon, Monitor, Server, Send, FolderGit2, Settings, ScrollText } from 'lucide-react'
+import { Plus, Sun, Moon, Monitor, Server, Send, FolderGit2, Settings } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { AgentList } from '@renderer/components/agents/AgentList'
 import { UserMenu } from '@renderer/components/UserMenu'
@@ -8,20 +8,17 @@ import { useCreateAgent } from '@renderer/hooks/useAgents'
 import { useGlobalMcps } from '@renderer/hooks/useGlobalMcps'
 import { usePublishTargets } from '@renderer/hooks/usePublishTargets'
 import { useRepositories } from '@renderer/hooks/useRepositories'
-import { useGlobalPromptComponents } from '@renderer/hooks/useGlobalPromptComponents'
 import { cn } from '@renderer/lib/utils'
 
 export function Sidebar() {
-  const { theme, setTheme, selectAgent, showGlobalMcpManager, setShowGlobalMcpManager, showPublishTargets, setShowPublishTargets, showRepositories, setShowRepositories, showSettings, setShowSettings, showPromptComponents, setShowPromptComponents } = useUIStore()
+  const { theme, setTheme, selectAgent, showGlobalMcpManager, setShowGlobalMcpManager, showPublishTargets, setShowPublishTargets, showRepositories, setShowRepositories, showSettings, setShowSettings } = useUIStore()
   const createAgent = useCreateAgent()
   const { data: globalMcps = [] } = useGlobalMcps()
   const { data: publishTargets = [] } = usePublishTargets()
   const { data: repositories = [] } = useRepositories()
-  const { data: promptComponents = [] } = useGlobalPromptComponents()
   const enabledGlobalCount = globalMcps.filter((m) => m.enabled).length
   const enabledPublishCount = publishTargets.filter((t) => t.enabled).length
   const readyRepoCount = repositories.filter((r) => r.syncStatus === 'ready').length
-  const enabledPromptCount = promptComponents.filter((c) => c.enabled).length
 
   const handleNewAgent = async () => {
     try {
@@ -111,30 +108,6 @@ export function Sidebar() {
               )}
             >
               {readyRepoCount}
-            </span>
-          )}
-        </button>
-        <button
-          onClick={() => setShowPromptComponents(true)}
-          className={cn(
-            'w-full flex items-center gap-2 px-2.5 py-2 rounded-md text-xs font-medium transition-colors',
-            showPromptComponents
-              ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
-              : 'text-[var(--text-secondary)] hover:bg-[var(--bg-secondary)] hover:text-[var(--text-primary)]'
-          )}
-        >
-          <ScrollText className="h-3.5 w-3.5 flex-shrink-0" />
-          <span className="flex-1 text-left">Prompt components</span>
-          {enabledPromptCount > 0 && (
-            <span
-              className={cn(
-                'px-1.5 py-0.5 rounded text-[10px] font-medium',
-                showPromptComponents
-                  ? 'bg-[var(--accent)]/20 text-[var(--accent)]'
-                  : 'bg-[var(--bg-secondary)] text-[var(--text-secondary)]'
-              )}
-            >
-              {enabledPromptCount}
             </span>
           )}
         </button>

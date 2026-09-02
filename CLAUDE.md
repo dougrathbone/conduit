@@ -229,7 +229,7 @@ are local-only.
 
 Enabled rows in `global_prompt_components` are applied to **every** run (same
 injection model as global MCPs — sharing only controls who can see/edit them
-in the UI). Instructions are prepended to the prompt; files are written into
+in the UI, under **Settings → Prompt components**). Instructions are prepended to the prompt; files are written into
 the materialized workspace (`RunSpec.workspaceFiles`) and also inlined in the
 prompt. Path validation lives in `src/shared/promptComponents.ts`.
 

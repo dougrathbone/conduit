@@ -174,7 +174,7 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
   const { data: allRepos = [] } = useRepositories()
   const { data: triggers = [] } = useTriggers(agentId)
   useRepoSyncEvents()
-  const { setShowPublishTargets, setShowRepositories, setShowPromptComponents } = useUIStore()
+  const { setShowPublishTargets, setShowRepositories, setShowSettings } = useUIStore()
 
   const [draft, setDraft] = useState<Partial<AgentConfig>>({})
   const [saveState, setSaveState] = useState<SaveState>('idle')
@@ -443,9 +443,9 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
             <button
               type="button"
               className="text-[var(--accent)] hover:underline"
-              onClick={() => setShowPromptComponents(true)}
+              onClick={() => setShowSettings(true)}
             >
-              Manage prompt components
+              Manage in Settings
             </button>
           </p>
           <PromptEditor

@@ -6,7 +6,6 @@ import { GlobalMcpManager } from './components/settings/GlobalMcpManager'
 import { PublishTargetManager } from './components/settings/PublishTargetManager'
 import { RepositoryManager } from './components/settings/RepositoryManager'
 import { SettingsManager } from './components/settings/SettingsManager'
-import { PromptComponentManager } from './components/settings/PromptComponentManager'
 import { LoginPage } from './components/LoginPage'
 import { useAuth } from './contexts/AuthContext'
 import { useUIStore } from './store/ui'
@@ -66,7 +65,7 @@ function EmptyState() {
 
 export default function App() {
   const { isAuthenticated } = useAuth()
-  const { selectedAgentId, selectAgent, showGlobalMcpManager, showPublishTargets, showRepositories, showSettings, showPromptComponents } = useUIStore()
+  const { selectedAgentId, selectAgent, showGlobalMcpManager, showPublishTargets, showRepositories, showSettings } = useUIStore()
   const createAgent = useCreateAgent()
 
   const handleNewAgent = useCallback(async () => {
@@ -134,8 +133,6 @@ export default function App() {
               <SettingsManager />
             ) : showRepositories ? (
               <RepositoryManager />
-            ) : showPromptComponents ? (
-              <PromptComponentManager />
             ) : showGlobalMcpManager ? (
               <GlobalMcpManager />
             ) : showPublishTargets ? (

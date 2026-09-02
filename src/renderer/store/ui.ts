@@ -7,7 +7,6 @@ const exclusiveOff = {
   showPublishTargets: false,
   showRepositories: false,
   showSettings: false,
-  showPromptComponents: false,
 }
 
 interface UIState {
@@ -21,7 +20,6 @@ interface UIState {
   showPublishTargets: boolean
   showRepositories: boolean
   showSettings: boolean
-  showPromptComponents: boolean
   // Actions
   selectAgent: (id: string | null) => void
   setActiveRun: (id: string | null) => void
@@ -32,7 +30,6 @@ interface UIState {
   setShowPublishTargets: (show: boolean) => void
   setShowRepositories: (show: boolean) => void
   setShowSettings: (show: boolean) => void
-  setShowPromptComponents: (show: boolean) => void
 }
 
 function applyTheme(theme: Theme) {
@@ -92,7 +89,6 @@ interface UrlState {
   publishTargets: boolean
   repositories: boolean
   settings: boolean
-  promptComponents: boolean
 }
 
 function readUrlState(): UrlState {
@@ -103,20 +99,19 @@ function readUrlState(): UrlState {
     publishTargets: false,
     repositories: false,
     settings: false,
-    promptComponents: false,
   }
   if (typeof window === 'undefined') return empty
   const path = window.location.pathname
   const globalMcps = path === '/global-mcps'
   const publishTargets = path === '/publish-targets'
   const repositories = path === '/repositories'
-  const settings = path === '/settings'
-  const promptComponents = path === '/prompt-components'
+  // Prompt components used to have their own route; they now live in Settings.
+  const settings = path === '/settings' || path === '/prompt-components'
   // /agents/:agentId/runs/:runId (deep link to a run) or /agents/:agentId
   const runMatch = path.match(/^\/agents\/([^/]+)\/runs\/([^/]+)$/)
   if (runMatch) return { ...empty, agentId: runMatch[1], runId: runMatch[2] }
   const agentMatch = path.match(/^\/agents\/([^/]+)$/)
-  return { ...empty, agentId: agentMatch ? agentMatch[1] : null, globalMcps, publishTargets, repositories, settings, promptComponents }
+  return { ...empty, agentId: agentMatch ? agentMatch[1] : null, globalMcps, publishTargets, repositories, settings }
 }
 
 function pushUrl(path: string) {
@@ -137,7 +132,6 @@ export const useUIStore = create<UIState>((set, get) => ({
   showPublishTargets: initialUrl.publishTargets,
   showRepositories: initialUrl.repositories,
   showSettings: initialUrl.settings,
-  showPromptComponents: initialUrl.promptComponents,
 
   // activeRunId/viewedRunId belong to the agent they were selected under, so
   // they're cleared here — otherwise the new agent's runs tab opens on a run
@@ -184,11 +178,6 @@ export const useUIStore = create<UIState>((set, get) => ({
     set({ ...exclusiveOff, showSettings: show })
   },
 
-  setShowPromptComponents: (show) => {
-    pushUrl(show ? '/prompt-components' : '/')
-    set({ ...exclusiveOff, showPromptComponents: show })
-  },
-
   setTheme: (theme) => {
     try {
       localStorage.setItem('conduit-theme', theme)
@@ -222,7 +211,6 @@ if (typeof window !== 'undefined') {
       showPublishTargets: s.publishTargets,
       showRepositories: s.repositories,
       showSettings: s.settings,
-      showPromptComponents: s.promptComponents,
     })
   })
 }
