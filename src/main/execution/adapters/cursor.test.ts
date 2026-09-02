@@ -1,45 +1,17 @@
 import { describe, it, expect } from 'vitest'
-import { applyCursorEffort, buildCursorArgs, parseCursorEvents } from './cursor'
+import { buildCursorArgs, parseCursorEvents } from './cursor'
 
 const line = (obj: unknown) => JSON.stringify(obj)
 
-describe('applyCursorEffort', () => {
-  it('passes the model through untouched when no effort is set', () => {
-    expect(applyCursorEffort('gpt-5.5-high')).toBe('gpt-5.5-high')
-    expect(applyCursorEffort('composer-2.5')).toBe('composer-2.5')
-  })
-
-  it('appends the effort suffix to a base model', () => {
-    expect(applyCursorEffort('claude-opus-4-8', 'high')).toBe('claude-opus-4-8-high')
-    expect(applyCursorEffort('kimi-k3', 'max')).toBe('kimi-k3-max')
-  })
-
-  it('replaces an existing effort suffix', () => {
-    expect(applyCursorEffort('claude-opus-4-8-low', 'xhigh')).toBe('claude-opus-4-8-xhigh')
-  })
-
-  it('strips -extra-high as one suffix, not as -high', () => {
-    expect(applyCursorEffort('gpt-5.5-extra-high', 'low')).toBe('gpt-5.5-low')
-  })
-
-  it('preserves a trailing -fast while replacing the effort', () => {
-    expect(applyCursorEffort('claude-opus-4-8-high-fast', 'low')).toBe('claude-opus-4-8-low-fast')
-    expect(applyCursorEffort('composer-2.5-fast', 'medium')).toBe('composer-2.5-medium-fast')
-  })
-
-  it('trims surrounding whitespace', () => {
-    expect(applyCursorEffort('  claude-sonnet-5 ', 'high')).toBe('claude-sonnet-5-high')
-  })
-})
-
 describe('buildCursorArgs', () => {
-  it('runs headless in Run Everything mode by default', () => {
+  it('runs headless in Run Everything mode and trusts the materialized workspace', () => {
     expect(buildCursorArgs()).toEqual([
       '-p',
       '--output-format',
       'stream-json',
       '--force',
       '--approve-mcps',
+      '--trust',
     ])
   })
 
@@ -49,7 +21,17 @@ describe('buildCursorArgs', () => {
     expect(args[args.indexOf('--model') + 1]).toBe('composer-2.5')
   })
 
-  it('composes model + effort into the model slug', () => {
+  it('does not invent an unsupported variant for a fixed model identifier', () => {
+    const args = buildCursorArgs({ model: 'composer-2.5', effort: 'high' })
+    expect(args[args.indexOf('--model') + 1]).toBe('composer-2.5')
+  })
+
+  it('does not rewrite an exact effort-qualified identifier from a stale effort value', () => {
+    const args = buildCursorArgs({ model: 'claude-opus-5-high', effort: 'low' })
+    expect(args[args.indexOf('--model') + 1]).toBe('claude-opus-5-high')
+  })
+
+  it('preserves the old base-model plus effort format for existing agents', () => {
     const args = buildCursorArgs({ model: 'claude-opus-4-8', effort: 'low' })
     expect(args[args.indexOf('--model') + 1]).toBe('claude-opus-4-8-low')
   })

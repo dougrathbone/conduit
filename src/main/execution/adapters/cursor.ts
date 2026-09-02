@@ -2,13 +2,15 @@
  * Adapter for the Cursor CLI (`cursor-agent`) — a headless agent runner.
  *
  * Runs in print mode with stream-json output:
- *   cursor-agent -p --output-format stream-json --force --approve-mcps [--model <slug>]
+ *   cursor-agent -p --output-format stream-json --force --approve-mcps --trust [--model <id>]
  *
  * - `--force` is Cursor's "Run Everything" mode (`--yolo` alias): commands and
  *   edits execute without approval — the headless equivalent of Claude's
  *   `--dangerously-skip-permissions` / Amp's `--dangerously-allow-all`.
  * - `--approve-mcps` auto-approves any MCP servers the workspace/user config
  *   provides so the run never blocks on a confirmation prompt.
+ * - `--trust` accepts Conduit's newly materialized workspace without an
+ *   interactive trust prompt.
  * - The prompt is written to stdin after spawn (cursor-agent reads piped stdin
  *   as the prompt in print mode).
  *
@@ -17,43 +19,29 @@
  * Conduit's managed MCP config is not injected for this runner.
  */
 export interface CursorArgsOptions {
-  /** Model slug (e.g. 'claude-opus-4-8', 'composer-2.5'). Unset = CLI default ('auto'). */
+  /** Exact model identifier from `cursor-agent models`. Unset = CLI default ('auto'). */
   model?: string
   /**
-   * Reasoning effort. Cursor has no effort flag; effort variants are encoded in
-   * the model slug (`claude-opus-4-8-low`, `gpt-5.5-extra-high`). Only applied
-   * when `model` is set.
+   * Retained in the serializable RunSpec for compatibility with existing
+   * agents that stored one of the old UI's base models separately from effort.
+   * New configurations use an exact model identifier and ignore this field.
    */
   effort?: string
 }
 
-/**
- * Effort-level tokens Cursor appends to base model slugs. Ordered longest-first
- * so stripping checks `-extra-high` before its `-high` suffix.
- */
-const CURSOR_EFFORT_SUFFIXES = ['extra-high', 'minimal', 'medium', 'xhigh', 'high', 'low', 'max', 'none']
+/** Base identifiers offered by the old Cursor model picker. Only these are
+ * eligible for legacy effort composition; arbitrary/exact IDs pass through. */
+const LEGACY_CURSOR_BASE_MODELS = new Set([
+  'claude-opus-5',
+  'claude-opus-4-8',
+  'claude-sonnet-5',
+  'gpt-5.6-sol',
+  'gpt-5.5',
+  'kimi-k3',
+])
 
-/**
- * Compose the effective model slug for a run. With no effort, the model is
- * passed through untouched (full slugs like 'gpt-5.5-high' keep working). With
- * an effort, any existing effort suffix is replaced — preserving a trailing
- * `-fast` — e.g. ('claude-opus-4-8-high-fast', 'low') → 'claude-opus-4-8-low-fast'.
- */
-export function applyCursorEffort(model: string, effort?: string): string {
-  if (!effort) return model
-  let base = model.trim()
-  let fast = ''
-  if (base.endsWith('-fast')) {
-    fast = '-fast'
-    base = base.slice(0, -'-fast'.length)
-  }
-  for (const suffix of CURSOR_EFFORT_SUFFIXES) {
-    if (base.endsWith(`-${suffix}`)) {
-      base = base.slice(0, -(suffix.length + 1))
-      break
-    }
-  }
-  return `${base}-${effort}${fast}`
+function resolveCursorModel(model: string, effort?: string): string {
+  return effort && LEGACY_CURSOR_BASE_MODELS.has(model) ? `${model}-${effort}` : model
 }
 
 /**
@@ -61,9 +49,9 @@ export function applyCursorEffort(model: string, effort?: string): string {
  * is written to stdin after spawn.
  */
 export function buildCursorArgs(opts: CursorArgsOptions = {}): string[] {
-  const args = ['-p', '--output-format', 'stream-json', '--force', '--approve-mcps']
+  const args = ['-p', '--output-format', 'stream-json', '--force', '--approve-mcps', '--trust']
   const model = opts.model?.trim()
-  if (model) args.push('--model', applyCursorEffort(model, opts.effort))
+  if (model) args.push('--model', resolveCursorModel(model, opts.effort))
   return args
 }
 
@@ -212,7 +200,7 @@ export function parseCursorEvents(line: string): RunEventInit[] {
 
     case 'system':
       // The init event names the model that actually launched — surface it so the
-      // run log records which model+effort slug was in effect.
+      // run log records which exact model identifier was in effect.
       if (event.subtype === 'init') {
         return [
           {

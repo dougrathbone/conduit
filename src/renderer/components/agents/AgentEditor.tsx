@@ -45,17 +45,19 @@ const RUNNER_OPTIONS: { value: RunnerType; label: string; description: string }[
   { value: 'cursor', label: 'Cursor',      description: 'Anysphere' },
 ]
 
-/** Common Cursor base model slugs — free text is allowed; this is a convenience
- * datalist. The full list comes from `cursor-agent models`. */
+/** Common exact Cursor model identifiers — free text is allowed; this is a
+ * convenience datalist. The account-specific list comes from `cursor-agent models`. */
 const CURSOR_MODEL_SUGGESTIONS = [
   'auto',
   'composer-2.5',
-  'claude-opus-5',
-  'claude-opus-4-8',
-  'claude-sonnet-5',
-  'gpt-5.6-sol',
-  'gpt-5.5',
-  'kimi-k3',
+  'composer-2.5-fast',
+  'cursor-grok-4.6-high',
+  'cursor-grok-4.6-high-fast',
+  'claude-opus-5-high',
+  'claude-opus-5-thinking-high',
+  'gpt-5.6-sol-high',
+  'gpt-5.5-high',
+  'kimi-k3-high',
 ]
 
 function EffortPicker({
@@ -391,48 +393,30 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
             </div>
           )}
 
-          {/* Model + effort — Cursor only (maps to `cursor-agent --model <slug>-<effort>`) */}
+          {/* Exact model identifier — Cursor only (`cursor-agent --model <id>`) */}
           {(draft.runner ?? 'claude') === 'cursor' && (
-            <>
-              <div className="space-y-1.5">
-                <label className="block text-xs font-medium text-[var(--text-secondary)]">
-                  Model
-                </label>
-                <Input
-                  value={draft.model ?? ''}
-                  onChange={(e) => handleChange('model', e.target.value || undefined)}
-                  placeholder="auto"
-                  list="cursor-model-suggestions"
-                  spellCheck={false}
-                />
-                <datalist id="cursor-model-suggestions">
-                  {CURSOR_MODEL_SUGGESTIONS.map((m) => (
-                    <option key={m} value={m} />
-                  ))}
-                </datalist>
-                <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
-                  Base model slug passed to <code>cursor-agent --model</code>. Empty uses the CLI
-                  default (<code>auto</code>). Run <code>cursor-agent models</code> for the full list.
-                </p>
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="block text-xs font-medium text-[var(--text-secondary)]">
-                  Reasoning Effort
-                </label>
-                <EffortPicker
-                  value={draft.effort}
-                  onChange={(level) => handleChange('effort', level)}
-                  disabled={!(draft.model ?? '').trim()}
-                />
-                <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
-                  Cursor encodes effort in the model slug — e.g. <code>claude-opus-4-8</code> + high
-                  runs as <code>claude-opus-4-8-high</code>. Requires a model to be set. Runs in
-                  "Run Everything" mode (<code>--force</code>): commands and edits execute without
-                  approval.
-                </p>
-              </div>
-            </>
+            <div className="space-y-1.5">
+              <label className="block text-xs font-medium text-[var(--text-secondary)]">
+                Model
+              </label>
+              <Input
+                value={draft.model ?? ''}
+                onChange={(e) => handleChange('model', e.target.value || undefined)}
+                placeholder="auto"
+                list="cursor-model-suggestions"
+                spellCheck={false}
+              />
+              <datalist id="cursor-model-suggestions">
+                {CURSOR_MODEL_SUGGESTIONS.map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+              <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
+                Exact identifier passed to <code>cursor-agent --model</code>, including its effort
+                suffix. Empty uses <code>auto</code>. Run <code>cursor-agent models</code> to list
+                the models available to your account.
+              </p>
+            </div>
           )}
         </CollapsibleSection>
 

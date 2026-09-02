@@ -224,16 +224,15 @@ export interface AgentConfig {
   /** ID of a managed repository to use as the workspace */
   repositoryId?: string
   /**
-   * Reasoning effort. Claude: maps to `claude --effort <level>`. Cursor: selects
-   * the model's `-<effort>` variant (requires `model` to be set). Unset uses the
-   * CLI default.
+   * Reasoning effort for Claude (`claude --effort <level>`). Exact Cursor model
+   * identifiers encode their own effort; for compatibility, the runner only
+   * applies this field to base identifiers offered by the old Cursor picker.
    */
   effort?: RunnerEffort
   /**
-   * Base model slug for the Cursor runner (`cursor-agent --model`), e.g.
-   * 'claude-opus-4-8'. Combined with `effort` into the full slug
-   * (`claude-opus-4-8-high`). Ignored by other runners; unset uses the CLI
-   * default ('auto').
+   * Exact model identifier for the Cursor runner (`cursor-agent --model`), e.g.
+   * 'claude-opus-5-high'. Ignored by other runners; unset uses the CLI default
+   * ('auto').
    */
   model?: string
   /**
