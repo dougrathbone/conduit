@@ -9,6 +9,7 @@ A self-hosted web app for managing and running AI CLI agents (Claude Code, Amp, 
 - **Multi-runner** — Claude Code, Amp, and Cursor agents
 - **Live terminal streaming** — xterm.js with full ANSI colour output
 - **MCP management** — global and per-agent servers with OAuth support and health indicators
+- **Prompt components** — Conduit-wide instructions and files prepended to every agent run (Settings)
 - **Pluggable execution** — run agents in-process, on remote workers, or as ephemeral EKS Jobs / Fargate tasks
 - **Scheduled runs** — cron triggers per agent
 - **Publish targets** — deliver agent output to Slack, email (SMTP), or signed webhooks

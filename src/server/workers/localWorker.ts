@@ -4,6 +4,7 @@ import type { RunSpec, WorkerEventSink, WorkerFactory, WorkerHandle } from '../.
 import { createWorkspace, deleteWorkspace } from '../../main/execution/workspace'
 import { writeMcpConfigContent, deleteMcpConfig } from '../../main/utils/mcpConfigFile'
 import { writeClaudeConfig, deleteClaudeConfig } from '../../main/utils/claudeConfig'
+import { writeWorkspaceFiles } from '../workspaceFiles'
 import { createConfiguredWorktree, removeWorktree, runGit, buildAuthUrl, configureWorktreeGit, DEFAULT_GIT_TIMEOUT_MS } from '../gitOps'
 import { buildClaudeArgs, parseClaudeEvents } from '../../main/execution/adapters/claude'
 import { buildAmpArgs, parseAmpEvents } from '../../main/execution/adapters/amp'
@@ -62,6 +63,9 @@ export class LocalWorkerFactory implements WorkerFactory {
     }
 
     try {
+      if (spec.workspaceFiles && spec.workspaceFiles.length > 0) {
+        writeWorkspaceFiles(workspacePath, spec.workspaceFiles)
+      }
       return await this.spawn(spec, sink, workspacePath, worktreeClonePath, ephemeral)
     } catch (err) {
       // Roll back everything this factory created so a failed start never

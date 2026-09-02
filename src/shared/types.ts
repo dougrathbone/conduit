@@ -88,7 +88,12 @@ export interface Group {
   updatedAt: number
 }
 
-export type ShareableEntityType = 'agent' | 'publishTarget' | 'repository' | 'globalMcpServer'
+export type ShareableEntityType =
+  | 'agent'
+  | 'publishTarget'
+  | 'repository'
+  | 'globalMcpServer'
+  | 'globalPromptComponent'
 
 export interface Share {
   id: string
@@ -379,6 +384,26 @@ export interface GlobalMcpServer {
   updatedAt: number
 }
 
+/**
+ * Instance-wide prompt component. Enabled items are applied to every agent run:
+ * instructions are prepended to the prompt, files are written into the workspace
+ * (and their contents are also included in the prompt).
+ */
+export type GlobalPromptComponentKind = 'instruction' | 'file'
+
+export interface GlobalPromptComponent {
+  id: string
+  name: string
+  kind: GlobalPromptComponentKind
+  content: string
+  /** Workspace-relative path; required when kind is `file`. */
+  filePath?: string
+  enabled: boolean
+  ownerId?: string
+  createdAt: number
+  updatedAt: number
+}
+
 // ── Repositories ────────────────────────────────────────────────────────────
 
 export type RepoSyncStatus = 'pending' | 'cloning' | 'ready' | 'syncing' | 'error'
@@ -596,6 +621,17 @@ export interface ConduitAPI {
     delete: (id: string) => Promise<void>
     checkHealth: (serverConfig: McpServerEntry) => Promise<McpHealthResult>
     listTools: (serverConfig: McpServerEntry) => Promise<McpToolsResult>
+  }
+  globalPromptComponents: {
+    list: () => Promise<GlobalPromptComponent[]>
+    create: (
+      data: Omit<GlobalPromptComponent, 'id' | 'createdAt' | 'updatedAt'>
+    ) => Promise<GlobalPromptComponent>
+    update: (
+      id: string,
+      data: Partial<Omit<GlobalPromptComponent, 'id' | 'createdAt' | 'updatedAt'>>
+    ) => Promise<GlobalPromptComponent>
+    delete: (id: string) => Promise<void>
   }
   runners: {
     /** Report which runner CLIs are installed and on the server's PATH. */
