@@ -273,6 +273,8 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
       sweep: () => invoke<import('@shared/types').SweepResult>('maintenance:sweep'),
       storageUsage: () =>
         invoke<import('@shared/types').StorageUsage>('maintenance:storageUsage'),
+      configHealth: () =>
+        invoke<import('@shared/types').AppConfigHealth>('maintenance:configHealth'),
     },
 
     onRepoSyncStatus: (cb: (payload: RepoSyncStatusPayload) => void): (() => void) => {

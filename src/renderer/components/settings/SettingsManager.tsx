@@ -9,6 +9,7 @@ import { useStorageUsage } from '@renderer/hooks/useStorageUsage'
 import { formatBytes } from '@renderer/lib/utils'
 import type { RunnerType, SweepResult } from '@shared/types'
 import { PromptComponentManager } from './PromptComponentManager'
+import { ConfigHealthCard } from './ConfigHealthCard'
 
 interface RunnerMeta {
   runner: RunnerType
@@ -279,13 +280,15 @@ export function SettingsManager() {
         <div>
           <h1 className="text-sm font-semibold text-[var(--text-primary)]">Settings</h1>
           <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-            Agent authentication, Conduit-wide prompts, and storage
+            Configuration health, agent authentication, Conduit-wide prompts, and storage
           </p>
         </div>
       </div>
 
       {/* Body */}
       <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3 max-w-3xl">
+        <ConfigHealthCard />
+
         <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-[var(--accent)]/10 border border-[var(--accent)]/20 text-xs text-[var(--text-secondary)]">
           <Info className="h-3.5 w-3.5 text-[var(--accent)] flex-shrink-0 mt-0.5" />
           <span>

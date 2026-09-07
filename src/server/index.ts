@@ -64,7 +64,8 @@ import { createTriggerRoutes } from './triggers/triggerRoutes'
 import { createMcpOAuthRouter } from './mcpOAuth/routes'
 import { startAuth as mcpStartAuth, getStatus as mcpGetStatus, revoke as mcpRevoke, probeOAuthSupport as mcpProbe } from './mcpOAuth/service'
 import { listMcpTools } from './mcpTools'
-import { classifyUrlHealth, buildHealthProbeHeaders } from './mcpHealth'
+import { probeMcpServerHealth } from './mcpHealth'
+import { getConfigHealth } from './configHealth'
 import { getGithubPat } from './store'
 import { readRunLog } from './utils'
 import { Octokit } from '@octokit/rest'
@@ -380,67 +381,7 @@ const handlers: Record<string, HandlerFn> = {
   },
 
   'globalMcps:checkHealth': async ([serverConfig]) => {
-    const config = serverConfig as import('../shared/types').McpServerEntry
-
-    if (isUrlMcpServer(config) && config.url) {
-      try {
-        // Probe with a real MCP `initialize` handshake, not a bare GET. Streamable-
-        // HTTP MCP servers (Linear/Sentry/Figma/…) reject a bare GET or `Accept: */*`
-        // with 405 Method Not Allowed / 406 Not Acceptable — so once a valid token
-        // gets past the 401, the probe would surface a misleading "Method Not
-        // Allowed". A POST initialize with the streamable-HTTP Accept header is what
-        // an actual MCP client sends: 200 when authenticated + usable, 401 when not.
-        // Carry the user's own headers (a manual `Authorization: Bearer …`, or
-        // Datadog-style DD-API-KEY headers) so the probe reflects real auth. A
-        // resolved global OAuth token, when present, still overrides — matching
-        // runtime injection precedence. Without this, a manually-authed server
-        // always 401s here, reads as `unauthorized`, and wrongly kicks OAuth.
-        let authOverride: string | undefined
-        try {
-          const { resolveGlobalMcpToken } = await import('../main/utils/mcp')
-          const { normalizeTokenScheme } = await import('./mcpOAuth/flow')
-          const token = await resolveGlobalMcpToken(config.url)
-          if (token) authOverride = `${normalizeTokenScheme(token.tokenType)} ${token.accessToken}`
-        } catch {
-          // No token resolvable — fall through to the config's own headers.
-        }
-        const headers = buildHealthProbeHeaders(config.headers, authOverride)
-        const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), 4000)
-        const res = await fetch(config.url, {
-          method: 'POST',
-          signal: controller.signal,
-          headers,
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 1,
-            method: 'initialize',
-            params: {
-              protocolVersion: '2025-06-18',
-              capabilities: {},
-              clientInfo: { name: 'conduit-healthcheck', version: '1' },
-            },
-          }),
-        })
-        clearTimeout(timeout)
-        return classifyUrlHealth(res.status, res.statusText)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Connection failed'
-        return { status: 'unhealthy', message: msg }
-      }
-    }
-
-    const command = config.command ?? ''
-    if (!command) return { status: 'unhealthy', message: 'No command configured' }
-
-    try {
-      const { execFileSync } = await import('child_process')
-      // execFile (not exec) avoids shell interpretation of `command`.
-      execFileSync('which', [command], { stdio: 'ignore' })
-      return { status: 'healthy', message: `${command} found in PATH` }
-    } catch {
-      return { status: 'unhealthy', message: `${command} not found in PATH` }
-    }
+    return probeMcpServerHealth(serverConfig as import('../shared/types').McpServerEntry)
   },
 
   'runners:checkCli': async () => {
@@ -697,6 +638,7 @@ const handlers: Record<string, HandlerFn> = {
   // currently executing on this pod.
   'maintenance:sweep': () => sweepOnce(),
   'maintenance:storageUsage': () => getStorageUsage(),
+  'maintenance:configHealth': (_args, _ws, ctx) => getConfigHealth(ctx),
 
   'shell:openExternal': ([url]) => Promise.resolve({ url }),
 
