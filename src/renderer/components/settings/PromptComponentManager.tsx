@@ -300,9 +300,9 @@ export function PromptComponentManager() {
     <div id="prompt-components" className="space-y-3">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <h2 className="text-base font-semibold text-[var(--text-primary)]">Run defaults</h2>
-          <p className="mt-1 max-w-3xl text-sm text-[var(--text-secondary)]">
-            Give every agent the same instructions and workspace files. Only enabled components are added to runs.
+          <h3 className="text-sm font-semibold text-[var(--text-primary)]">Shared prompt components</h3>
+          <p className="mt-1 max-w-3xl text-xs text-[var(--text-secondary)]">
+            Optional instructions and workspace files added to every run. Only enabled components apply.
           </p>
         </div>
         <Button size="sm" onClick={() => setShowAdd(true)} disabled={showAdd} className="gap-1.5">
