@@ -198,15 +198,15 @@ export function ConfigHealthCard() {
             variant="ghost"
             onClick={() => health.refetch()}
             disabled={health.isFetching}
-            className="flex-shrink-0 gap-1.5 text-[var(--text-secondary)]"
+            className="flex-shrink-0 px-2 text-[var(--text-secondary)]"
             aria-label="Refresh Conduit status"
+            title="Refresh Conduit status"
           >
             {health.isFetching ? (
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
               <RefreshCw className="h-3.5 w-3.5" />
             )}
-            <span className="hidden sm:inline">Refresh</span>
           </Button>
         </div>
       </div>
