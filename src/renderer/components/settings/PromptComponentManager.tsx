@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Plus, Pencil, Trash2, Info, Loader2, X, Check, Share2, FileText, ScrollText } from 'lucide-react'
+import { Plus, Pencil, Trash2, Loader2, X, Check, Share2, FileText, ScrollText } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
 import { ShareDialog } from '@renderer/components/ShareDialog'
@@ -298,21 +298,22 @@ export function PromptComponentManager() {
 
   return (
     <div id="prompt-components" className="space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <h2 className="text-xs font-medium text-[var(--text-secondary)]">Prompt components</h2>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-base font-semibold text-[var(--text-primary)]">Run defaults</h2>
+          <p className="mt-1 max-w-3xl text-sm text-[var(--text-secondary)]">
+            Give every agent the same instructions and workspace files. Only enabled components are added to runs.
+          </p>
+        </div>
         <Button size="sm" onClick={() => setShowAdd(true)} disabled={showAdd} className="gap-1.5">
           <Plus className="h-3.5 w-3.5" />
-          Add
+          Add component
         </Button>
       </div>
 
-      <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-[var(--accent)]/10 border border-[var(--accent)]/20 text-xs text-[var(--text-secondary)]">
-        <Info className="h-3.5 w-3.5 text-[var(--accent)] flex-shrink-0 mt-0.5" />
-        <span>
-          <strong className="text-[var(--text-primary)]">Instructions</strong> are prepended to every agent prompt.{' '}
-          <strong className="text-[var(--text-primary)]">Files</strong> are written into the run workspace (and also
-          included in the prompt). Enabled items apply to all runs; share an item so others can view or edit it.
-        </span>
+      <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-[var(--text-secondary)]">
+        <span><strong className="font-medium text-[var(--text-primary)]">Instructions</strong> are prepended to every prompt.</span>
+        <span><strong className="font-medium text-[var(--text-primary)]">Files</strong> are written into every workspace.</span>
       </div>
 
       {showAdd && (
