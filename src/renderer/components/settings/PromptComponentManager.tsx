@@ -208,24 +208,23 @@ function ComponentRow({
   }
 
   return (
-    <div
-      className="rounded-lg border border-[var(--border)] px-4 py-3 flex items-start gap-3"
-      style={{ background: 'var(--bg-secondary)' }}
-    >
+    <div className="flex items-start gap-2.5 border-t border-[var(--border)] px-3 py-2.5 first:border-t-0">
       <div
         className={cn(
-          'mt-0.5 flex-shrink-0 w-7 h-7 rounded-md flex items-center justify-center',
-          item.enabled ? 'bg-[var(--accent)]/15 text-[var(--accent)]' : 'bg-[var(--bg-primary)] text-[var(--text-secondary)]'
+          'mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded',
+          item.enabled
+            ? 'bg-[var(--accent)]/15 text-[var(--accent)]'
+            : 'bg-[var(--bg-primary)] text-[var(--text-secondary)]'
         )}
       >
         {item.kind === 'file' ? <FileText className="h-3.5 w-3.5" /> : <ScrollText className="h-3.5 w-3.5" />}
       </div>
       <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-[var(--text-primary)] truncate">{item.name}</span>
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+          <span className="truncate text-sm font-medium text-[var(--text-primary)]">{item.name}</span>
           <span className="text-[10px] uppercase tracking-wide text-[var(--text-secondary)]">{item.kind}</span>
           {!item.enabled && (
-            <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-primary)] text-[var(--text-secondary)]">
+            <span className="rounded bg-[var(--bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--text-secondary)]">
               Off
             </span>
           )}
@@ -233,11 +232,11 @@ function ComponentRow({
         {item.kind === 'file' && item.filePath && (
           <code className="text-[11px] text-[var(--text-secondary)]">{item.filePath}</code>
         )}
-        <p className="text-xs text-[var(--text-secondary)] mt-1 line-clamp-2 whitespace-pre-wrap">
+        <p className="mt-0.5 line-clamp-2 whitespace-pre-wrap text-[11px] leading-4 text-[var(--text-secondary)]">
           {item.content.trim() || '(empty)'}
         </p>
       </div>
-      <div className="flex items-center gap-0.5 flex-shrink-0">
+      <div className="flex flex-shrink-0 items-center gap-0.5">
         <button
           type="button"
           title={item.enabled ? 'Disable' : 'Enable'}
@@ -248,17 +247,17 @@ function ComponentRow({
             )
           }
           className={cn(
-            'h-7 px-2 rounded text-[10px] font-medium',
+            'h-7 rounded px-2 text-[10px] font-medium',
             item.enabled ? 'text-[var(--accent)]' : 'text-[var(--text-secondary)]'
           )}
         >
           {item.enabled ? 'On' : 'Off'}
         </button>
-        <Button variant="ghost" size="sm" className="px-1.5" title="Edit" onClick={() => setEditing(true)}>
+        <Button variant="ghost" size="sm" className="h-7 px-1.5" title="Edit" onClick={() => setEditing(true)}>
           <Pencil className="h-3.5 w-3.5" />
         </Button>
         {isOwner && (
-          <Button variant="ghost" size="sm" className="px-1.5" title="Share" onClick={onShare}>
+          <Button variant="ghost" size="sm" className="h-7 px-1.5" title="Share" onClick={onShare}>
             <Share2 className="h-3.5 w-3.5" />
           </Button>
         )}
@@ -266,7 +265,7 @@ function ComponentRow({
           <Button
             variant="ghost"
             size="sm"
-            className="px-1.5 text-[var(--text-secondary)] hover:text-red-400"
+            className="h-7 px-1.5 text-[var(--text-secondary)] hover:text-red-400"
             title="Delete"
             disabled={remove.isPending}
             onClick={() => {
@@ -297,23 +296,22 @@ export function PromptComponentManager() {
   const shared = items.filter((s) => s.ownerId !== user?.id)
 
   return (
-    <div id="prompt-components" className="space-y-3">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h2 className="text-base font-semibold text-[var(--text-primary)]">Run defaults</h2>
-          <p className="mt-1 max-w-3xl text-sm text-[var(--text-secondary)]">
-            Give every agent the same instructions and workspace files. Only enabled components are added to runs.
-          </p>
+    <div className="space-y-2.5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-[var(--text-secondary)]">
+          <span>
+            <strong className="font-medium text-[var(--text-primary)]">Instructions</strong> prepend every
+            prompt.
+          </span>
+          <span>
+            <strong className="font-medium text-[var(--text-primary)]">Files</strong> write into every
+            workspace.
+          </span>
         </div>
-        <Button size="sm" onClick={() => setShowAdd(true)} disabled={showAdd} className="gap-1.5">
+        <Button size="sm" onClick={() => setShowAdd(true)} disabled={showAdd} className="h-7 gap-1.5">
           <Plus className="h-3.5 w-3.5" />
-          Add component
+          Add
         </Button>
-      </div>
-
-      <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-[var(--text-secondary)]">
-        <span><strong className="font-medium text-[var(--text-primary)]">Instructions</strong> are prepended to every prompt.</span>
-        <span><strong className="font-medium text-[var(--text-primary)]">Files</strong> are written into every workspace.</span>
       </div>
 
       {showAdd && (
@@ -339,37 +337,37 @@ export function PromptComponentManager() {
       )}
 
       {isLoading ? (
-        <div className="flex items-center justify-center py-8 text-sm text-[var(--text-secondary)]">
-          <Loader2 className="h-4 w-4 animate-spin mr-2" />
+        <div className="flex items-center justify-center py-6 text-sm text-[var(--text-secondary)]">
+          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
           Loading…
         </div>
       ) : items.length === 0 && !showAdd ? (
-        <div className="rounded-lg border border-[var(--border)] px-4 py-6 text-center space-y-2" style={{ background: 'var(--bg-secondary)' }}>
-          <p className="text-sm text-[var(--text-secondary)]">No Conduit-wide instructions or files yet.</p>
-          <p className="text-xs text-[var(--text-secondary)]">
-            Add house style, org rules, or a CLAUDE.md / AGENTS.md that every agent should see.
+        <div className="rounded-md border border-dashed border-[var(--border)] bg-[var(--bg-secondary)] px-3 py-5 text-center">
+          <p className="text-sm text-[var(--text-secondary)]">No Conduit-wide components yet.</p>
+          <p className="mt-1 text-[11px] text-[var(--text-secondary)]">
+            Add house style, org rules, or a shared CLAUDE.md / AGENTS.md.
           </p>
-          <Button size="sm" variant="outline" className="mt-1 gap-1.5" onClick={() => setShowAdd(true)}>
+          <Button size="sm" variant="outline" className="mt-2 h-7 gap-1.5" onClick={() => setShowAdd(true)}>
             <Plus className="h-3.5 w-3.5" />
-            Add your first component
+            Add component
           </Button>
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="space-y-3">
           {mine.length > 0 && (
-            <>
-              <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-secondary)] px-1 py-1">
+            <div className="overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-secondary)]">
+              <div className="border-b border-[var(--border)] bg-[var(--bg-primary)]/40 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--text-secondary)]">
                 Mine <span className="ml-1 opacity-60">{mine.length}</span>
               </div>
               {mine.map((item) => (
                 <ComponentRow key={item.id} item={item} isOwner onShare={() => setShareId(item.id)} />
               ))}
-            </>
+            </div>
           )}
           {shared.length > 0 && (
-            <>
-              <div className="text-[10px] font-medium uppercase tracking-wider text-[var(--text-secondary)] px-1 py-1">
-                Shared with me <span className="ml-1 opacity-60">{shared.length}</span>
+            <div className="overflow-hidden rounded-md border border-[var(--border)] bg-[var(--bg-secondary)]">
+              <div className="border-b border-[var(--border)] bg-[var(--bg-primary)]/40 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--text-secondary)]">
+                Shared <span className="ml-1 opacity-60">{shared.length}</span>
               </div>
               {shared.map((item) => (
                 <ComponentRow
@@ -379,7 +377,7 @@ export function PromptComponentManager() {
                   onShare={() => setShareId(item.id)}
                 />
               ))}
-            </>
+            </div>
           )}
         </div>
       )}
