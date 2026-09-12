@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { Info, Check, Loader2, KeyRound, HardDrive, Trash2, Timer } from 'lucide-react'
+import { Check, Loader2, KeyRound, HardDrive, Trash2, Timer, ShieldCheck } from 'lucide-react'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
 import { useAgentCredentialStatus, useSetAgentCredential } from '@renderer/hooks/useAgentCredentials'
@@ -9,6 +9,7 @@ import { useStorageUsage } from '@renderer/hooks/useStorageUsage'
 import { formatBytes } from '@renderer/lib/utils'
 import type { RunnerType, SweepResult } from '@shared/types'
 import { PromptComponentManager } from './PromptComponentManager'
+import { ConfigHealthCard } from './ConfigHealthCard'
 
 interface RunnerMeta {
   runner: RunnerType
@@ -85,33 +86,25 @@ function RunnerSettingsCard({
   }
 
   return (
-    <div className="rounded-lg border border-[var(--border)] px-4 py-3.5 space-y-3.5" style={{ background: 'var(--bg-secondary)' }}>
-      {/* Header: harness name + env var + credential status */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <KeyRound className="h-4 w-4 flex-shrink-0 text-[var(--text-secondary)]" />
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-[var(--text-primary)]">{meta.label}</span>
-              <code className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-primary)] text-[var(--text-secondary)]">
-                {meta.envVar}
-              </code>
-            </div>
-            <p className="text-xs text-[var(--text-secondary)] mt-0.5">{meta.hint}</p>
+    <div className="flex min-w-0 flex-col rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] p-4">
+      <div className="flex min-h-[4.5rem] items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-[var(--text-primary)]">{meta.label}</span>
+            <code className="rounded bg-[var(--bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--text-secondary)]">
+              {meta.envVar}
+            </code>
           </div>
+          <p className="mt-1 text-xs leading-4 text-[var(--text-secondary)]">{meta.hint}</p>
         </div>
-        {configured ? (
-          <span className="flex items-center gap-1 text-xs font-medium text-green-500 flex-shrink-0">
-            <Check className="h-3.5 w-3.5" />
-            Configured
-          </span>
-        ) : (
-          <span className="text-xs text-[var(--text-secondary)] flex-shrink-0">Not set</span>
-        )}
+        <span className={`flex flex-shrink-0 items-center gap-1 rounded-full px-2 py-1 text-[10px] font-semibold uppercase tracking-wide ${configured ? 'bg-emerald-500/10 text-emerald-500' : 'bg-[var(--bg-primary)] text-[var(--text-secondary)]'}`}>
+          {configured && <Check className="h-3 w-3" />}
+          {configured ? 'Connected' : 'Not set'}
+        </span>
       </div>
 
-      {/* API key input */}
-      <div className="flex items-center gap-2">
+      <label className="mt-4 text-[11px] font-medium text-[var(--text-secondary)]">API key</label>
+      <div className="mt-1.5 flex items-center gap-2">
         <Input
           type="password"
           value={keyValue}
@@ -119,7 +112,7 @@ function RunnerSettingsCard({
           onKeyDown={(e) => {
             if (e.key === 'Enter') handleSaveKey()
           }}
-          placeholder={configured ? 'Enter a new key to replace the stored one…' : 'Paste API key…'}
+          placeholder={configured ? 'Replace existing key…' : 'Paste API key…'}
           autoComplete="off"
           className="flex-1"
         />
@@ -127,34 +120,32 @@ function RunnerSettingsCard({
           {credBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
           Save
         </Button>
-        {configured && (
-          <Button size="sm" variant="ghost" onClick={handleClearKey} disabled={credBusy}>
-            Clear
-          </Button>
-        )}
       </div>
+      {configured && (
+        <button
+          type="button"
+          onClick={handleClearKey}
+          disabled={credBusy}
+          className="mt-1.5 w-fit text-[11px] text-[var(--text-secondary)] hover:text-red-400 disabled:opacity-50"
+        >
+          Remove saved key
+        </button>
+      )}
 
-      {/* Background-task timeout — same harness, so it lives in the same card */}
-      <div className="flex items-center justify-between gap-3 pt-3 border-t border-[var(--border)]">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <Timer className="h-4 w-4 flex-shrink-0 text-[var(--text-secondary)]" />
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-[var(--text-primary)]">Background-task timeout</span>
-              {!timeoutSupported && (
-                <span className="text-[10px] px-1.5 py-0.5 rounded bg-[var(--bg-primary)] text-[var(--text-secondary)]">
-                  no effect yet
-                </span>
-              )}
-            </div>
-            <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-              {timeoutSupported
-                ? 'Injected as CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS. 0 = wait indefinitely.'
-                : 'No known wait-ceiling env var for this CLI yet — stored, but not applied.'}
-            </p>
-          </div>
+      <div className="mt-auto border-t border-[var(--border)] pt-4">
+        <div className="flex items-center gap-2">
+          <Timer className="h-3.5 w-3.5 text-[var(--text-secondary)]" />
+          <span className="text-xs font-medium text-[var(--text-primary)]">Background wait</span>
+          {!timeoutSupported && (
+            <span className="rounded bg-[var(--bg-primary)] px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-[var(--text-secondary)]">
+              Not applied
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2 flex-shrink-0">
+        <p className="mt-1 text-[11px] leading-4 text-[var(--text-secondary)]">
+          {timeoutSupported ? 'How long to wait for background work. Use 0 for no limit.' : 'Saved for future CLI support.'}
+        </p>
+        <div className="mt-2 flex items-center gap-2">
           <Input
             type="number"
             min={0}
@@ -163,10 +154,10 @@ function RunnerSettingsCard({
             onKeyDown={(e) => {
               if (e.key === 'Enter') handleSaveTimeout()
             }}
-            className="w-24"
+            className="w-20"
           />
           <span className="text-xs text-[var(--text-secondary)]">sec</span>
-          <Button size="sm" onClick={handleSaveTimeout} disabled={timeoutBusy || !timeoutDirty} className="gap-1.5">
+          <Button size="sm" variant="outline" onClick={handleSaveTimeout} disabled={timeoutBusy || !timeoutDirty} className="ml-auto gap-1.5">
             {timeoutBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
             Save
           </Button>
@@ -211,7 +202,7 @@ function StorageUsageSummary() {
 
   const { totalBytes, reclaimableBytes } = usage.data
   return (
-    <div className="mt-1">
+    <div className="mt-2">
       <div className="flex items-center gap-1.5">
         <span className="text-sm font-semibold text-[var(--text-primary)]">
           {formatBytes(totalBytes)}
@@ -232,17 +223,18 @@ function StorageMaintenanceCard() {
   const sweep = useDataDirSweep()
 
   return (
-    <div className="rounded-lg border border-[var(--border)] px-4 py-3.5" style={{ background: 'var(--bg-secondary)' }}>
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-start gap-2.5 min-w-0">
-          <HardDrive className="h-4 w-4 flex-shrink-0 text-[var(--text-secondary)] mt-0.5" />
+    <div className="rounded-xl border border-[var(--border)] bg-[var(--bg-secondary)] p-5">
+      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+        <div className="flex min-w-0 items-start gap-3">
+          <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-[var(--bg-primary)] text-[var(--text-secondary)]">
+            <HardDrive className="h-4 w-4" />
+          </div>
           <div className="min-w-0">
-            <div className="text-sm font-medium text-[var(--text-primary)]">Data directory</div>
+            <div className="text-sm font-semibold text-[var(--text-primary)]">Conduit data</div>
             <StorageUsageSummary />
-            <p className="text-xs text-[var(--text-secondary)] mt-2">
-              Reclaim disk from finished runs — orphaned git worktrees, temp workspaces, and per-run
-              MCP configs. This happens automatically after each run and on a timer; run it now to
-              clean up immediately. Runs currently executing are never touched.
+            <p className="mt-2 max-w-2xl text-xs leading-4 text-[var(--text-secondary)]">
+              Clean up worktrees, temporary workspaces, and MCP files left by finished runs.
+              Active runs are never touched.
             </p>
           </div>
         </div>
@@ -273,45 +265,58 @@ export function SettingsManager() {
   const { data: timeouts } = useRunnerTimeouts()
 
   return (
-    <div className="flex flex-col h-full" style={{ background: 'var(--bg-primary)' }}>
-      {/* Header */}
-      <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--border)] flex-shrink-0">
-        <div>
-          <h1 className="text-sm font-semibold text-[var(--text-primary)]">Settings</h1>
-          <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-            Agent authentication, Conduit-wide prompts, and storage
+    <div className="flex h-full flex-col bg-[var(--bg-primary)]">
+      <div className="flex-shrink-0 border-b border-[var(--border)]">
+        <div className="mx-auto w-full max-w-6xl px-5 py-5 sm:px-8">
+          <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--text-secondary)]">
+            <ShieldCheck className="h-3.5 w-3.5" />
+            Workspace administration
+          </div>
+          <h1 className="mt-2 text-xl font-semibold tracking-tight text-[var(--text-primary)]">Conduit settings</h1>
+          <p className="mt-1 text-sm text-[var(--text-secondary)]">
+            Check readiness, connect agent runtimes, and manage defaults for every run.
           </p>
         </div>
       </div>
 
-      {/* Body */}
-      <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3 max-w-3xl">
-        <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-[var(--accent)]/10 border border-[var(--accent)]/20 text-xs text-[var(--text-secondary)]">
-          <Info className="h-3.5 w-3.5 text-[var(--accent)] flex-shrink-0 mt-0.5" />
-          <span>
-            Keys and the background-task timeout are stored per agent harness and scoped to your
-            account — every agent you own uses them. Keys are encrypted at rest and injected as the
-            runner's environment variable. An explicit env var or timeout set on an individual agent
-            overrides what you store here.
-          </span>
-        </div>
+      <div className="flex-1 overflow-y-auto">
+        <main className="mx-auto w-full max-w-6xl space-y-10 px-5 py-6 pb-16 sm:px-8 sm:py-8">
+          <ConfigHealthCard />
 
-        <h2 className="text-xs font-medium text-[var(--text-secondary)] pt-1">Agent harnesses</h2>
-        {RUNNERS.map((meta) => (
-          <RunnerSettingsCard
-            key={meta.runner}
-            meta={meta}
-            configured={!!status?.[meta.runner]}
-            seconds={timeouts?.[meta.runner] ?? 0}
-          />
-        ))}
+          <section>
+            <div className="mb-4">
+              <h2 className="text-base font-semibold text-[var(--text-primary)]">Agent connections</h2>
+              <p className="mt-1 max-w-3xl text-sm text-[var(--text-secondary)]">
+                Add credentials for the CLIs your agents use. Keys are encrypted and scoped to your account;
+                settings on an individual agent take precedence.
+              </p>
+            </div>
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {RUNNERS.map((meta) => (
+                <RunnerSettingsCard
+                  key={meta.runner}
+                  meta={meta}
+                  configured={!!status?.[meta.runner]}
+                  seconds={timeouts?.[meta.runner] ?? 0}
+                />
+              ))}
+            </div>
+          </section>
 
-        <div className="pt-3">
-          <PromptComponentManager />
-        </div>
+          <section className="border-t border-[var(--border)] pt-8">
+            <PromptComponentManager />
+          </section>
 
-        <h2 className="text-xs font-medium text-[var(--text-secondary)] pt-3">Storage maintenance</h2>
-        <StorageMaintenanceCard />
+          <section className="border-t border-[var(--border)] pt-8">
+            <div className="mb-4">
+              <h2 className="text-base font-semibold text-[var(--text-primary)]">Storage</h2>
+              <p className="mt-1 text-sm text-[var(--text-secondary)]">
+                See how much space Conduit uses and safely reclaim files from completed runs.
+              </p>
+            </div>
+            <StorageMaintenanceCard />
+          </section>
+        </main>
       </div>
     </div>
   )
