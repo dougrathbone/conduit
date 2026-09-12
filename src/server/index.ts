@@ -1,6 +1,7 @@
 // Initialise error reporting BEFORE any other import loads (see ./observability/instrument).
 import './observability/instrument'
 import { reporter, getReporterNames } from './observability'
+import { log, flushLogging } from './logging'
 
 import express from 'express'
 import cookieParser from 'cookie-parser'
@@ -149,7 +150,7 @@ function contextToReporterUser(context: RequestContext): ReporterUser {
 
 const ipConfig = loadIpRestrictionsConfig(DATA_DIR)
 if (ipConfig.enabled) {
-  console.log(`[conduit] IP restrictions enabled. Allowed: ${ipConfig.allowedCidrs.join(', ')}`)
+  log.info('IP restrictions enabled', { allowedCidrs: ipConfig.allowedCidrs })
 }
 
 app.use(createIpRestrictionMiddleware(ipConfig))
@@ -495,7 +496,7 @@ const handlers: Record<string, HandlerFn> = {
       ctx.userId
     )
     repoSyncService.triggerSync(repo.id).catch((err) =>
-      console.error(`[server] Initial sync failed for repo ${repo.id}:`, err)
+      log.error('Initial repo sync failed', { repoId: repo.id, err })
     )
     return repo
   },
@@ -867,7 +868,7 @@ httpServer.on('upgrade', async (req, socket, head) => {
       req.headers as Record<string, string | string[] | undefined>
     )
     if (!isIpAllowed(clientIp, ipConfig)) {
-      console.warn(`[conduit] Blocked worker WebSocket from ${clientIp}`)
+      log.warn('Blocked worker WebSocket', { clientIp })
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
       socket.destroy()
       return
@@ -881,7 +882,7 @@ httpServer.on('upgrade', async (req, socket, head) => {
       req.headers as Record<string, string | string[] | undefined>
     )
     if (!isIpAllowed(clientIp, ipConfig)) {
-      console.warn(`[conduit] Blocked WebSocket from ${clientIp}`)
+      log.warn('Blocked browser WebSocket', { clientIp })
       socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
       socket.destroy()
       return
@@ -955,26 +956,25 @@ async function start(): Promise<void> {
   // CONDUIT_WORKER_FACTORY fails at boot, not at the first run. Also surface
   // the remote worker endpoint state (token required for workers to connect).
   const factory = getWorkerFactory()
-  console.log(`[server] Worker factory: ${factory.kind}`)
+  log.info('Worker factory selected', { workerFactory: factory.kind })
   if (factory.kind !== 'local' && !WorkerControlPlane.token()) {
-    console.warn(
-      '[server] CONDUIT_WORKER_TOKEN is not set — remote workers cannot authenticate ' +
-        'to /ws/worker; remote runs will fail with "No connected worker".'
+    log.warn(
+      'CONDUIT_WORKER_TOKEN is not set — remote workers cannot authenticate to /ws/worker; remote runs will fail with "No connected worker".'
     )
   }
 
   // Ensure dev user exists for FK integrity
   if (!isAuthEnabled()) {
     await ensureDevUser()
-    console.log('[server] Auth disabled — running in dev bypass mode')
+    log.info('Auth disabled — running in dev bypass mode')
   } else {
     // Initialize OIDC client asynchronously
     import('./auth/okta').then(({ initOidcClient }) =>
       initOidcClient().catch((err: unknown) =>
-        console.error('[server] Failed to initialize OIDC client:', err)
+        log.error('Failed to initialize OIDC client', { err })
       )
     )
-    console.log('[server] Auth enabled — Okta OIDC configured')
+    log.info('Auth enabled — Okta OIDC configured')
   }
 
   // Local / missing-kind orphans fail immediately. Remote/eks/fargate runs with
@@ -1012,10 +1012,10 @@ async function start(): Promise<void> {
       deleteExpiredSessions()
         .then((count) => {
           if (count > 0) {
-            console.log(`[server] Cleaned up ${count} expired session(s)`)
+            log.info('Cleaned up expired sessions', { count })
           }
         })
-        .catch((err) => console.error('[server] Session cleanup failed:', err))
+        .catch((err) => log.error('Session cleanup failed', { err }))
     }, 60 * 60 * 1000)
   }
 
@@ -1024,7 +1024,7 @@ async function start(): Promise<void> {
   // this only sweeps abandoned flows.
   setInterval(() => {
     deleteExpiredPendingAuth().catch((err) =>
-      console.error('[server] Pending OAuth cleanup failed:', err)
+      log.error('Pending OAuth cleanup failed', { err })
     )
   }, 60 * 60 * 1000)
 
@@ -1034,15 +1034,13 @@ async function start(): Promise<void> {
   // origin, which breaks behind a load balancer / multiple hostnames. Warn loudly
   // in deployed (auth-enabled) mode so it isn't silently misconfigured.
   if (isAuthEnabled() && !process.env.CONDUIT_BASE_URL) {
-    console.warn(
-      '[conduit] WARNING: CONDUIT_BASE_URL is not set. MCP OAuth redirect URIs will be ' +
-        'derived from the browser origin and may be unstable, causing "Mismatching redirect URI" ' +
-        'errors (e.g. Datadog). Set CONDUIT_BASE_URL to the public base URL in production.'
+    log.warn(
+      'CONDUIT_BASE_URL is not set. MCP OAuth redirect URIs will be derived from the browser origin and may be unstable, causing "Mismatching redirect URI" errors. Set CONDUIT_BASE_URL to the public base URL in production.'
     )
   }
 
   httpServer.listen(PORT, () => {
-    console.log(`Conduit server running at http://localhost:${PORT}`)
+    log.info('Conduit server listening', { port: PORT })
   })
 
   // Graceful shutdown. K8s sends SIGTERM and waits up to
@@ -1051,8 +1049,8 @@ async function start(): Promise<void> {
   const shutdown = async (signal: string) => {
     if (shuttingDown) return
     shuttingDown = true
-    console.log(`[server] Received ${signal}, draining…`)
-    httpServer.close(() => console.log('[server] HTTP server closed'))
+    log.info('Received shutdown signal, draining', { signal })
+    httpServer.close(() => log.info('HTTP server closed'))
     for (const ws of clients) ws.close(1001, 'Server shutting down')
     triggerService.stop()
     repoSyncService.stop()
@@ -1061,10 +1059,11 @@ async function start(): Promise<void> {
     stopOrphanReconciliation()
     await getWorkerFactory()
       .shutdown()
-      .catch((err) => console.error('[server] Worker factory shutdown failed:', err))
+      .catch((err) => log.error('Worker factory shutdown failed', { err }))
     stopWorkerControlPlane()
-    // Flush buffered error events so shutdown-time reports are delivered.
+    // Flush buffered error events and OTLP logs so shutdown-time reports land.
     await reporter.flush(2000).catch(() => {})
+    await flushLogging(2000).catch(() => {})
     // Give in-flight requests up to 10s to finish, then exit.
     setTimeout(() => process.exit(0), 10_000).unref()
   }
@@ -1075,25 +1074,23 @@ async function start(): Promise<void> {
 // Global safety nets for process-level errors that escape all other handlers.
 // These are our generic capture path (not Sentry's built-in integrations, which
 // are disabled in sentryReporter.ts) so every configured provider sees them.
-// We always console.error first, so diagnostics survive even when no reporter is
+// We always log first, so diagnostics survive even when no reporter is
 // configured (empty composite) — matching Node's default stderr behaviour.
 process.on('unhandledRejection', (reason) => {
-  console.error('[server] Unhandled promise rejection:', reason)
+  log.error('Unhandled promise rejection', { err: reason })
   reporter.captureException(reason, { tags: { kind: 'unhandledRejection' } })
 })
 process.on('uncaughtException', (err) => {
-  console.error('[server] Uncaught exception:', err)
+  log.error('Uncaught exception', { err })
   reporter.captureException(err, { tags: { kind: 'uncaughtException' } })
   // Flush best-effort, then exit non-zero regardless of flush outcome. Guard the
   // promise so a rejecting flush can't itself become an unhandledRejection.
-  reporter
-    .flush(2000)
-    .catch(() => {})
+  Promise.all([reporter.flush(2000).catch(() => {}), flushLogging(2000).catch(() => {})])
     .finally(() => process.exit(1))
 })
 
 start().catch((err) => {
-  console.error('[server] Startup failed:', err)
+  log.error('Startup failed', { err })
   reporter.captureException(err, { tags: { phase: 'startup' } })
   process.exit(1)
 })

@@ -5,6 +5,7 @@ import { getClient } from '../db/queries/mcpOAuthClients'
 import { refreshAccessToken, normalizeTokenScheme } from '../../server/mcpOAuth/flow'
 import { auditMcpOAuth } from '../../server/mcpOAuth/audit'
 import { isUrlMcpServer } from '../../shared/mcp'
+import { log } from '../../server/logging'
 
 const GLOBAL_OWNER = '__global__'
 
@@ -48,7 +49,7 @@ async function resolveValidToken(url: string, owner: string): Promise<OAuthToken
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     auditMcpOAuth('token_refresh_failed', { serverUrl: url, owner, clientId: client.clientId, error: msg })
-    console.warn(`[conduit] refresh failed for ${url} (${owner}):`, err)
+    log.warn('OAuth token refresh failed', { url, owner, err })
     return null
   }
 }

@@ -2,6 +2,7 @@ import { eq, lt } from 'drizzle-orm'
 import { getDb } from '../index'
 import { sessions } from '../schema'
 import { encryptSecret, decryptSecret } from '../../../server/crypto'
+import { log } from '../../../server/logging'
 
 // Session access/refresh tokens are encrypted at rest with CONDUIT_SECRET_KEY
 // (same as MCP OAuth tokens and GitHub App keys). Decrypt tolerantly: a value
@@ -20,9 +21,8 @@ function safeDecrypt<T extends string | null>(value: T): T {
     // the user re-logs-in, but ops should know the key is off).
     if (!warnedDecryptFailure && /^[^:]+:[^:]+:[^:]+$/.test(value)) {
       warnedDecryptFailure = true
-      console.warn(
-        '[auth] A session token is ciphertext-shaped but could not be decrypted — ' +
-          'check CONDUIT_SECRET_KEY (wrong or rotated key?). Affected sessions will require re-login.'
+      log.warn(
+        'A session token is ciphertext-shaped but could not be decrypted — check CONDUIT_SECRET_KEY (wrong or rotated key?). Affected sessions will require re-login.'
       )
     }
     return value

@@ -1,6 +1,7 @@
 import { spawn } from 'child_process'
 import * as fs from 'fs'
 import * as path from 'path'
+import { log } from './logging'
 
 /**
  * Redact any credentials embedded in a URL's userinfo (e.g.
@@ -201,10 +202,7 @@ async function refreshStoredOriginUrl(clonePath: string, authUrl: string): Promi
   try {
     await runGit(['remote', 'set-url', 'origin', authUrl], { cwd: clonePath })
   } catch (err) {
-    console.warn(
-      `[gitOps] could not update the stored origin URL for ${clonePath}: ` +
-        `${err instanceof Error ? err.message : String(err)}`
-    )
+    log.warn('Could not update stored origin URL', { clonePath, err })
   }
 }
 
@@ -327,9 +325,7 @@ export async function createWorktree(
     await runGit(['lfs', 'fetch', '--all'], { cwd: worktreePath })
     await runGit(['lfs', 'checkout'], { cwd: worktreePath })
   } catch (err) {
-    console.warn(
-      `[gitOps] git-lfs materialization skipped for ${worktreePath}: ${err instanceof Error ? err.message : String(err)}`
-    )
+    log.warn('git-lfs materialization skipped', { worktreePath, err })
   }
 }
 
@@ -512,14 +508,14 @@ export async function gcBareClone(clonePath: string): Promise<boolean> {
   // (even a stale one), so don't spawn a doomed git. The catch below covers
   // the race — the lock appearing between this check and git's own attempt.
   if (fs.existsSync(path.join(clonePath, 'gc.pid'))) {
-    console.log(`[gitOps] gc skipped for ${clonePath}: gc.pid lock present (another gc is running)`)
+    log.info('gc skipped: gc.pid lock present', { clonePath })
     return false
   }
   try {
     await runGit(['gc'], { cwd: clonePath, timeoutMs: GC_TIMEOUT_MS })
   } catch (err) {
     if (err instanceof Error && isGcAlreadyRunningError(err.message)) {
-      console.log(`[gitOps] gc skipped for ${clonePath}: ${err.message}`)
+      log.info('gc skipped', { clonePath, err })
       return false
     }
     throw err

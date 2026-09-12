@@ -26,6 +26,7 @@ import {
   resolveWorkerReconnectTimeoutMs,
 } from '../shared/workerControl'
 import { reporter } from './observability'
+import { log } from './logging'
 import { LOGS_DIR } from '../main/utils/paths'
 import {
   openDeliveryLog,
@@ -487,7 +488,7 @@ export class WorkerControlPlane {
         if (protocolClose) {
           this.failRunsOfWorker(workerId, 'protocol violation', { systemEvent: false, ws })
         } else {
-          console.warn(`[worker-control] Worker disconnected: ${workerId}`)
+          log.warn('Worker disconnected', { workerId })
           this.detachOrFailRuns(workerId, ws)
         }
       }
@@ -526,9 +527,10 @@ export class WorkerControlPlane {
     switch (msg.type) {
       case 'worker:hello': {
         if (ctx.workerId && msg.workerId !== ctx.workerId) {
-          console.warn(
-            `[worker-control] Ignoring identity change on socket ${ctx.workerId} → ${msg.workerId}`
-          )
+          log.warn('Ignoring worker identity change on socket', {
+            workerId: ctx.workerId,
+            reportedWorkerId: msg.workerId,
+          })
           break
         }
         if (ctx.workerId && msg.workerId === ctx.workerId) {
@@ -556,10 +558,11 @@ export class WorkerControlPlane {
           lastHeartbeat: Date.now(),
           reportedRunIds: new Set(msg.activeRunIds),
         })
-        console.log(
-          `[worker-control] Worker connected: ${msg.workerId} ` +
-            `(runners: ${msg.capabilities.runners.join(', ') || 'none'}, v${msg.capabilities.version})`
-        )
+        log.info('Worker connected', {
+          workerId: msg.workerId,
+          runners: msg.capabilities.runners,
+          protocolVersion: msg.capabilities.version,
+        })
         this.waiters.get(msg.workerId)?.resolve(this.workers.get(msg.workerId)!)
         if (ws.readyState !== WebSocket.OPEN || ctx.closed()) {
           this.workers.delete(msg.workerId)
@@ -630,10 +633,11 @@ export class WorkerControlPlane {
       return true
     }
     if (a.mode === mode) return true
-    console.warn(
-      `[worker-control] Dropping ${mode} frame for run ${a.spec.runId} — ` +
-        `assignment is in ${a.mode} delivery mode`
-    )
+    log.warn('Dropping frame with mismatched delivery mode', {
+      runId: a.spec.runId,
+      frameMode: mode,
+      assignmentMode: a.mode,
+    })
     return false
   }
 
@@ -752,11 +756,11 @@ export class WorkerControlPlane {
       reporter.captureException(err instanceof Error ? err : new Error(String(err)), {
         tags: { component: 'worker-control', op: 'runExit', workerId: a.workerId, runId: msg.runId },
       })
-      console.error(
-        `[worker-control] Terminal finalization failed for run ${msg.runId} — ` +
-          `leaving the frame unacknowledged for replay:`,
-        err
-      )
+      log.error('Terminal finalization failed — leaving the frame unacknowledged for replay', {
+        runId: msg.runId,
+        workerId: a.workerId,
+        err,
+      })
       if (this.isLiveSocket(a.ws)) {
         this.scheduleExitRedrive(a)
       } else {
@@ -846,10 +850,10 @@ export class WorkerControlPlane {
     if (this.runs.get(runId) !== a) return
     this.clearExitRedrive(a)
     const windowMs = this.reconnectTimeoutMs
-    console.error(
-      `[worker-control] Could not persist the terminal result for run ${runId} ` +
-        `within ${windowMs}ms — rejecting the delivery`
-    )
+    log.error('Could not persist the terminal result within the delivery window — rejecting', {
+      runId,
+      windowMs,
+    })
     if (this.isLiveSocket(a.ws)) {
       this.sendOn(a.ws, { type: 'run:reject', runId, reason: REJECT_REASON })
     }
@@ -925,7 +929,7 @@ export class WorkerControlPlane {
     for (const runId of pendingRunIds) {
       const outcome = await this.adoptPendingRun(workerId, ws, runId)
       if (outcome !== 'declined') continue
-      console.warn(`[worker-control] Rejecting run ${runId} reported by worker ${workerId}`)
+      log.warn('Rejecting run reported by worker', { runId, workerId })
       this.sendOn(ws, { type: 'run:reject', runId, reason: REJECT_REASON })
     }
   }
@@ -1122,7 +1126,7 @@ export class WorkerControlPlane {
             runId,
           },
         })
-        console.error(`[worker-control] Failed to record the failure of run ${runId}:`, err)
+        log.error('Failed to record run failure', { runId, workerId: a.workerId, err })
       })
   }
 
@@ -1177,7 +1181,7 @@ export class WorkerControlPlane {
         } catch {
           // already closing
         }
-        console.warn(`[worker-control] Worker lease expired: ${w.workerId}`)
+        log.warn('Worker lease expired', { workerId: w.workerId })
         this.failRunsOfWorker(w.workerId, 'lost contact (lease expired)', { ws: w.ws })
       }
     }

@@ -21,6 +21,7 @@ import {
   type BroadcastFn,
 } from './runner'
 import { reporter } from './observability'
+import { log } from './logging'
 
 export const DEFAULT_RECOVERABLE_KINDS = ['remote', 'eks', 'fargate'] as const
 
@@ -290,7 +291,7 @@ export async function reconcileOrphanedRuns(
     await updateRun(run.id, { status: 'failed', endedAt: Date.now() })
   }
   if (immediate.length > 0) {
-    console.log(`[server] Marked ${immediate.length} orphaned run(s) as failed`)
+    log.info('Marked orphaned runs as failed', { count: immediate.length })
     reporter.captureMessage(
       `Marked ${immediate.length} orphaned run(s) as failed on startup — the previous Conduit ` +
         `process exited mid-run (deploy, crash, OOM, or disk-pressure eviction).`,

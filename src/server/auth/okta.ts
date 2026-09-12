@@ -1,4 +1,5 @@
 import { getOktaConfig, isAuthEnabled } from './config'
+import { log } from '../logging'
 import type { User } from '../../shared/types'
 
 // openid-client v6 is ESM-only, so we must use dynamic import
@@ -25,7 +26,7 @@ export async function initOidcClient(): Promise<void> {
     clientSecret
   )
 
-  console.log('[auth] OIDC client initialized for issuer:', issuer)
+  log.info('OIDC client initialized', { issuer })
 }
 
 export async function getAuthorizationUrl(): Promise<{
@@ -134,7 +135,7 @@ export async function searchOktaUsers(query: string): Promise<User[]> {
   })
 
   if (!res.ok) {
-    console.error(`[auth] Okta user search failed: ${res.status} ${res.statusText}`)
+    log.error('Okta user search failed', { status: res.status, statusText: res.statusText })
     return []
   }
 
@@ -190,7 +191,7 @@ async function oktaApiGet(path: string): Promise<unknown | null> {
 
   if (!res.ok) {
     if (res.status !== 404) {
-      console.error(`[auth] Okta API GET ${path} failed: ${res.status} ${res.statusText}`)
+      log.error('Okta API GET failed', { path, status: res.status, statusText: res.statusText })
     }
     return null
   }

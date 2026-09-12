@@ -9,6 +9,7 @@ import { getAuthorizationUrl, exchangeCode } from './okta'
 import { createSession, deleteSession } from '../../main/db/queries/sessions'
 import { resolveSession } from './session'
 import { setSessionCookie, clearSessionCookie, SESSION_COOKIE_NAME } from './cookie'
+import { log } from '../logging'
 
 // In-memory PKCE verifier storage keyed by state
 const pendingAuthRequests = new Map<string, string>()
@@ -87,7 +88,7 @@ router.get('/login', async (_req: Request, res: Response) => {
     pendingAuthRequests.set(state, codeVerifier)
     res.redirect(url.toString())
   } catch (err) {
-    console.error('[auth] Failed to build authorization URL:', err)
+    log.error('Failed to build authorization URL', { err })
     res.status(500).json({ error: 'Failed to start authentication' })
   }
 })
@@ -193,7 +194,7 @@ router.get('/callback', async (req: Request, res: Response) => {
 
     res.redirect('/')
   } catch (err) {
-    console.error('[auth] Callback error:', err)
+    log.error('Auth callback error', { err })
     res.status(500).type('html').send(
       renderAuthErrorPage({
         variant: 'error',

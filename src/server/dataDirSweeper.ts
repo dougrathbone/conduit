@@ -9,6 +9,7 @@ import { deleteWorkspace } from '../main/execution/workspace'
 import { getActiveWorkspacePaths, getActiveRunIds } from './runner'
 import { getAllRepositoryIds } from '../main/db/queries/repositories'
 import { reporter } from './observability'
+import { log } from './logging'
 import { deliveryCursorPath } from './runDeliveryLog'
 import type { SweepResult, StorageUsage } from '../shared/types'
 
@@ -494,12 +495,15 @@ async function runSweep(now: number): Promise<SweepResult> {
     result.cloningTmpRemoved +
     result.reposCompacted
   if (total > 0) {
-    console.log(
-      `[dataDirSweeper] Removed ${result.worktreesRemoved} worktree(s), ` +
-        `${result.workspacesRemoved} workspace(s), ${result.mcpConfigsRemoved} MCP config(s), ` +
-        `${result.logsRemoved} log(s), ${result.bareClonesRemoved} bare clone(s), ` +
-        `${result.cloningTmpRemoved} clone temp(s); compacted ${result.reposCompacted} clone(s).`
-    )
+    log.info('Sweep removed stale artifacts', {
+      worktreesRemoved: result.worktreesRemoved,
+      workspacesRemoved: result.workspacesRemoved,
+      mcpConfigsRemoved: result.mcpConfigsRemoved,
+      logsRemoved: result.logsRemoved,
+      bareClonesRemoved: result.bareClonesRemoved,
+      cloningTmpRemoved: result.cloningTmpRemoved,
+      reposCompacted: result.reposCompacted,
+    })
   }
   // A sweep changes on-disk sizes; drop the cached usage so the next read (and
   // the Settings query the client refetches after a manual sweep) is accurate.

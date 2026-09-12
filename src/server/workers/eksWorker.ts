@@ -27,6 +27,7 @@ import type { WorkerControlPlane } from '../workerControl'
 import { WORKER_CONNECT_TIMEOUT_MS } from '../workerControl'
 import { resolveWorkerServerUrl } from './cloudConfig'
 import { reporter } from '../observability'
+import { log } from '../logging'
 
 export interface EksWorkerConfig {
   namespace: string
@@ -202,7 +203,7 @@ export class EksWorkerFactory implements WorkerFactory {
       // signal since it leaks cluster resources.
       const status = (err as { statusCode?: number }).statusCode ?? (err as { code?: number }).code
       if (status !== 404) {
-        console.error(`[workers/eks] Failed to delete Job ${jobName} (run ${runId}):`, err)
+        log.error('Failed to delete Job', { jobName, runId, err })
         reporter.captureException(err, {
           tags: { component: 'workers/eks', op: 'deleteJob', runId },
         })

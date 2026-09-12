@@ -18,6 +18,7 @@ import { removeWorktree } from './gitOps'
 import { buildRunFailureReport } from './runFailure'
 import { resolvePushCredential, githubTokenEnvEntry } from './githubApp'
 import { publishRunResult } from './publisher'
+import { log } from './logging'
 import { buildTriggeredPrompt } from './triggers/promptBuilder'
 import { listEnabledGlobalPromptComponents } from '../main/db/queries/globalPromptComponents'
 import { applyGlobalPromptComponents, workspaceFilesFromComponents } from '../shared/promptComponents'
@@ -74,7 +75,7 @@ async function buildRunnerEnvOverlay(
       const cred = await getCredentialValue(ownerId, agent.runner as 'claude' | 'amp' | 'cursor')
       if (cred) env[envVar] = cred
     } catch (err) {
-      console.error(`[server/runner] Failed to load ${agent.runner} credential for ${ownerId}:`, err)
+    log.error('Failed to load runner credential', { runner: agent.runner, ownerId, err })
     }
   }
 
@@ -85,7 +86,7 @@ async function buildRunnerEnvOverlay(
     const effective = resolveBgTaskTimeoutSeconds(agent.bgTaskTimeoutSeconds, userSeconds)
     Object.assign(env, bgTaskTimeoutEnvEntry(agent.runner, effective, agent.envVars))
   } catch (err) {
-    console.error(`[server/runner] Failed to resolve bg-task timeout for ${ownerId}:`, err)
+    log.error('Failed to resolve bg-task timeout', { ownerId, err })
   }
 
   return env
@@ -142,7 +143,7 @@ export function notifyRunFinalized(): void {
   try {
     runFinalizedHook?.()
   } catch (err) {
-    console.error('[server/runner] run-finalized hook threw:', err)
+    log.error('Run-finalized hook threw', { err })
   }
 }
 
@@ -167,7 +168,7 @@ export function appendRunLog(runId: string, text: string, logFilePath?: string):
   try {
     fs.appendFileSync(target, JSON.stringify(event) + '\n')
   } catch (err) {
-    console.error(`[runner] Failed to append cleanup log for run ${runId}: ${err}`)
+    log.error('Failed to append cleanup log', { runId, err })
   }
   process.stdout.write(JSON.stringify({ runId, ...event }) + '\n')
 }
@@ -198,7 +199,7 @@ function cleanupRun(
           deleteWorkspace(workspacePath!)
         }
       } catch (err) {
-        console.error(`[runner] Workspace cleanup error for run ${runId}: ${err}`)
+        log.error('Workspace cleanup error', { runId, err })
       }
       // removeWorktree/deleteWorkspace swallow errors internally, so verify by
       // checking the directory is actually gone.
@@ -328,7 +329,7 @@ export function createRunOrchestration(opts: {
       })
     } catch (err) {
       finalized = false
-      console.error(`[server/runner] Terminal update failed for run ${runId}:`, err)
+      log.error('Terminal update failed', { runId, err })
       reporter.captureException(err instanceof Error ? err : new Error(String(err)), {
         tags: { component: 'runner', op: 'finalizeRun', runId, runner },
       })
@@ -360,7 +361,7 @@ export function createRunOrchestration(opts: {
         await publishRunResult(agentId, finalRun)
       }
     } catch (err) {
-      console.error(`[server/runner] Publish failed for run ${runId}:`, err)
+      log.error('Publish failed', { runId, err })
       reporter.captureException(err instanceof Error ? err : new Error(String(err)), {
         tags: { component: 'runner', op: 'publishRunResult', runId, runner },
       })
@@ -375,13 +376,13 @@ export function createRunOrchestration(opts: {
     },
     onDurableEvent: eventHandlers.onDurableEvent,
     onError: (err) => {
-      console.error(`[server/runner] Spawn error for run ${runId}:`, err)
+      log.error('Spawn error', { runId, err })
       reporter.captureException(err, {
         tags: { component: 'runner', runId, runner },
       })
       eventHandlers.onEvent({ kind: 'raw', stream: 'system', text: `\n[Error: ${err.message}]\n` })
       void finalizeRun('failed', undefined).catch((finalizeErr) => {
-        console.error(`[server/runner] Failed to finalize run ${runId} after spawn error:`, finalizeErr)
+        log.error('Failed to finalize run after spawn error', { runId, err: finalizeErr })
       })
     },
     onExit: (status, exitCode) => {
@@ -480,7 +481,7 @@ export async function startRunServer(
       reporter.captureException(pushTokenError, {
         tags: { component: 'runner', op: 'resolvePushCredential', repoId: repo.id },
       })
-      console.error(`[server/runner] Could not resolve push credentials for repo ${repo.id}:`, pushTokenError)
+      log.error('Could not resolve push credentials', { repoId: repo.id, err: pushTokenError })
     }
     const specRepo = {
       url: repo.url,
@@ -624,7 +625,7 @@ export async function startRunServer(
 export async function stopRun(runId: string): Promise<void> {
   const activeRun = activeProcesses.get(runId)
   if (!activeRun) {
-    console.warn(`[server/runner] stopRun called for unknown runId: ${runId}`)
+    log.warn('stopRun called for unknown run', { runId })
     return
   }
 
@@ -635,6 +636,6 @@ export async function stopRun(runId: string): Promise<void> {
   try {
     await activeRun.handle.cancel()
   } catch (err) {
-    console.error(`[server/runner] Failed to cancel run ${runId}:`, err)
+    log.error('Failed to cancel run', { runId, err })
   }
 }

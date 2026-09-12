@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express'
 import { IpRestrictionsConfig, isIpAllowed, extractClientIp } from '../ipRestrictions'
+import { log } from '../logging'
 
 export function createIpRestrictionMiddleware(config: IpRestrictionsConfig) {
   return (req: Request, res: Response, next: NextFunction) => {
@@ -9,7 +10,7 @@ export function createIpRestrictionMiddleware(config: IpRestrictionsConfig) {
 
     if (isIpAllowed(clientIp, config)) return next()
 
-    console.warn(`[conduit] Blocked request from ${clientIp}`)
+    log.warn('Blocked HTTP request', { clientIp })
     res.status(403).json({ error: 'Forbidden: IP not in allowlist' })
   }
 }

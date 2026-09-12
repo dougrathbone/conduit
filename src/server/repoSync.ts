@@ -4,6 +4,7 @@ import { cloneRepo, fetchRepo, isDiskFullError, diskFullMessage } from './gitOps
 import { resolveRepoToken } from './githubApp'
 import { DEV_CONTEXT } from './auth/config'
 import { reporter } from './observability'
+import { log } from './logging'
 import type { BroadcastFn } from './runner'
 import type { RepoSyncStatus } from '../shared/types'
 
@@ -59,9 +60,9 @@ export class RepoSyncService {
   start(intervalMs: number = 5 * 60 * 1000): void {
     // Stale-worktree cleanup is owned by DataDirSweeper (startup + periodic +
     // post-run + manual); RepoSyncService only keeps the bare clones in sync.
-    this.syncAll().catch((err) => console.error('[repoSync] Initial sync failed:', err))
+    this.syncAll().catch((err) => log.error('Initial repo sync failed', { err }))
     this.intervalId = setInterval(() => {
-      this.syncAll().catch((err) => console.error('[repoSync] Periodic sync failed:', err))
+      this.syncAll().catch((err) => log.error('Periodic repo sync failed', { err }))
     }, intervalMs)
   }
 
@@ -76,7 +77,7 @@ export class RepoSyncService {
     const repos = await listRepositories(DEV_CONTEXT.userId, DEV_CONTEXT.userGroupIds)
     for (const repo of repos) {
       this.syncRepo(repo.id).catch((err) =>
-        console.error(`[repoSync] Unexpected error syncing repo ${repo.id}:`, err)
+        log.error('Unexpected error syncing repo', { repoId: repo.id, err })
       )
     }
   }

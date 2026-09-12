@@ -445,6 +445,41 @@ builds without it skip upload entirely and emit no public maps:
   `@sentry/cli`. Also set `SENTRY_ORG`, `SENTRY_PROJECT`, and a release
   (`SENTRY_RELEASE` / `GIT_SHA`).
 
+## Structured logging (OpenTelemetry)
+
+Server and worker logs are **vendor-agnostic**. Call sites use `log` from
+`src/server/logging/` (types in `src/shared/logging.ts`) — never a Datadog or
+CloudWatch SDK. Each event is one JSON object on stdout with OpenTelemetry field
+names (`severity`, `body`/`message`, `service.name`, `deployment.environment.name`,
+plus attributes like `runId` / `workerId` / `component`). Any log shipper that
+tails stdout can ingest them.
+
+When an OTLP endpoint is set, the same events are also exported via the
+OpenTelemetry Logs SDK (`OTLP/HTTP`). Point that at a Datadog agent, Grafana
+Alloy, the contrib Collector, Honeycomb, etc. — Conduit does not know or care.
+
+**Always on:** JSON stdout (disable with `CONDUIT_LOG_STDOUT=false` if you only
+want OTLP).
+
+**OTLP (optional)** — standard OpenTelemetry env vars:
+
+| Variable | Description |
+|----------|-------------|
+| `OTEL_SERVICE_NAME` | Resource `service.name`. Default `conduit` or `conduit-worker` from `CONDUIT_PROCESS_MODE`. |
+| `OTEL_SERVICE_VERSION` | Resource `service.version`. Falls back to `SENTRY_RELEASE` / `GIT_SHA`. |
+| `OTEL_RESOURCE_ATTRIBUTES` | Extra resource attributes (`key=value,key2=value2`). `deployment.environment.name` here sets env. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Base OTLP HTTP URL (logs go to `{endpoint}/v1/logs`). |
+| `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Full logs URL; wins over the base endpoint. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Headers for the exporter (`key=value,key2=value2`). Logs-specific: `OTEL_EXPORTER_OTLP_LOGS_HEADERS`. |
+| `OTEL_LOGS_EXPORTER` | Default `otlp` when an endpoint is set. `none` disables export. |
+| `OTEL_SDK_DISABLED` | `true` skips the SDK (stdout JSON still works). |
+| `CONDUIT_LOG_LEVEL` | `debug` \| `info` \| `warn` \| `error` (default `info`). `OTEL_LOG_LEVEL` is accepted as a fallback. |
+| `CONDUIT_LOG_STDOUT` | JSON stdout on by default; `false` turns it off. |
+
+**Files**: `src/shared/logging.ts` (types + JSON format), `src/server/logging/`
+(config, OTLP SDK, `log` singleton). Init runs from `src/server/observability/instrument.ts`
+(first import in the server and worker entrypoints). `log.flush()` runs on graceful shutdown.
+
 ## Data Storage
 
 All data lives under `~/.conduit/` (or `$CONDUIT_DATA_DIR`):

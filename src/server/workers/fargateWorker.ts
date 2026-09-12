@@ -55,6 +55,7 @@ import type { WorkerControlPlane } from '../workerControl'
 import { resolveAssignTimeoutMs, resolveConnectTimeoutMs } from '../workerControl'
 import { resolveWorkerServerUrl } from './cloudConfig'
 import { reporter } from '../observability'
+import { log } from '../logging'
 
 /** Compatible Fargate allocation: 2 vCPU / 8 GiB. Enforced on every RunTask. */
 export const FARGATE_WORKER_CPU = '2048'
@@ -256,7 +257,7 @@ export class FargateWorkerFactory implements WorkerFactory {
       try {
         await this.stopTask(taskArn, runId, 'assignment failed')
       } catch (stopErr) {
-        console.error(`[workers/fargate] Stop after assignment failure also failed (run ${runId}):`, stopErr)
+        log.error('Stop after assignment failure also failed', { runId, err: stopErr })
       }
       throw err
     }
@@ -294,7 +295,7 @@ export class FargateWorkerFactory implements WorkerFactory {
           task = await this.describeTask(taskArn)
         } catch (err) {
           if (settled) break
-          console.error(`[workers/fargate] DescribeTasks failed for ${taskArn} (run ${runId}):`, err)
+          log.error('DescribeTasks failed', { taskArn, runId, err })
           reporter.captureException(err, {
             tags: { component: 'workers/fargate', op: 'watchTask', runId },
           })
@@ -362,10 +363,7 @@ export class FargateWorkerFactory implements WorkerFactory {
           return
         }
         lastError = err
-        console.error(
-          `[workers/fargate] Failed to stop task ${taskArn} (run ${runId}, attempt ${attempt}/${this.stopAttempts}):`,
-          err
-        )
+        log.error('Failed to stop task', { taskArn, runId, attempt, stopAttempts: this.stopAttempts, err })
         reporter.captureException(err, {
           tags: { component: 'workers/fargate', op: 'stopTask', runId },
           extra: { taskArn, attempt, stopAttempts: this.stopAttempts },
@@ -392,7 +390,12 @@ export class FargateWorkerFactory implements WorkerFactory {
     const message =
       `[workers/fargate] Giving up stopping task ${taskArn} (run ${runId}) after ` +
       `${this.stopAttempts} attempt(s); remaining tracked for later retry`
-    console.error(message, lastError)
+    log.error('Giving up stopping task after retries', {
+      taskArn,
+      runId,
+      attempts: this.stopAttempts,
+      err: lastError,
+    })
     reporter.captureMessage(message, 'error', {
       tags: { component: 'workers/fargate', op: 'stopTask', runId },
       extra: { taskArn, attempts: this.stopAttempts },
@@ -419,14 +422,18 @@ export class FargateWorkerFactory implements WorkerFactory {
         if (!task || task.lastStatus === 'STOPPED') return true
       } catch (err) {
         if (isTaskGone(err)) return true
-        console.error(`[workers/fargate] Failed to describe task ${taskArn} (run ${runId}):`, err)
+        log.error('Failed to describe task', { taskArn, runId, err })
         reporter.captureException(err, {
           tags: { component: 'workers/fargate', op: 'describeTask', runId },
         })
       }
       if (Date.now() >= deadline) {
         const message = `[workers/fargate] Task ${taskArn} (run ${runId}) did not reach STOPPED within ${this.stopVerifyTimeoutMs}ms`
-        console.error(message)
+        log.error('Task did not reach STOPPED within verify timeout', {
+          taskArn,
+          runId,
+          stopVerifyTimeoutMs: this.stopVerifyTimeoutMs,
+        })
         reporter.captureMessage(message, 'error', {
           tags: { component: 'workers/fargate', op: 'waitUntilStopped', runId },
         })
@@ -495,7 +502,7 @@ export function tryLoadE2eFakeEcsClient(env: NodeJS.ProcessEnv = process.env): E
       `CONDUIT_FARGATE_E2E_FAKE_ECS module must export createFakeEcsClient() or a client with send() (${resolved})`
     )
   }
-  console.warn(`[workers/fargate] e2e fake ECS loaded from ${resolved}`)
+  log.warn('e2e fake ECS loaded', { path: resolved })
   return client as ECSClient
 }
 
