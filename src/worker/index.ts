@@ -19,6 +19,8 @@
  * (API keys, git tokens, MCP OAuth headers), so the channel must be TLS
  * (wss://) outside localhost and the host must be dedicated to Conduit runs.
  */
+import '../server/observability/instrument'
+import { log, flushLogging } from '../server/logging'
 import { WebSocket } from 'ws'
 import * as os from 'os'
 import * as fs from 'fs'
@@ -68,9 +70,10 @@ const WORKER_ID = process.env.CONDUIT_WORKER_ID?.trim() || `${os.hostname()}-${p
 const PROTOCOL_VERSION = '2'
 
 if (!SERVER_URL || !TOKEN) {
-  console.error(
-    '[worker] CONDUIT_SERVER_URL (ws(s)://<host>/ws/worker) and CONDUIT_WORKER_TOKEN are required.'
-  )
+  log.error('Missing worker configuration', {
+    hasServerUrl: Boolean(SERVER_URL),
+    hasToken: Boolean(TOKEN),
+  })
   process.exit(1)
 }
 
@@ -139,7 +142,7 @@ function cleanupAfterRun(runId: string, handle: WorkerHandle): void {
         if (handle.worktreeClonePath) await removeWorktree(handle.worktreeClonePath, workspacePath)
         else deleteWorkspace(workspacePath)
       } catch (err) {
-        console.error(`[worker] Workspace cleanup failed for run ${runId}:`, err)
+        log.error('Workspace cleanup failed', { runId, err })
       }
     })()
   }, WORKSPACE_CLEANUP_DELAY_MS)
@@ -167,7 +170,7 @@ function sweepStaleArtifacts(): void {
     try {
       if (fs.statSync(full).mtimeMs > cutoff) continue
       fs.rmSync(full, { recursive: true, force: true })
-      console.log(`[worker] Swept stale artifact: ${entry.name}`)
+      log.info('Swept stale artifact', { name: entry.name })
     } catch {
       // best-effort
     }
@@ -197,7 +200,7 @@ async function drainOrDefer(delivery: ReliableDeliveryQueue): Promise<void> {
 
 async function execute(spec: RunSpec, assignId?: string): Promise<void> {
   const runId = spec.runId
-  console.log(`[worker] Starting run ${runId} (${spec.runner}, workspace: ${spec.workspace.kind})`)
+  log.info('Starting run', { runId, runner: spec.runner, workspaceKind: spec.workspace.kind })
 
   const delivery = createReliableDeliveryQueue()
   deliveryQueues.set(runId, delivery)
@@ -222,7 +225,7 @@ async function execute(spec: RunSpec, assignId?: string): Promise<void> {
         handles.delete(runId)
         await recordLocalExit(events, delivery, { type: 'run:exit', runId, status, exitCode })
         await drainOrDefer(delivery)
-        console.log(`[worker] Run ${runId} exited: ${status} (code ${exitCode ?? 'n/a'})`)
+        log.info('Run exited', { runId, status, exitCode: exitCode ?? undefined })
         if (handle) cleanupAfterRun(runId, handle)
         maybeExitAfterDelivery()
       })()
@@ -245,7 +248,7 @@ async function execute(spec: RunSpec, assignId?: string): Promise<void> {
   } catch (err) {
     // Prep failed (clone, config write, spawn args) — the factory rolled back
     // its partial work; tell the server so the run is marked failed.
-    console.error(`[worker] Failed to start run ${runId}:`, err)
+    log.error('Failed to start run', { runId, err })
     await recordLocalExit(events, delivery, {
       type: 'run:exit',
       runId,
@@ -283,7 +286,7 @@ function applyResume(runId: string, sequence: number): void {
 }
 
 async function applyReject(runId: string, reason: string): Promise<void> {
-  console.warn(`[worker] run:reject ${runId}: ${reason}`)
+  log.warn('Run rejected by server', { runId, reason })
   rejectedRuns.reject(runId)
   const result = await rejectAssignedRun({ runId, handles, deliveryQueues })
   if (result.handle) {
@@ -300,9 +303,7 @@ async function expireRecovery(): Promise<void> {
   shuttingDown = true
   policy.cancel()
   const pending = pendingRunIds(handles.keys(), deliveryQueues)
-  console.error(
-    `[worker] Delivery recovery expired — giving up on run(s): ${pending.join(', ') || '(none)'}`
-  )
+  log.error('Delivery recovery expired — giving up', { pendingRunIds: pending })
   const result = await expireDeliveryRecovery({ handles, pendingRunIds: pending })
   handles.clear()
   try {
@@ -325,7 +326,11 @@ function connect(): void {
     const caps = detectCapabilities()
     const activeRunIds = [...handles.keys()]
     const pending = pendingRunIds(activeRunIds, deliveryQueues)
-    console.log(`[worker] Connected to ${SERVER_URL} as ${WORKER_ID} (runners: ${caps.runners.join(', ') || 'none'})`)
+    log.info('Connected to control plane', {
+      serverUrl: SERVER_URL,
+      workerId: WORKER_ID,
+      runners: caps.runners,
+    })
     void send({
       type: 'worker:hello',
       workerId: WORKER_ID,
@@ -333,7 +338,7 @@ function connect(): void {
       activeRunIds,
       pendingRunIds: pending,
     }).catch((err) => {
-      console.error('[worker] hello failed:', err)
+      log.error('worker:hello failed', { err })
     })
     if (pending.length === 0) policy.resetBackoff()
     heartbeat = setInterval(() => {
@@ -356,9 +361,7 @@ function connect(): void {
     }
     if (msg.type === 'run:assign') {
       if (isWorkerOneShot() && acceptedAssignment) {
-        console.warn(
-          `[worker] Ignoring additional run:assign ${msg.spec.runId} — one-shot already assigned`
-        )
+        log.warn('Ignoring additional run:assign — one-shot already assigned', { runId: msg.spec.runId })
         return
       }
       acceptedAssignment = true
@@ -367,7 +370,7 @@ function connect(): void {
       }
       void execute(msg.spec, msg.assignId)
     } else if (msg.type === 'run:cancel') {
-      console.log(`[worker] Cancel requested for run ${msg.runId}`)
+      log.info('Cancel requested', { runId: msg.runId })
       void handles.get(msg.runId)?.cancel()
     } else if (msg.type === 'run:ack') {
       applyAck(msg.runId, msg.sequence)
@@ -388,14 +391,14 @@ function connect(): void {
       holdAllSends(deliveryQueues)
       policy.noteDisconnect(pendingRunIds(handles.keys(), deliveryQueues))
     }
-    console.warn(`[worker] Disconnected (${code} ${reason}) — reconnecting`)
+    log.warn('Disconnected from control plane — reconnecting', { code, reason: String(reason) })
     policy.scheduleReconnect(connect, () => {
       void expireRecovery()
     })
   })
 
   sock.on('error', (err) => {
-    console.error('[worker] WebSocket error:', err.message)
+    log.error('WebSocket error', { err })
   })
 }
 
@@ -404,7 +407,7 @@ const shutdown = createIdempotentShutdown(async (exitCode) => {
   policy.cancel()
   if (heartbeat) clearInterval(heartbeat)
   heartbeat = null
-  console.log(`[worker] Shutting down — cancelling ${handles.size} active run(s)`)
+  log.info('Shutting down — cancelling active runs', { activeRuns: handles.size })
   await factory.shutdown()
   handles.clear()
   try {
@@ -412,6 +415,7 @@ const shutdown = createIdempotentShutdown(async (exitCode) => {
   } catch {
     // best-effort
   }
+  await flushLogging(2000).catch(() => {})
   // Give the close frame a moment to flush before exiting.
   await new Promise<void>((resolve) => setTimeout(resolve, 500))
   process.exit(exitCode)

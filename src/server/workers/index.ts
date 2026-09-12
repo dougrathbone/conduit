@@ -18,6 +18,7 @@ import { RemoteWorkerFactory } from './remoteWorker'
 import { EksWorkerFactory, resolveEksConfig } from './eksWorker'
 import { FargateWorkerFactory, resolveFargateConfig } from './fargateWorker'
 import { getWorkerControlPlane } from '../workerControl'
+import { log } from '../logging'
 
 export const KNOWN_WORKER_FACTORIES = ['local', 'remote', 'eks', 'fargate'] as const
 export type WorkerFactoryKind = (typeof KNOWN_WORKER_FACTORIES)[number]
@@ -26,7 +27,7 @@ export function resolveWorkerFactoryKind(env: NodeJS.ProcessEnv = process.env): 
   const raw = env.CONDUIT_WORKER_FACTORY?.trim().toLowerCase()
   if (!raw) return 'local'
   if ((KNOWN_WORKER_FACTORIES as readonly string[]).includes(raw)) return raw as WorkerFactoryKind
-  console.warn(`[workers] Unknown CONDUIT_WORKER_FACTORY "${raw}" — falling back to "local"`)
+  log.warn('Unknown CONDUIT_WORKER_FACTORY — falling back to local', { requested: raw })
   return 'local'
 }
 

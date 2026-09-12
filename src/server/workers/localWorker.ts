@@ -9,6 +9,7 @@ import { createConfiguredWorktree, removeWorktree, runGit, buildAuthUrl, configu
 import { buildClaudeArgs, parseClaudeEvents } from '../../main/execution/adapters/claude'
 import { buildAmpArgs, parseAmpEvents } from '../../main/execution/adapters/amp'
 import { buildCursorArgs, parseCursorEvents } from '../../main/execution/adapters/cursor'
+import { log } from '../logging'
 
 /**
  * In-process worker: executes runs by spawning the agent CLI on this host.
@@ -76,7 +77,7 @@ export class LocalWorkerFactory implements WorkerFactory {
         if (worktreeClonePath) await removeWorktree(worktreeClonePath, workspacePath)
         else if (ephemeral) deleteWorkspace(workspacePath)
       } catch (cleanupErr) {
-        console.error(`[workers/local] Prep rollback failed for run ${spec.runId}:`, cleanupErr)
+        log.error('Prep rollback failed', { runId: spec.runId, err: cleanupErr })
       }
       throw err
     }
@@ -147,7 +148,7 @@ export class LocalWorkerFactory implements WorkerFactory {
         try {
           child.kill('SIGTERM')
         } catch (err) {
-          console.error(`[workers/local] Failed to kill process for run ${spec.runId}:`, err)
+          log.error('Failed to kill process', { runId: spec.runId, err })
         }
       },
     }
@@ -189,7 +190,7 @@ export class LocalWorkerFactory implements WorkerFactory {
       try {
         child.kill('SIGTERM')
       } catch (err) {
-        console.error(`[workers/local] Shutdown kill failed for run ${runId}:`, err)
+        log.error('Shutdown kill failed', { runId, err })
       }
     }
     this.active.clear()

@@ -3,6 +3,7 @@ import type { ExecutionRun, SlackPublishConfig, EmailPublishConfig, WebhookPubli
 import { getPublishTarget } from '../main/db/queries/publishTargets'
 import { getAgent } from '../main/db/queries/agents'
 import { readRunOutputText } from './utils'
+import { log } from './logging'
 
 /**
  * Publish target is a dumb delivery channel — the agent controls the content.
@@ -374,7 +375,7 @@ export async function publishRunResult(
           break
       }
     } catch (err) {
-      console.error(`[publisher] Failed to publish to target ${target.name}:`, err)
+      log.error('Failed to publish to target', { targetName: target.name, err })
     }
   }
 }

@@ -4,6 +4,7 @@ import { listAllEnabledTriggers, getTrigger, updateTrigger } from '../../main/db
 import { getAgent } from '../../main/db/queries/agents'
 import { startRunServer } from '../runner'
 import { reporter } from '../observability'
+import { log } from '../logging'
 
 type BroadcastFn = (channel: string, payload: unknown) => void
 
@@ -28,7 +29,7 @@ export class TriggerService {
       cronCount++
     }
     if (cronCount > 0) {
-      console.log(`[triggers] Registered ${cronCount} cron trigger(s)`)
+      log.info('Registered cron triggers', { count: cronCount })
     }
   }
 
@@ -60,7 +61,7 @@ export class TriggerService {
   async executeTrigger(triggerId: string, context?: TriggerContext): Promise<ExecutionRun | null> {
     const trigger = await getTrigger(triggerId)
     if (!trigger || !trigger.enabled) {
-      console.warn(`[triggers] Trigger ${triggerId} not found or disabled`)
+      log.warn('Trigger not found or disabled', { triggerId })
       return null
     }
 
@@ -84,10 +85,21 @@ export class TriggerService {
         triggerType: trigger.type,
       })
 
-      console.log(`[triggers] Fired trigger "${trigger.name}" (${trigger.type}) → run ${run.id}`)
+      log.info('Fired trigger', {
+        triggerId: trigger.id,
+        triggerName: trigger.name,
+        triggerType: trigger.type,
+        runId: run.id,
+        agentId: trigger.agentId,
+      })
       return run
     } catch (err) {
-      console.error(`[triggers] Failed to execute trigger "${trigger.name}":`, err)
+      log.error('Failed to execute trigger', {
+        triggerId: trigger.id,
+        triggerName: trigger.name,
+        agentId: trigger.agentId,
+        err,
+      })
       reporter.captureException(err, {
         tags: { component: 'triggers', triggerId: trigger.id, agentId: trigger.agentId },
       })
@@ -107,7 +119,7 @@ export class TriggerService {
         config.expression,
         () => {
           this.executeTrigger(trigger.id).catch((err) =>
-            console.error(`[triggers] Cron execution failed for ${trigger.id}:`, err)
+            log.error('Cron execution failed', { triggerId: trigger.id, err })
           )
         },
         options
@@ -115,7 +127,7 @@ export class TriggerService {
 
       this.cronJobs.set(trigger.id, task)
     } catch (err) {
-      console.error(`[triggers] Invalid cron expression for trigger "${trigger.name}":`, err)
+      log.error('Invalid cron expression', { triggerId: trigger.id, triggerName: trigger.name, err })
     }
   }
 }

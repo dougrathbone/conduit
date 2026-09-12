@@ -2,6 +2,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as crypto from 'crypto'
+import { log } from './logging'
 
 /**
  * For LOCAL (non-production) runs only: ensure CONDUIT_SECRET_KEY is available
@@ -30,7 +31,7 @@ export function ensureLocalSecretKey(opts: {
   } else {
     key = crypto.randomBytes(32).toString('hex')
     fs.writeFileSync(keyPath, key, { mode: 0o600 })
-    console.log(`[conduit] Generated local encryption key at ${keyPath}`)
+    log.info('Generated local encryption key', { keyPath })
   }
   env.CONDUIT_SECRET_KEY = key
 }

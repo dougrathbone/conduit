@@ -42,6 +42,11 @@ services:
       # GITHUB_PAT: ghp_xxx
       # SLACK_SIGNING_SECRET: xxx
       # SENTRY_DSN: https://xxx@sentry.io/yyy
+      # Structured logs: JSON on stdout by default. Optional OTLP export
+      # (Datadog agent, Grafana Alloy, contrib collector, …):
+      # OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4318
+      # OTEL_SERVICE_NAME: conduit
+      # OTEL_RESOURCE_ATTRIBUTES: deployment.environment.name=development
       # CONDUIT_ALLOWED_IPS: 127.0.0.1,10.0.0.0/8
       # Remote worker mode — uncomment BOTH lines when using the `worker`
       # profile below (token must match the worker's):
