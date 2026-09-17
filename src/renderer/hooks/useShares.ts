@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { api } from '@renderer/lib/ipc'
 import type { ShareableEntityType } from '@shared/types'
@@ -25,6 +26,30 @@ export function useShares(entityType: ShareableEntityType, entityId: string) {
     queryFn: () => api.shares.list(entityType, entityId),
     enabled: Boolean(entityId),
   })
+}
+
+/**
+ * Keep visibility-filtered entity lists in sync across authenticated browsers.
+ *
+ * Sharing changes are made by an owner in one browser, while the affected
+ * user's list is cached in another. The server broadcasts `share:changed` to
+ * every socket, so invalidate both the entity list and share details when that
+ * event arrives. This is especially important with Okta auth: unlike the dev
+ * user, authenticated users only receive entities visible to them.
+ */
+export function useShareChangeInvalidation() {
+  const queryClient = useQueryClient()
+
+  useEffect(() => {
+    return api.onShareChange(({ entityType, entityId }) => {
+      void queryClient.invalidateQueries({
+        queryKey: entityListKey(entityType),
+      })
+      void queryClient.invalidateQueries({
+        queryKey: [...SHARES_KEY, entityType, entityId],
+      })
+    })
+  }, [queryClient])
 }
 
 export function useCreateShare() {

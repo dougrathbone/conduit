@@ -10,6 +10,7 @@ import { LoginPage } from './components/LoginPage'
 import { useAuth } from './contexts/AuthContext'
 import { useUIStore } from './store/ui'
 import { useCreateAgent } from './hooks/useAgents'
+import { useShareChangeInvalidation } from './hooks/useShares'
 import { cn } from './lib/utils'
 
 function EmptyState() {
@@ -65,6 +66,7 @@ function EmptyState() {
 
 export default function App() {
   const { isAuthenticated } = useAuth()
+  useShareChangeInvalidation()
   const { selectedAgentId, selectAgent, showGlobalMcpManager, showPublishTargets, showRepositories, showSettings } = useUIStore()
   const createAgent = useCreateAgent()
 
