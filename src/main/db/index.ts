@@ -164,6 +164,18 @@ export async function initDb(): Promise<void> {
       updated_at BIGINT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS global_prompt_components (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      content TEXT NOT NULL DEFAULT '',
+      file_path TEXT,
+      enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      owner_id TEXT,
+      created_at BIGINT NOT NULL,
+      updated_at BIGINT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS runs (
       id TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL REFERENCES agents(id),
