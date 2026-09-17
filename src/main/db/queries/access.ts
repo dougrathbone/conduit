@@ -7,6 +7,7 @@ const TABLE_MAP: Record<ShareableEntityType, string> = {
   publishTarget: 'publish_targets',
   repository: 'repositories',
   globalMcpServer: 'global_mcp_servers',
+  globalPromptComponent: 'global_prompt_components',
 }
 
 // Rewrites `?` placeholders to pg-style `$1..$n` in positional order.

@@ -160,6 +160,18 @@ export const globalMcpServers = pgTable('global_mcp_servers', {
   updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
 })
 
+export const globalPromptComponents = pgTable('global_prompt_components', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  kind: text('kind').notNull(),
+  content: text('content').notNull().default(''),
+  filePath: text('file_path'),
+  enabled: boolean('enabled').notNull().default(true),
+  ownerId: text('owner_id'),
+  createdAt: bigint('created_at', { mode: 'number' }).notNull(),
+  updatedAt: bigint('updated_at', { mode: 'number' }).notNull(),
+})
+
 export const publishTargets = pgTable('publish_targets', {
   id: text('id').primaryKey(),
   name: text('name').notNull(),

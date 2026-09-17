@@ -29,6 +29,9 @@ export const api = {
   get globalMcps() {
     return getConduit().globalMcps
   },
+  get globalPromptComponents() {
+    return getConduit().globalPromptComponents
+  },
   get repos() {
     return getConduit().repos
   },

@@ -14,6 +14,8 @@ function entityListKey(entityType: ShareableEntityType): string[] {
       return ['repos']
     case 'globalMcpServer':
       return ['globalMcps']
+    case 'globalPromptComponent':
+      return ['globalPromptComponents']
   }
 }
 
