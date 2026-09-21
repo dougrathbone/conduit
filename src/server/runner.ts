@@ -15,7 +15,7 @@ import { deleteClaudeConfig } from '../main/utils/claudeConfig'
 import { DEV_USER_ID } from './auth/config'
 import { LOGS_DIR } from '../main/utils/paths'
 import { removeWorktree } from './gitOps'
-import { buildRunFailureReport } from './runFailure'
+import { buildRunFailureReport, failedStartLastLine } from './runFailure'
 import { resolvePushCredential, githubTokenEnvEntry } from './githubApp'
 import { publishRunResult } from './publisher'
 import { buildTriggeredPrompt } from './triggers/promptBuilder'
@@ -598,9 +598,14 @@ export async function startRunServer(
     // Rethrown to the caller (WS 'runs:start' handler / triggerService), which
     // reports it — capturing here too would double-report. The factory rolls
     // back any workspace/config it created before throwing.
+    // Persist lastLine so a failed start (disk full, clone error) is visible in
+    // run history instead of a blank Failed row — cron retries used to pile up
+    // unlabeled failures while the volume was exhausted.
+    const lastLine = failedStartLastLine(err)
+    orch.emitSystemMessage(lastLine)
     cleanupRun(runId, undefined, false)
     orch.abort()
-    await updateRun(runId, { status: 'failed', endedAt: Date.now() })
+    await updateRun(runId, { status: 'failed', endedAt: Date.now(), lastLine })
     broadcast('run:statusChange', { runId, status: 'failed' })
     throw err
   }
