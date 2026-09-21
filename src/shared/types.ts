@@ -69,6 +69,57 @@ export interface StorageUsage {
   reclaimableBytes: number
 }
 
+/** Severity of one Settings configuration-health check. */
+export type ConfigHealthStatus = 'ok' | 'warn' | 'error'
+
+/** Whether `git` is on the server PATH (required for managed-repo worktrees). */
+export interface GitConfigHealth {
+  status: ConfigHealthStatus
+  installed: boolean
+  version?: string
+  path?: string
+  message: string
+}
+
+/**
+ * Whether CONDUIT_SECRET_KEY is set and can encrypt/decrypt. `storedSecrets`
+ * is `unreadable` when a persisted blob exists but this key cannot decrypt it
+ * (typically a rotated or mismatched key).
+ */
+export interface EncryptionConfigHealth {
+  status: ConfigHealthStatus
+  configured: boolean
+  working: boolean
+  source: 'environment' | 'local-file' | 'none'
+  storedSecrets: 'readable' | 'unreadable' | 'none'
+  message: string
+}
+
+/** An enabled global MCP that is not currently healthy. */
+export interface McpAttentionItem {
+  id: string
+  name: string
+  status: 'unhealthy' | 'unauthorized'
+  message: string
+}
+
+/** Enabled global MCP servers visible to the acting user. */
+export interface McpConfigHealth {
+  status: ConfigHealthStatus
+  enabledCount: number
+  attention: McpAttentionItem[]
+  message: string
+}
+
+/** Snapshot of instance configuration shown on Settings. */
+export interface AppConfigHealth {
+  git: GitConfigHealth
+  encryption: EncryptionConfigHealth
+  mcps: McpConfigHealth
+  /** True only when git, encryption, and MCPs are all `ok`. */
+  ok: boolean
+}
+
 // ── Auth & Users ───────────────────────────────────────────────────────────
 
 export interface User {
@@ -88,7 +139,12 @@ export interface Group {
   updatedAt: number
 }
 
-export type ShareableEntityType = 'agent' | 'publishTarget' | 'repository' | 'globalMcpServer'
+export type ShareableEntityType =
+  | 'agent'
+  | 'publishTarget'
+  | 'repository'
+  | 'globalMcpServer'
+  | 'globalPromptComponent'
 
 export interface Share {
   id: string
@@ -379,6 +435,26 @@ export interface GlobalMcpServer {
   updatedAt: number
 }
 
+/**
+ * Instance-wide prompt component. Enabled items are applied to every agent run:
+ * instructions are prepended to the prompt, files are written into the workspace
+ * (and their contents are also included in the prompt).
+ */
+export type GlobalPromptComponentKind = 'instruction' | 'file'
+
+export interface GlobalPromptComponent {
+  id: string
+  name: string
+  kind: GlobalPromptComponentKind
+  content: string
+  /** Workspace-relative path; required when kind is `file`. */
+  filePath?: string
+  enabled: boolean
+  ownerId?: string
+  createdAt: number
+  updatedAt: number
+}
+
 // ── Repositories ────────────────────────────────────────────────────────────
 
 export type RepoSyncStatus = 'pending' | 'cloning' | 'ready' | 'syncing' | 'error'
@@ -597,6 +673,17 @@ export interface ConduitAPI {
     checkHealth: (serverConfig: McpServerEntry) => Promise<McpHealthResult>
     listTools: (serverConfig: McpServerEntry) => Promise<McpToolsResult>
   }
+  globalPromptComponents: {
+    list: () => Promise<GlobalPromptComponent[]>
+    create: (
+      data: Omit<GlobalPromptComponent, 'id' | 'createdAt' | 'updatedAt'>
+    ) => Promise<GlobalPromptComponent>
+    update: (
+      id: string,
+      data: Partial<Omit<GlobalPromptComponent, 'id' | 'createdAt' | 'updatedAt'>>
+    ) => Promise<GlobalPromptComponent>
+    delete: (id: string) => Promise<void>
+  }
   runners: {
     /** Report which runner CLIs are installed and on the server's PATH. */
     checkCli: () => Promise<RunnerCliStatus[]>
@@ -618,6 +705,8 @@ export interface ConduitAPI {
     sweep: () => Promise<SweepResult>
     /** Measure current data-directory disk usage (total + reclaimable). */
     storageUsage: () => Promise<StorageUsage>
+    /** Git, encryption-key, and global-MCP attention snapshot for Settings. */
+    configHealth: () => Promise<AppConfigHealth>
   }
   repos: {
     list: () => Promise<Repository[]>
