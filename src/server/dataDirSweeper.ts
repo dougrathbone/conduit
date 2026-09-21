@@ -11,6 +11,22 @@ import { getAllRepositoryIds } from '../main/db/queries/repositories'
 import { reporter } from './observability'
 import { deliveryCursorPath } from './runDeliveryLog'
 import type { SweepResult, StorageUsage } from '../shared/types'
+import {
+  classifyDiskUsage,
+  measureDiskPressure,
+  DISK_WARNING_FRACTION,
+  DISK_CRITICAL_FRACTION,
+  type DiskPressure,
+  type DiskPressureLevel,
+} from './diskPressure'
+
+export {
+  classifyDiskUsage,
+  measureDiskPressure,
+  DISK_WARNING_FRACTION,
+  DISK_CRITICAL_FRACTION,
+}
+export type { DiskPressure, DiskPressureLevel }
 
 /**
  * Periodic + on-demand cleaner for the data directory.
@@ -624,38 +640,6 @@ export function warmStorageUsage(): void {
 // add` dies with ENOSPC and every run crashes — with no prior warning. These
 // helpers surface fill level to the error reporter *before* that happens, so the
 // operator sees "80% full" instead of only the eventual crash.
-
-export type DiskPressureLevel = 'ok' | 'warning' | 'critical'
-export const DISK_WARNING_FRACTION = 0.8
-export const DISK_CRITICAL_FRACTION = 0.9
-
-/** Bucket a used-space fraction (0–1) into an alerting level. */
-export function classifyDiskUsage(usedFraction: number): DiskPressureLevel {
-  if (usedFraction >= DISK_CRITICAL_FRACTION) return 'critical'
-  if (usedFraction >= DISK_WARNING_FRACTION) return 'warning'
-  return 'ok'
-}
-
-export interface DiskPressure {
-  totalBytes: number
-  freeBytes: number
-  usedFraction: number
-}
-
-/**
- * Real filesystem usage of the volume backing `dir`, via `statfs` (the actual
- * device capacity/free — unlike {@link estimateStorageUsage}, which only sizes
- * Conduit's own artifacts). `freeBytes` uses blocks available to an unprivileged
- * user. Never returns a fraction outside [0, 1].
- */
-export async function measureDiskPressure(dir: string = DATA_DIR): Promise<DiskPressure> {
-  const st = await fs.promises.statfs(dir)
-  const totalBytes = st.bsize * st.blocks
-  const freeBytes = st.bsize * st.bavail
-  const usedFraction =
-    totalBytes > 0 ? Math.min(1, Math.max(0, (totalBytes - freeBytes) / totalBytes)) : 0
-  return { totalBytes, freeBytes, usedFraction }
-}
 
 /**
  * Measure the data volume and emit telemetry: always a breadcrumb (so any later

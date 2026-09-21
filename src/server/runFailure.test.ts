@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildRunFailureReport } from './runFailure'
+import { buildRunFailureReport, failedStartLastLine, cliKillDiagnostic } from './runFailure'
 
 describe('buildRunFailureReport', () => {
   it('flags a disk-full failure at error level with a diskFull tag', () => {
@@ -40,5 +40,26 @@ describe('buildRunFailureReport', () => {
   it('tags a normal exit as not killed by signal', () => {
     const r = buildRunFailureReport({ runId: 'r4', runner: 'claude', exitCode: 1, lastLine: 'boom' })
     expect(r.ctx.tags?.killedBySignal).toBe('false')
+  })
+})
+
+describe('failedStartLastLine', () => {
+  it('prefixes the thrown message so run history is not blank', () => {
+    expect(failedStartLastLine(new Error('Not enough disk space to start this run. Free space on the Conduit server or increase its data volume, then retry.'))).toMatch(
+      /^Failed to start run: Not enough disk space/
+    )
+  })
+})
+
+describe('cliKillDiagnostic', () => {
+  it('ignores a clean exit and a cooperative SIGTERM', () => {
+    expect(cliKillDiagnostic(0, null)).toBeUndefined()
+    expect(cliKillDiagnostic(null, 'SIGTERM')).toBeUndefined()
+    expect(cliKillDiagnostic(1, null)).toBeUndefined()
+  })
+
+  it('describes SIGKILL / exit 137 as an OOM-or-disk eviction', () => {
+    expect(cliKillDiagnostic(null, 'SIGKILL')).toMatch(/killed \(SIGKILL\)/)
+    expect(cliKillDiagnostic(137, null)).toMatch(/killed \(SIGKILL\)/)
   })
 })

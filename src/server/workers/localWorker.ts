@@ -8,6 +8,9 @@ import { createConfiguredWorktree, removeWorktree, runGit, buildAuthUrl, configu
 import { buildClaudeArgs, parseClaudeEvents } from '../../main/execution/adapters/claude'
 import { buildAmpArgs, parseAmpEvents } from '../../main/execution/adapters/amp'
 import { buildCursorArgs, parseCursorEvents } from '../../main/execution/adapters/cursor'
+import { assertVolumeHasSpace } from '../diskPressure'
+import { cliKillDiagnostic } from '../runFailure'
+import { WORKSPACES_BASE } from '../../main/utils/paths'
 
 /**
  * In-process worker: executes runs by spawning the agent CLI on this host.
@@ -23,6 +26,17 @@ export class LocalWorkerFactory implements WorkerFactory {
   private active = new Map<string, ChildProcess>()
 
   async startRun(spec: RunSpec, sink: WorkerEventSink): Promise<WorkerHandle> {
+    // Refuse to materialize a multi-GB worktree/clone when the backing volume
+    // is already critically full — those attempts fail with ENOSPC, leave a
+    // blank Failed run in history, and make exhaustion worse.
+    const volumeDir =
+      spec.workspace.kind === 'worktree'
+        ? spec.workspace.clonePath
+        : spec.workspace.kind === 'fixedDir'
+          ? spec.workspace.path
+          : WORKSPACES_BASE
+    await assertVolumeHasSpace(volumeDir, 'start this run')
+
     // 1. Materialize the workspace.
     let workspacePath: string
     let worktreeClonePath: string | undefined
@@ -172,8 +186,10 @@ export class LocalWorkerFactory implements WorkerFactory {
       })
     }
 
-    child.on('close', (code) => {
+    child.on('close', (code, signal) => {
       this.active.delete(spec.runId)
+      const diagnostic = cliKillDiagnostic(code, signal)
+      if (diagnostic) sink.onEvent({ kind: 'raw', stream: 'system', text: diagnostic })
       sink.onExit(code === 0 ? 'completed' : 'failed', code)
     })
 
