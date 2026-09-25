@@ -8,6 +8,7 @@ import type {
   ExecutionRun,
   RunLog,
   GlobalMcpServer,
+  GlobalPromptComponent,
   PublishTarget,
   Repository,
   RepositoryInput,
@@ -227,6 +228,17 @@ export function createWsConduitClient(wsUrl: string): ConduitAPI {
         invoke<import('@shared/types').McpHealthResult>('globalMcps:checkHealth', serverConfig),
       listTools: (serverConfig: import('@shared/types').McpServerEntry) =>
         invoke<import('@shared/types').McpToolsResult>('globalMcps:listTools', serverConfig),
+    },
+
+    globalPromptComponents: {
+      list: () => invoke<GlobalPromptComponent[]>('globalPromptComponents:list'),
+      create: (data: Omit<GlobalPromptComponent, 'id' | 'createdAt' | 'updatedAt'>) =>
+        invoke<GlobalPromptComponent>('globalPromptComponents:create', data),
+      update: (
+        id: string,
+        data: Partial<Omit<GlobalPromptComponent, 'id' | 'createdAt' | 'updatedAt'>>
+      ) => invoke<GlobalPromptComponent>('globalPromptComponents:update', id, data),
+      delete: (id: string) => invoke<void>('globalPromptComponents:delete', id),
     },
 
     repos: {
