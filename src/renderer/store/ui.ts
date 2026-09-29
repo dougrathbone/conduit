@@ -2,6 +2,13 @@ import { create } from 'zustand'
 
 type Theme = 'dark' | 'light' | 'system'
 
+const exclusiveOff = {
+  showGlobalMcpManager: false,
+  showPublishTargets: false,
+  showRepositories: false,
+  showSettings: false,
+}
+
 interface UIState {
   selectedAgentId: string | null
   activeRunId: string | null
@@ -85,13 +92,21 @@ interface UrlState {
 }
 
 function readUrlState(): UrlState {
-  const empty: UrlState = { agentId: null, runId: null, globalMcps: false, publishTargets: false, repositories: false, settings: false }
+  const empty: UrlState = {
+    agentId: null,
+    runId: null,
+    globalMcps: false,
+    publishTargets: false,
+    repositories: false,
+    settings: false,
+  }
   if (typeof window === 'undefined') return empty
   const path = window.location.pathname
   const globalMcps = path === '/global-mcps'
   const publishTargets = path === '/publish-targets'
   const repositories = path === '/repositories'
-  const settings = path === '/settings'
+  // Prompt components used to have their own route; they now live in Settings.
+  const settings = path === '/settings' || path === '/prompt-components'
   // /agents/:agentId/runs/:runId (deep link to a run) or /agents/:agentId
   const runMatch = path.match(/^\/agents\/([^/]+)\/runs\/([^/]+)$/)
   if (runMatch) return { ...empty, agentId: runMatch[1], runId: runMatch[2] }
@@ -123,7 +138,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   // from the previous one.
   selectAgent: (id) => {
     pushUrl(id ? `/agents/${id}` : '/')
-    set({ selectedAgentId: id, activeRunId: null, viewedRunId: null, showGlobalMcpManager: false, showPublishTargets: false, showRepositories: false, showSettings: false })
+    set({ selectedAgentId: id, activeRunId: null, viewedRunId: null, ...exclusiveOff })
   },
 
   setViewedRun: (id) => {
@@ -145,22 +160,22 @@ export const useUIStore = create<UIState>((set, get) => ({
 
   setShowGlobalMcpManager: (show) => {
     pushUrl(show ? '/global-mcps' : '/')
-    set({ showGlobalMcpManager: show, showPublishTargets: false, showRepositories: false, showSettings: false })
+    set({ ...exclusiveOff, showGlobalMcpManager: show })
   },
 
   setShowPublishTargets: (show) => {
     pushUrl(show ? '/publish-targets' : '/')
-    set({ showPublishTargets: show, showGlobalMcpManager: false, showRepositories: false, showSettings: false })
+    set({ ...exclusiveOff, showPublishTargets: show })
   },
 
   setShowRepositories: (show) => {
     pushUrl(show ? '/repositories' : '/')
-    set({ showRepositories: show, showGlobalMcpManager: false, showPublishTargets: false, showSettings: false })
+    set({ ...exclusiveOff, showRepositories: show })
   },
 
   setShowSettings: (show) => {
     pushUrl(show ? '/settings' : '/')
-    set({ showSettings: show, showGlobalMcpManager: false, showPublishTargets: false, showRepositories: false })
+    set({ ...exclusiveOff, showSettings: show })
   },
 
   setTheme: (theme) => {
