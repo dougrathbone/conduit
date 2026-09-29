@@ -5,7 +5,7 @@ import { resolveRepoToken } from './githubApp'
 import { DEV_CONTEXT } from './auth/config'
 import { reporter } from './observability'
 import type { BroadcastFn } from './runner'
-import type { RepoSyncStatus, RepositoryInput } from '../shared/types'
+import type { RepoSyncStatus, Repository, RepositoryInput } from '../shared/types'
 
 const SYNC_BACKOFF_BASE_MS = 10 * 60 * 1000 // 10 min
 const SYNC_BACKOFF_MAX_MS = 4 * 60 * 60 * 1000 // 4 h
@@ -46,12 +46,15 @@ export function isRepoAuthenticationError(message: string): boolean {
 }
 
 /** Auth-relevant repository updates should force an immediate sync retry. */
-export function repositoryUpdateNeedsSync(input: Partial<RepositoryInput>): boolean {
+export function repositoryUpdateNeedsSync(
+  input: Partial<RepositoryInput>,
+  stored: Pick<Repository, 'url' | 'authMethod' | 'githubAppId'>
+): boolean {
+  if (input.githubPrivateKey) return true
   return (
-    input.url !== undefined ||
-    input.authMethod !== undefined ||
-    input.githubAppId !== undefined ||
-    input.githubPrivateKey !== undefined
+    (input.url !== undefined && input.url !== stored.url) ||
+    (input.authMethod !== undefined && input.authMethod !== stored.authMethod) ||
+    (input.githubAppId !== undefined && input.githubAppId !== stored.githubAppId)
   )
 }
 
@@ -69,6 +72,8 @@ export class RepoSyncService {
   /** Consecutive-failure backoff, keyed by repoId. Cleared on success or a
    *  manual retry (triggerSync). */
   private failures = new Map<string, SyncFailureState>()
+  /** At most one forced retry waiting for the current in-flight sync to finish. */
+  private queuedForce = new Map<string, { promise: Promise<void>; resolve: () => void; reject: (err: unknown) => void }>()
   private broadcast: BroadcastFn
 
   constructor(broadcast: BroadcastFn) {
@@ -104,7 +109,23 @@ export class RepoSyncService {
     // A manual retry is an explicit "try now" — clear any backoff so a repo the
     // user just fixed (e.g. corrected credentials) syncs immediately.
     this.failures.delete(repoId)
+    if (this.syncInProgress.has(repoId)) {
+      return this.enqueueForcedRetry(repoId)
+    }
     await this.syncRepo(repoId, true)
+  }
+
+  private enqueueForcedRetry(repoId: string): Promise<void> {
+    const existing = this.queuedForce.get(repoId)
+    if (existing) return existing.promise
+    let resolve!: () => void
+    let reject!: (err: unknown) => void
+    const promise = new Promise<void>((res, rej) => {
+      resolve = () => res()
+      reject = rej
+    })
+    this.queuedForce.set(repoId, { promise, resolve, reject })
+    return promise
   }
 
   async syncRepo(repoId: string, force = false): Promise<void> {
@@ -118,7 +139,8 @@ export class RepoSyncService {
       // A repo that keeps failing (bad credentials, unreachable remote) must not
       // be retried every 5-min cycle — that hammered GitHub and flooded Sentry
       // with 284 identical clone failures/day. Skip until its backoff elapses.
-      if (isInSyncBackoff(this.failures.get(repoId), Date.now())) return
+      // A forced retry (manual or queued after an in-flight attempt) tries now.
+      if (!force && isInSyncBackoff(this.failures.get(repoId), Date.now())) return
 
       // Rejected credentials are terminal until the operator retries or updates
       // auth config. Persist across restarts via the sanitized syncError prefix.
@@ -188,6 +210,16 @@ export class RepoSyncService {
       }
     } finally {
       this.syncInProgress.delete(repoId)
+    }
+
+    const queued = this.queuedForce.get(repoId)
+    if (!queued) return
+    this.queuedForce.delete(repoId)
+    try {
+      await this.syncRepo(repoId, true)
+      queued.resolve()
+    } catch (err) {
+      queued.reject(err)
     }
   }
 

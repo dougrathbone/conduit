@@ -471,8 +471,9 @@ const handlers: Record<string, HandlerFn> = {
     ) {
       throw new Error('Only the owner can change GitHub App credentials')
     }
+    const existing = await getRepository(id as string)
     const updated = await updateRepository(id as string, withEncryptedKey(input))
-    if (repositoryUpdateNeedsSync(input)) {
+    if (existing && repositoryUpdateNeedsSync(input, existing)) {
       repoSyncService.triggerSync(id as string).catch((err) =>
         console.error(`[server] Re-sync after update failed for repo ${id}:`, err)
       )

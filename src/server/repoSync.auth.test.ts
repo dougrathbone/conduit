@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import type { Repository } from '../shared/types'
+import type { Repository, RepositoryInput } from '../shared/types'
 
 // Stub the impure dependencies (persistence, git, auth, reporter) so importing
 // the service is side-effect-free (mirrors memoryPressure.test.ts).
@@ -33,23 +33,76 @@ import { getRepository, updateRepository } from '../main/db/queries/repositories
 import { resolveRepoToken } from './githubApp'
 import { cloneRepo, fetchRepo } from './gitOps'
 
+const STORED_APP_REPO: Repository = {
+  id: 'repo-1',
+  name: 'widgets',
+  url: 'https://github.com/acme/widgets.git',
+  defaultBranch: 'main',
+  authMethod: 'githubapp',
+  githubAppId: 'app-123',
+  hasGithubKey: true,
+  syncStatus: 'error',
+  syncError:
+    'Repository authentication failed. Update the repository credentials, then retry synchronization.',
+  clonePath: '/data/repos/repo-1',
+  createdAt: 0,
+  updatedAt: 0,
+}
+
+/** Realistic UI save: formToInput posts the full RepositoryInput, including
+ *  unchanged url/authMethod/githubAppId, and omits githubPrivateKey unless a
+ *  new PEM was uploaded. */
+function fullUiSavePayload(overrides: Partial<RepositoryInput> = {}): RepositoryInput {
+  return {
+    name: 'widgets-renamed',
+    url: STORED_APP_REPO.url,
+    defaultBranch: STORED_APP_REPO.defaultBranch,
+    authMethod: STORED_APP_REPO.authMethod,
+    githubAppId: STORED_APP_REPO.githubAppId,
+    commitAuthorName: undefined,
+    commitAuthorEmail: undefined,
+    ...overrides,
+  }
+}
+
 describe('repositoryUpdateNeedsSync', () => {
   it('is false for a name-only update', () => {
-    expect(repositoryUpdateNeedsSync({ name: 'renamed' })).toBe(false)
+    expect(repositoryUpdateNeedsSync({ name: 'renamed' }, STORED_APP_REPO)).toBe(false)
   })
 
-  it.each(['url', 'authMethod', 'githubAppId', 'githubPrivateKey'] as const)(
-    'is true when %s is supplied',
-    (field) => {
-      const input =
-        field === 'authMethod'
-          ? { authMethod: 'githubapp' as const }
-          : field === 'url'
-            ? { url: 'https://github.com/acme/other.git' }
-            : { [field]: 'updated' }
-      expect(repositoryUpdateNeedsSync(input)).toBe(true)
-    }
-  )
+  it('does not request sync when a full UI payload only changes the name', () => {
+    expect(repositoryUpdateNeedsSync(fullUiSavePayload(), STORED_APP_REPO)).toBe(false)
+  })
+
+  it('requests sync when url changes', () => {
+    expect(
+      repositoryUpdateNeedsSync(
+        fullUiSavePayload({ url: 'https://github.com/acme/other.git' }),
+        STORED_APP_REPO
+      )
+    ).toBe(true)
+  })
+
+  it('requests sync when authMethod changes', () => {
+    expect(
+      repositoryUpdateNeedsSync(fullUiSavePayload({ authMethod: 'pat' }), STORED_APP_REPO)
+    ).toBe(true)
+  })
+
+  it('requests sync when githubAppId changes', () => {
+    expect(
+      repositoryUpdateNeedsSync(fullUiSavePayload({ githubAppId: 'app-999' }), STORED_APP_REPO)
+    ).toBe(true)
+  })
+
+  it('requests sync when a private-key value is supplied', () => {
+    expect(
+      repositoryUpdateNeedsSync(
+        fullUiSavePayload({ githubPrivateKey: 'placeholder-pem' }),
+        STORED_APP_REPO
+      )
+    ).toBe(true)
+  })
 })
 
 describe('isRepoAuthenticationError', () => {
@@ -292,4 +345,79 @@ describe('RepoSyncService credential failures', () => {
       'ghs_token'
     )
   })
+
+  it('queues one forced retry after an in-flight sync and waits for it', async () => {
+    const firstClone = deferred<void>()
+    const secondClone = deferred<void>()
+    let inFlight = 0
+    let maxInFlight = 0
+    let cloneCalls = 0
+    vi.mocked(cloneRepo).mockImplementation(() => {
+      cloneCalls += 1
+      inFlight += 1
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      const gate = cloneCalls === 1 ? firstClone : secondClone
+      return gate.promise.finally(() => {
+        inFlight -= 1
+      })
+    })
+    vi.mocked(resolveRepoToken).mockResolvedValue('ghs_token')
+
+    let current: Repository = { ...PAT_REPO, url: 'https://github.com/acme/widgets.git' }
+    vi.mocked(getRepository).mockImplementation(async () => current)
+
+    const service = new RepoSyncService(vi.fn())
+    const first = service.syncRepo(PAT_REPO.id)
+    await vi.waitFor(() => expect(cloneRepo).toHaveBeenCalledTimes(1))
+
+    current = { ...PAT_REPO, url: 'https://github.com/acme/other.git' }
+
+    let trigger1Settled = false
+    let trigger2Settled = false
+    const trigger1 = service.triggerSync(PAT_REPO.id).then(() => {
+      trigger1Settled = true
+    })
+    const trigger2 = service.triggerSync(PAT_REPO.id).then(() => {
+      trigger2Settled = true
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(cloneRepo).toHaveBeenCalledTimes(1)
+    expect(maxInFlight).toBe(1)
+    expect(trigger1Settled).toBe(false)
+    expect(trigger2Settled).toBe(false)
+
+    firstClone.reject(new Error('git fetch timed out after 600000ms'))
+    await vi.waitFor(() => expect(cloneRepo).toHaveBeenCalledTimes(2))
+
+    expect(maxInFlight).toBe(1)
+    expect(cloneRepo).toHaveBeenNthCalledWith(
+      2,
+      'https://github.com/acme/other.git',
+      PAT_REPO.clonePath,
+      PAT_REPO.defaultBranch,
+      'ghs_token'
+    )
+    expect(trigger1Settled).toBe(false)
+    expect(trigger2Settled).toBe(false)
+
+    secondClone.resolve()
+    await Promise.all([first, trigger1, trigger2])
+
+    expect(cloneRepo).toHaveBeenCalledTimes(2)
+    expect(maxInFlight).toBe(1)
+    expect(trigger1Settled).toBe(true)
+    expect(trigger2Settled).toBe(true)
+  })
 })
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
