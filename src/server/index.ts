@@ -26,6 +26,13 @@ import {
   deleteGlobalMcp,
 } from '../main/db/queries/globalMcps'
 import {
+  listGlobalPromptComponents,
+  getGlobalPromptComponent,
+  createGlobalPromptComponent,
+  updateGlobalPromptComponent,
+  deleteGlobalPromptComponent,
+} from '../main/db/queries/globalPromptComponents'
+import {
   listPublishTargets,
   getPublishTarget,
   createPublishTarget,
@@ -87,6 +94,7 @@ import type { ReporterUser } from '../shared/observability'
 import type {
   AgentConfig,
   GlobalMcpServer,
+  GlobalPromptComponent,
   PublishTarget,
   RepositoryInput,
   RepoTestConnectionInput,
@@ -329,6 +337,46 @@ const handlers: Record<string, HandlerFn> = {
     }
     auditMcpOAuth('global_mcp_deleted', { userId: ctx.userId, id, name: existing.name })
     return Promise.resolve()
+  },
+
+  // Conduit-wide prompt components (instructions + files injected into every run)
+  'globalPromptComponents:list': (_args, _ws, ctx) =>
+    Promise.resolve(listGlobalPromptComponents(ctx.userId, ctx.userGroupIds)),
+  'globalPromptComponents:create': async ([data], _ws, ctx) => {
+    try {
+      return await createGlobalPromptComponent(
+        data as Omit<GlobalPromptComponent, 'id' | 'createdAt' | 'updatedAt'>,
+        ctx.userId
+      )
+    } catch (err) {
+      throw new ClientError(err instanceof Error ? err.message : String(err))
+    }
+  },
+  'globalPromptComponents:update': async ([id, data], _ws, ctx) => {
+    if (!(await canAccessEntity('globalPromptComponent', id as string, ctx.userId, ctx.userGroupIds))) {
+      throw new ClientError('Access denied')
+    }
+    try {
+      return await updateGlobalPromptComponent(
+        id as string,
+        data as Partial<Omit<GlobalPromptComponent, 'id' | 'createdAt' | 'updatedAt'>>
+      )
+    } catch (err) {
+      throw new ClientError(err instanceof Error ? err.message : String(err))
+    }
+  },
+  'globalPromptComponents:delete': async ([id], _ws, ctx) => {
+    const existing = await getGlobalPromptComponent(id as string)
+    if (!existing) throw new ClientError('Prompt component not found')
+    const isLegacyGlobal = existing.ownerId == null || existing.ownerId === DEV_USER_ID
+    if (
+      !isLegacyGlobal &&
+      !(await isEntityOwner('globalPromptComponent', id as string, ctx.userId))
+    ) {
+      throw new ClientError('Only the owner can delete this prompt component')
+    }
+    const deleted = await deleteGlobalPromptComponent(id as string)
+    if (deleted === 0) throw new ClientError('Prompt component not found')
   },
 
   'globalMcps:checkHealth': async ([serverConfig]) => {
