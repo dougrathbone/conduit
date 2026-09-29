@@ -74,7 +74,7 @@ import { deleteClient as deleteMcpOAuthClient } from '../main/db/queries/mcpOAut
 import { deleteToken as deleteMcpOAuthToken } from '../main/db/queries/oauthTokens'
 import { auditMcpOAuth } from './mcpOAuth/audit'
 import { getShare, listShares, createShare, deleteShare } from '../main/db/queries/shares'
-import { resolveShareNames } from './shareNames'
+import { enrichGroups, enrichUsers, resolveShareNames } from './shareNames'
 import { listUsers, searchUsers } from '../main/db/queries/users'
 import { listGroups, getUserGroupIds } from '../main/db/queries/groups'
 import { getCredentialStatus, setCredential } from '../main/db/queries/agentCredentials'
@@ -699,7 +699,7 @@ const handlers: Record<string, HandlerFn> = {
   },
 
   // Users — use Okta Management API when available, fall back to local DB
-  'users:list': () => Promise.resolve(listUsers()),
+  'users:list': async () => enrichUsers(await listUsers()),
   'users:search': async ([query]) => {
     if (isAuthEnabled()) {
       const { searchOktaUsers } = await import('./auth/okta')
@@ -710,7 +710,7 @@ const handlers: Record<string, HandlerFn> = {
   },
 
   // Groups
-  'groups:list': () => Promise.resolve(listGroups()),
+  'groups:list': async () => enrichGroups(await listGroups()),
 
   // MCP OAuth
   'mcp:oauth:startAuth': ([serverId, isGlobal, redirectOrigin], _ws, ctx) =>
