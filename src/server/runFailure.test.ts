@@ -89,6 +89,14 @@ describe('classifyRunFailure', () => {
     expect(isDerivedWorkerControlFailure(lastLine)).toBe(true)
   })
 
+  it('treats a 140-character-truncated worker-control prefix as worker_control', () => {
+    const lastLine =
+      '[Conduit: worker ip-10-0-12-34.ec2.internal-98765-' + 'a'.repeat(80) + '…'
+    expect(lastLine.endsWith('— failing this run.]')).toBe(false)
+    expect(isDerivedWorkerControlFailure(lastLine)).toBe(true)
+    expect(classifyRunFailure(lastLine, null)).toBe('worker_control')
+  })
+
   it('does not treat an unframed mention of a worker failure as worker_control', () => {
     expect(classifyRunFailure('agent said the worker died — failing this run.', 1)).toBe('agent_error')
     expect(isDerivedWorkerControlFailure('agent said the worker died — failing this run.')).toBe(false)
@@ -101,6 +109,28 @@ describe('classifyRunFailure', () => {
     ).toBe('disk_full')
     expect(classifyRunFailure('', null)).toBe('process_signal')
     expect(classifyRunFailure('TypeError: something broke', 1)).toBe('agent_error')
+  })
+
+  it.each([
+    'Linear API returned 401 Unauthorized',
+    'S3: unauthorized access',
+    'tool returned authentication failed while calling upstream',
+  ])('keeps %s as agent_error with the diagnostic lastLine', (lastLine) => {
+    expect(classifyRunFailure(lastLine, 1)).toBe('agent_error')
+    const r = buildRunFailureReport({
+      runId: 'r-up',
+      runner: 'claude',
+      exitCode: 1,
+      lastLine,
+    })
+    expect(r.ctx.tags?.failureKind).toBe('agent_error')
+    expect(r.message).toBe('Agent run failed (exit 1)')
+    expect(r.ctx.extra).toEqual({ lastLine })
+  })
+
+  it('lets a framed worker-control line win over embedded unauthorized text', () => {
+    const lastLine = '[Conduit: worker worker-1 unauthorized — failing this run.]'
+    expect(classifyRunFailure(lastLine, 1)).toBe('worker_control')
   })
 })
 

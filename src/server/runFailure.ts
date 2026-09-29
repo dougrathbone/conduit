@@ -16,16 +16,20 @@ export type RunFailureKind =
   | 'worker_control'
   | 'agent_error'
 
-const AUTH_FAILURE_RE =
-  /invalid api key|the provided api key is invalid|unauthorized|authentication failed/i
+const API_KEY_FAILURE_RE = /invalid api key|the provided api key is invalid/i
+const CLI_AUTH_LINE_RE =
+  /^(?:(?:claude|amp|cursor)\s*:\s*)?(?:unauthorized|authentication failed)\b/i
 
 const WORKER_CONTROL_PREFIX = '[Conduit: worker '
-const WORKER_CONTROL_SUFFIX = '— failing this run.]'
 
 /** True when the last line is a Conduit-generated worker-control failure. */
 export function isDerivedWorkerControlFailure(lastLine: string | undefined): boolean {
-  const line = (lastLine ?? '').trim()
-  return line.startsWith(WORKER_CONTROL_PREFIX) && line.endsWith(WORKER_CONTROL_SUFFIX)
+  return (lastLine ?? '').trim().startsWith(WORKER_CONTROL_PREFIX)
+}
+
+function isAuthenticationFailure(lastLine: string): boolean {
+  const line = lastLine.trim()
+  return API_KEY_FAILURE_RE.test(line) || CLI_AUTH_LINE_RE.test(line)
 }
 
 /** Stable operational cause for a failed agent run. */
@@ -34,8 +38,8 @@ export function classifyRunFailure(
   exitCode: number | null | undefined
 ): RunFailureKind {
   const text = lastLine ?? ''
-  if (AUTH_FAILURE_RE.test(text)) return 'authentication'
   if (isDerivedWorkerControlFailure(text)) return 'worker_control'
+  if (isAuthenticationFailure(text)) return 'authentication'
   if (isDiskFullError(text)) return 'disk_full'
   if (typeof exitCode !== 'number') return 'process_signal'
   return 'agent_error'

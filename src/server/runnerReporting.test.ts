@@ -41,10 +41,16 @@ vi.mock('./observability', () => ({
   },
 }))
 
+import { summarizeEvent } from '../shared/runEvents'
 import { createRunOrchestration } from './runner'
 
 const WORKER_CONTROL_LINE =
   '[Conduit: worker worker-1 lost contact (lease expired) — failing this run.]'
+
+function longWorkerControlLine(): string {
+  const workerId = `ip-10-0-12-34.ec2.internal-98765-${'a'.repeat(160)}`
+  return `[Conduit: worker ${workerId} did not reconnect within 300000ms — failing this run.]`
+}
 
 function tmpDir(): { dir: string; close: () => void } {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'conduit-runner-reporting-'))
@@ -103,6 +109,28 @@ describe('createRunOrchestration reporting', () => {
     )
     expect(publishRunResult).toHaveBeenCalledOnce()
     expect(broadcasts.some(([ch]) => ch === 'run:statusChange')).toBe(true)
+  })
+
+  it('suppresses the derived runner report when summarizeEvent truncates a long worker-control line', async () => {
+    const fullLine = longWorkerControlLine()
+    const summarized = summarizeEvent({ kind: 'raw', stream: 'system', text: fullLine })
+    expect(fullLine.length).toBeGreaterThan(140)
+    expect(summarized.startsWith('[Conduit: worker ')).toBe(true)
+    expect(summarized.endsWith('— failing this run.]')).toBe(false)
+
+    const run = seedRun()
+    const orch = createRunOrchestration({ run, broadcast, runner: 'claude' })
+    orch.emitSystemMessage(fullLine)
+    await orch.sink.onExit('failed', null)
+
+    expect(captureMessage).not.toHaveBeenCalled()
+    expect(updateRunIfRunning).toHaveBeenCalledWith(
+      run.id,
+      expect.objectContaining({
+        status: 'failed',
+        lastLine: summarized,
+      })
+    )
   })
 
   it('reports a generic failed agent exit exactly once', async () => {
