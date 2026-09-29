@@ -331,7 +331,7 @@ const handlers: Record<string, HandlerFn> = {
     return Promise.resolve()
   },
 
-  'globalMcps:checkHealth': async ([serverConfig]) => {
+  'globalMcps:checkHealth': async ([serverConfig], _ws, ctx) => {
     const config = serverConfig as import('../shared/types').McpServerEntry
 
     if (isUrlMcpServer(config) && config.url) {
@@ -344,14 +344,14 @@ const handlers: Record<string, HandlerFn> = {
         // an actual MCP client sends: 200 when authenticated + usable, 401 when not.
         // Carry the user's own headers (a manual `Authorization: Bearer …`, or
         // Datadog-style DD-API-KEY headers) so the probe reflects real auth. A
-        // resolved global OAuth token, when present, still overrides — matching
+        // resolved OAuth token (global, else the acting user's) overrides — matching
         // runtime injection precedence. Without this, a manually-authed server
         // always 401s here, reads as `unauthorized`, and wrongly kicks OAuth.
         let authOverride: string | undefined
         try {
-          const { resolveGlobalMcpToken } = await import('../main/utils/mcp')
+          const { resolveMcpTokenForUrl } = await import('../main/utils/mcp')
           const { normalizeTokenScheme } = await import('./mcpOAuth/flow')
-          const token = await resolveGlobalMcpToken(config.url)
+          const token = await resolveMcpTokenForUrl(config.url, ctx.userId)
           if (token) authOverride = `${normalizeTokenScheme(token.tokenType)} ${token.accessToken}`
         } catch {
           // No token resolvable — fall through to the config's own headers.
@@ -420,16 +420,23 @@ const handlers: Record<string, HandlerFn> = {
     )
   },
 
-  'globalMcps:listTools': async ([serverConfig]) => {
+  'globalMcps:listTools': async ([serverConfig], _ws, ctx) => {
     let config = serverConfig as import('../shared/types').McpServerEntry
-    // Inject the stored global OAuth token so tools load for authenticated
-    // servers instead of 401ing on the initialize call.
+    // Inject a stored OAuth token (global, else the acting user's) so tools load
+    // for authenticated servers instead of 401ing on the initialize call.
     if (isUrlMcpServer(config) && config.url) {
       try {
-        const { resolveGlobalMcpToken } = await import('../main/utils/mcp')
-        const token = await resolveGlobalMcpToken(config.url)
+        const { resolveMcpTokenForUrl } = await import('../main/utils/mcp')
+        const { normalizeTokenScheme } = await import('./mcpOAuth/flow')
+        const token = await resolveMcpTokenForUrl(config.url, ctx.userId)
         if (token) {
-          config = { ...config, headers: { ...config.headers, Authorization: `${token.tokenType} ${token.accessToken}` } }
+          config = {
+            ...config,
+            headers: {
+              ...config.headers,
+              Authorization: `${normalizeTokenScheme(token.tokenType)} ${token.accessToken}`,
+            },
+          }
         }
       } catch {
         // No token — list unauthenticated (will surface the server's own error).

@@ -8,6 +8,19 @@ import { isUrlMcpServer } from '../../shared/mcp'
 
 const GLOBAL_OWNER = '__global__'
 
+// Renew this many ms *before* the access token actually expires. Linear issues
+// 24h access tokens and rejects a just-expired bearer; refreshing inside the
+// skew window means health checks and run injection never present a token the
+// provider already considers dead. Matches the Okta session skew pattern.
+const REFRESH_SKEW_MS = 5 * 60_000
+
+// Serialises concurrent refreshes of the same (url, owner). Providers that
+// rotate refresh tokens (Linear, Auth0-style) invalidate the previous RT once
+// a refresh succeeds — two racing refreshes make the loser get invalid_grant
+// and the UI reads as "disconnected". Callers inside the skew window share one
+// in-flight refresh, mirroring src/server/auth/session.ts.
+const refreshLocks = new Map<string, Promise<OAuthToken | null>>()
+
 export async function buildMergedMcpConfig(
   agentMcpConfig: McpServersConfig,
   _actingUserId: string
@@ -25,32 +38,64 @@ export async function buildMergedMcpConfig(
   }
 }
 
-async function resolveValidToken(url: string, owner: string): Promise<OAuthToken | null> {
-  const token = await getToken(url, owner)
-  if (!token) return null
-  const expired = token.expiresAt !== undefined && token.expiresAt <= Date.now()
-  if (!expired) return token
-  if (!token.refreshToken) return null
+function needsRefresh(token: OAuthToken): boolean {
+  if (token.expiresAt === undefined) return false
+  return token.expiresAt - Date.now() <= REFRESH_SKEW_MS
+}
+
+function stillHardValid(token: OAuthToken): boolean {
+  return token.expiresAt === undefined || token.expiresAt > Date.now()
+}
+
+async function refreshTokenForOwner(url: string, owner: string): Promise<OAuthToken | null> {
+  // Re-read under the lock: a just-finished refresh (or another pod) may have
+  // already persisted a fresh pair before we started the network call.
+  const current = await getToken(url, owner)
+  if (!current) return null
+  if (!needsRefresh(current)) return current
+  if (!current.refreshToken) return stillHardValid(current) ? current : null
+
   const client = await getClient(url)
-  if (!client) return null
+  if (!client) return stillHardValid(current) ? current : null
   try {
     const refreshed = await refreshAccessToken({
       serverUrl: url,
       tokenEndpoint: client.tokenEndpoint,
       clientId: client.clientId,
       clientSecret: client.clientSecret,
-      refreshToken: token.refreshToken,
+      refreshToken: current.refreshToken,
       resource: client.resource,
     })
     await saveToken(refreshed, owner, null)
     auditMcpOAuth('token_refreshed', { serverUrl: url, owner, clientId: client.clientId })
     return refreshed
   } catch (err) {
+    // Cross-pod race: another worker may have rotated+saved already. Prefer
+    // that copy over declaring the connection dead — and skip the failure
+    // audit/warn when we recovered, so logs stay meaningful.
+    const latest = await getToken(url, owner)
+    if (latest && !needsRefresh(latest)) return latest
+    if (latest && stillHardValid(latest)) return latest
     const msg = err instanceof Error ? err.message : String(err)
     auditMcpOAuth('token_refresh_failed', { serverUrl: url, owner, clientId: client.clientId, error: msg })
     console.warn(`[conduit] refresh failed for ${url} (${owner}):`, err)
     return null
   }
+}
+
+async function resolveValidToken(url: string, owner: string): Promise<OAuthToken | null> {
+  const token = await getToken(url, owner)
+  if (!token) return null
+  if (!needsRefresh(token)) return token
+  if (!token.refreshToken) return stillHardValid(token) ? token : null
+
+  const key = `${url}::${owner}`
+  let lock = refreshLocks.get(key)
+  if (!lock) {
+    lock = refreshTokenForOwner(url, owner).finally(() => refreshLocks.delete(key))
+    refreshLocks.set(key, lock)
+  }
+  return lock
 }
 
 /**
@@ -60,6 +105,22 @@ async function resolveValidToken(url: string, owner: string): Promise<OAuthToken
  */
 export function resolveGlobalMcpToken(url: string): Promise<OAuthToken | null> {
   return resolveValidToken(url, GLOBAL_OWNER)
+}
+
+/**
+ * Resolve a token for health / tools/list probes. Prefers the shared global
+ * token (matching runtime injection for global MCPs), then falls back to the
+ * acting user's per-agent token so agent-scoped OAuth (e.g. Linear on an agent)
+ * is not falsely reported as disconnected.
+ */
+export async function resolveMcpTokenForUrl(
+  url: string,
+  actingUserId?: string
+): Promise<OAuthToken | null> {
+  const global = await resolveValidToken(url, GLOBAL_OWNER)
+  if (global) return global
+  if (actingUserId) return resolveValidToken(url, actingUserId)
+  return null
 }
 
 export async function injectOAuthTokens(
