@@ -15,7 +15,7 @@ import { deleteClaudeConfig } from '../main/utils/claudeConfig'
 import { DEV_USER_ID } from './auth/config'
 import { LOGS_DIR } from '../main/utils/paths'
 import { removeWorktree } from './gitOps'
-import { buildRunFailureReport, failedStartLastLine } from './runFailure'
+import { buildRunFailureReport, failedStartLastLine, isDerivedWorkerControlFailure } from './runFailure'
 import { resolvePushCredential, githubTokenEnvEntry } from './githubApp'
 import { publishRunResult } from './publisher'
 import { buildTriggeredPrompt } from './triggers/promptBuilder'
@@ -383,7 +383,7 @@ export function createRunOrchestration(opts: {
       })
     },
     onExit: (status, exitCode) => {
-      if (status === 'failed' && !finalized) {
+      if (status === 'failed' && !finalized && !isDerivedWorkerControlFailure(lastLine)) {
         const report = buildRunFailureReport({ runId, runner, exitCode, lastLine })
         reporter.captureMessage(report.message, report.level, report.ctx)
       }

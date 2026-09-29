@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { buildRunFailureReport, failedStartLastLine, cliKillDiagnostic } from './runFailure'
+import {
+  buildRunFailureReport,
+  classifyRunFailure,
+  cliKillDiagnostic,
+  failedStartLastLine,
+  isDerivedWorkerControlFailure,
+} from './runFailure'
 
 describe('buildRunFailureReport', () => {
   it('flags a disk-full failure at error level with a diskFull tag', () => {
@@ -61,5 +67,86 @@ describe('cliKillDiagnostic', () => {
   it('describes SIGKILL / exit 137 as an OOM-or-disk eviction', () => {
     expect(cliKillDiagnostic(null, 'SIGKILL')).toMatch(/killed \(SIGKILL\)/)
     expect(cliKillDiagnostic(137, null)).toMatch(/killed \(SIGKILL\)/)
+  })
+})
+
+describe('classifyRunFailure', () => {
+  it('classifies Cursor API-key rejection as authentication', () => {
+    expect(classifyRunFailure('Warning: The provided API key is invalid.', 1)).toBe('authentication')
+  })
+
+  it.each(['invalid api key', 'unauthorized', 'authentication failed'])(
+    'classifies Claude/Amp %s as authentication',
+    (text) => {
+      expect(classifyRunFailure(`claude: ${text}`, 1)).toBe('authentication')
+      expect(classifyRunFailure(`AMP: ${text.toUpperCase()}`, 1)).toBe('authentication')
+    }
+  )
+
+  it('classifies a framed Conduit worker-control line as worker_control even with a signal exit', () => {
+    const lastLine = '[Conduit: worker worker-1 lost contact (lease expired) — failing this run.]'
+    expect(classifyRunFailure(lastLine, null)).toBe('worker_control')
+    expect(isDerivedWorkerControlFailure(lastLine)).toBe(true)
+  })
+
+  it('does not treat an unframed mention of a worker failure as worker_control', () => {
+    expect(classifyRunFailure('agent said the worker died — failing this run.', 1)).toBe('agent_error')
+    expect(isDerivedWorkerControlFailure('agent said the worker died — failing this run.')).toBe(false)
+    expect(isDerivedWorkerControlFailure('[conduit: worker x — failing this run.]')).toBe(false)
+  })
+
+  it('preserves disk, signal, and generic classifications', () => {
+    expect(
+      classifyRunFailure('error: unable to create file x: No space left on device', 128)
+    ).toBe('disk_full')
+    expect(classifyRunFailure('', null)).toBe('process_signal')
+    expect(classifyRunFailure('TypeError: something broke', 1)).toBe('agent_error')
+  })
+})
+
+describe('buildRunFailureReport authentication', () => {
+  it('reports a stable sanitized authentication message without the raw last line', () => {
+    const lastLine = 'Warning: The provided API key is invalid.'
+    const r = buildRunFailureReport({
+      runId: 'r-auth',
+      runner: 'cursor',
+      exitCode: 1,
+      lastLine,
+    })
+    expect(r.message).toBe('Agent credential rejected (cursor)')
+    expect(r.ctx.tags?.failureKind).toBe('authentication')
+    expect(r.ctx.extra).not.toHaveProperty('lastLine')
+    expect(JSON.stringify(r.ctx.extra ?? {})).not.toContain(lastLine)
+  })
+
+  it('tags disk, signal, worker-control, and generic reports with their failureKind', () => {
+    expect(
+      buildRunFailureReport({
+        runId: 'r-disk',
+        runner: 'claude',
+        exitCode: 128,
+        lastLine: 'No space left on device',
+      }).ctx.tags?.failureKind
+    ).toBe('disk_full')
+    expect(
+      buildRunFailureReport({ runId: 'r-sig', runner: 'claude', exitCode: null, lastLine: '' }).ctx
+        .tags?.failureKind
+    ).toBe('process_signal')
+    expect(
+      buildRunFailureReport({
+        runId: 'r-wc',
+        runner: 'claude',
+        exitCode: null,
+        lastLine: '[Conduit: worker w1 shutting down — failing this run.]',
+      }).ctx.tags?.failureKind
+    ).toBe('worker_control')
+    expect(
+      buildRunFailureReport({
+        runId: 'r-gen',
+        runner: 'amp',
+        exitCode: 1,
+        lastLine: 'TypeError: something broke',
+      }).ctx.tags?.failureKind
+    ).toBe('agent_error')
   })
 })

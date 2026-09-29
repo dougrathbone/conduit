@@ -1236,6 +1236,34 @@ describe('FargateWorkerFactory', () => {
     await expect(factory.shutdown()).rejects.toThrow(/Failed to stop|stop/i)
   })
 
+  it('emits one reporter event per task ARN across unclean cleanup retries', async () => {
+    vi.mocked(reporter.captureMessage).mockClear()
+    factory = new FargateWorkerFactory(cp.plane, baseConfig(), ecs as unknown as ECSClient, {
+      stopAttempts: 1,
+      stopBackoffMs: 1,
+      shutdownDeadlineMs: 20,
+      uncleanRetryMs: 25,
+    })
+    const handle = await factory.startRun(SPEC, sink)
+    ecs.stopImpl = async () => {
+      throw new Error('ServiceException')
+    }
+    await expect(handle.cancel()).rejects.toThrow(/stop|STOPPED|ServiceException/i)
+    const afterCancel = ecs.of('StopTaskCommand').length
+    await vi.waitFor(
+      () => {
+        expect(ecs.of('StopTaskCommand').length).toBeGreaterThan(afterCancel)
+      },
+      { timeout: 200, interval: 10 }
+    )
+    expect(reporter.captureMessage).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(reporter.captureMessage).mock.calls[0]?.[2]).toMatchObject({
+      extra: { taskArn: TASK_ARN },
+    })
+    await expect(factory.shutdown()).rejects.toThrow(/Failed to stop|stop/i)
+    expect(reporter.captureMessage).toHaveBeenCalledTimes(1)
+  })
+
   it('shutdown StopTasks every in-flight run and verifies STOPPED', async () => {
     await factory.startRun(SPEC, sink)
     await factory.shutdown()
