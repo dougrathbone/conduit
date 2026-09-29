@@ -84,6 +84,7 @@ describe('shouldEscalateDisk', () => {
 })
 
 describe('reportDiskPressure', () => {
+  const PINNED_MIN_FREE = 0
   const sample = (usedFraction: number, freeBytes = 8 * 1024 ** 3) => ({
     totalBytes: 10 * 1024 ** 3,
     freeBytes,
@@ -92,54 +93,73 @@ describe('reportDiskPressure', () => {
 
   it('emits a breadcrumb every sample but messages only on upward transitions', async () => {
     measureDiskPressure.mockResolvedValueOnce(sample(0.5))
-    await reportDiskPressure()
+    await reportDiskPressure('/data', PINNED_MIN_FREE)
     expect(reporter.addBreadcrumb).toHaveBeenCalledTimes(1)
     expect(reporter.captureMessage).not.toHaveBeenCalled()
 
     measureDiskPressure.mockResolvedValueOnce(sample(0.85))
-    await reportDiskPressure()
+    await reportDiskPressure('/data', PINNED_MIN_FREE)
     expect(reporter.addBreadcrumb).toHaveBeenCalledTimes(2)
     expect(reporter.captureMessage).toHaveBeenCalledTimes(1)
     expect(reporter.captureMessage.mock.calls[0][1]).toBe('warning')
     expect(reporter.captureMessage.mock.calls[0][2].extra).toEqual(
-      expect.objectContaining({ minFreeBytes: expect.any(Number) })
+      expect.objectContaining({ minFreeBytes: PINNED_MIN_FREE })
     )
 
     measureDiskPressure.mockResolvedValueOnce(sample(0.85))
-    await reportDiskPressure()
+    await reportDiskPressure('/data', PINNED_MIN_FREE)
     expect(reporter.addBreadcrumb).toHaveBeenCalledTimes(3)
     expect(reporter.captureMessage).toHaveBeenCalledTimes(1)
 
     measureDiskPressure.mockResolvedValueOnce(sample(0.95))
-    await reportDiskPressure()
+    await reportDiskPressure('/data', PINNED_MIN_FREE)
     expect(reporter.addBreadcrumb).toHaveBeenCalledTimes(4)
     expect(reporter.captureMessage).toHaveBeenCalledTimes(2)
     expect(reporter.captureMessage.mock.calls[1][1]).toBe('error')
 
     measureDiskPressure.mockResolvedValueOnce(sample(0.95))
-    await reportDiskPressure()
+    await reportDiskPressure('/data', PINNED_MIN_FREE)
     expect(reporter.addBreadcrumb).toHaveBeenCalledTimes(5)
     expect(reporter.captureMessage).toHaveBeenCalledTimes(2)
   })
 
   it('re-arms a message after pressure recovers', async () => {
     measureDiskPressure.mockResolvedValueOnce(sample(0.85))
-    await reportDiskPressure()
+    await reportDiskPressure('/data', PINNED_MIN_FREE)
     expect(reporter.captureMessage).toHaveBeenCalledTimes(1)
 
     measureDiskPressure.mockResolvedValueOnce(sample(0.85))
-    await reportDiskPressure()
+    await reportDiskPressure('/data', PINNED_MIN_FREE)
     expect(reporter.addBreadcrumb).toHaveBeenCalledTimes(2)
     expect(reporter.captureMessage).toHaveBeenCalledTimes(1)
 
     measureDiskPressure.mockResolvedValueOnce(sample(0.5))
-    await reportDiskPressure()
+    await reportDiskPressure('/data', PINNED_MIN_FREE)
     expect(reporter.addBreadcrumb).toHaveBeenCalledTimes(3)
     expect(reporter.captureMessage).toHaveBeenCalledTimes(1)
 
     measureDiskPressure.mockResolvedValueOnce(sample(0.85))
-    await reportDiskPressure()
+    await reportDiskPressure('/data', PINNED_MIN_FREE)
     expect(reporter.addBreadcrumb).toHaveBeenCalledTimes(4)
     expect(reporter.captureMessage).toHaveBeenCalledTimes(2)
+  })
+
+  it('honors an injected minFreeBytes instead of the process environment', async () => {
+    measureDiskPressure.mockResolvedValueOnce(sample(0.5, 100))
+    await reportDiskPressure('/data', 0)
+    expect(reporter.addBreadcrumb).toHaveBeenCalledTimes(1)
+    expect(reporter.captureMessage).not.toHaveBeenCalled()
+  })
+
+  it('captures a reserve-aware message when free bytes trip the reserve', async () => {
+    measureDiskPressure.mockResolvedValueOnce(sample(0.5, 100 * 1024 * 1024))
+    await reportDiskPressure('/data', 1024 ** 3)
+    expect(reporter.captureMessage).toHaveBeenCalledTimes(1)
+    const [message, level] = reporter.captureMessage.mock.calls[0]
+    expect(level).toBe('error')
+    expect(message).toMatch(/50%/)
+    expect(message).toMatch(/100 MB/)
+    expect(message).toMatch(/free space/i)
+    expect(message).toMatch(/reserve/i)
   })
 })

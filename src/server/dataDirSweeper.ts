@@ -14,6 +14,7 @@ import type { SweepResult, StorageUsage } from '../shared/types'
 import {
   classifyDiskUsage,
   classifyDiskPressure,
+  formatDiskPressureMessage,
   measureDiskPressure,
   resolveDiskMinFreeBytes,
   DISK_WARNING_FRACTION,
@@ -665,7 +666,10 @@ export function resetReportedDiskLevel(): void {
  * pressure escalates past {@link DISK_WARNING_FRACTION}/{@link DISK_CRITICAL_FRACTION}
  * or the absolute reserve. Fire-and-forget; never throws.
  */
-export async function reportDiskPressure(dir: string = DATA_DIR): Promise<DiskPressure | null> {
+export async function reportDiskPressure(
+  dir: string = DATA_DIR,
+  minFreeBytes = resolveDiskMinFreeBytes()
+): Promise<DiskPressure | null> {
   let pressure: DiskPressure
   try {
     pressure = await measureDiskPressure(dir)
@@ -673,7 +677,6 @@ export async function reportDiskPressure(dir: string = DATA_DIR): Promise<DiskPr
     reporter.captureException(err, { tags: { component: 'dataDirSweeper', op: 'diskPressure' } })
     return null
   }
-  const minFreeBytes = resolveDiskMinFreeBytes()
   const level = classifyDiskPressure(pressure, minFreeBytes)
   const pct = Math.round(pressure.usedFraction * 100)
   const freeMb = Math.round(pressure.freeBytes / (1024 * 1024))
@@ -684,14 +687,10 @@ export async function reportDiskPressure(dir: string = DATA_DIR): Promise<DiskPr
     data: { ...pressure, level, minFreeBytes },
   })
   if (shouldEscalateDisk(lastDiskLevel, level)) {
-    reporter.captureMessage(
-      `Conduit data volume ${pct}% full (${freeMb} MB free) — agent runs will fail with ENOSPC as it fills.`,
-      level === 'critical' ? 'error' : 'warning',
-      {
-        tags: { component: 'dataDirSweeper', op: 'diskPressure', level },
-        extra: { ...pressure, minFreeBytes },
-      }
-    )
+    reporter.captureMessage(formatDiskPressureMessage(pressure, minFreeBytes), level === 'critical' ? 'error' : 'warning', {
+      tags: { component: 'dataDirSweeper', op: 'diskPressure', level },
+      extra: { ...pressure, minFreeBytes },
+    })
   }
   lastDiskLevel = level
   return pressure

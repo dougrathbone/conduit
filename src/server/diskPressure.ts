@@ -23,8 +23,10 @@ export const DISK_MIN_FREE_BYTES = DEFAULT_DISK_MIN_FREE_BYTES
  */
 export function resolveDiskMinFreeBytes(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.CONDUIT_DISK_MIN_FREE_BYTES
-  if (raw === undefined || raw === '') return DEFAULT_DISK_MIN_FREE_BYTES
-  const n = Number(raw)
+  if (raw === undefined) return DEFAULT_DISK_MIN_FREE_BYTES
+  const trimmed = raw.trim()
+  if (trimmed === '') return DEFAULT_DISK_MIN_FREE_BYTES
+  const n = Number(trimmed)
   if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return DEFAULT_DISK_MIN_FREE_BYTES
   return n
 }
@@ -54,6 +56,26 @@ export function classifyDiskPressure(
 ): DiskPressureLevel {
   if (minFreeBytes > 0 && pressure.freeBytes < minFreeBytes) return 'critical'
   return classifyDiskUsage(pressure.usedFraction)
+}
+
+/**
+ * Operator-facing capture copy. Reserve-only critical samples (used % below
+ * the critical fraction, free bytes below the reserve) mention the reserve
+ * explicitly; the shared `…% full (… MB free)` prefix keeps grouping stable.
+ */
+export function formatDiskPressureMessage(pressure: DiskPressure, minFreeBytes: number): string {
+  const pct = Math.round(pressure.usedFraction * 100)
+  const freeMb = Math.round(pressure.freeBytes / (1024 * 1024))
+  const prefix = `Conduit data volume ${pct}% full (${freeMb} MB free)`
+  const reserveOnly =
+    minFreeBytes > 0 &&
+    pressure.freeBytes < minFreeBytes &&
+    classifyDiskUsage(pressure.usedFraction) !== 'critical'
+  if (reserveOnly) {
+    const reserveMb = Math.round(minFreeBytes / (1024 * 1024))
+    return `${prefix} — free space is below the ${reserveMb} MB reserve; agent runs will fail with ENOSPC as it fills.`
+  }
+  return `${prefix} — agent runs will fail with ENOSPC as it fills.`
 }
 
 /**

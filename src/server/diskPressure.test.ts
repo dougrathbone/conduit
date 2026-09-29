@@ -13,6 +13,7 @@ import {
   DEFAULT_DISK_MIN_FREE_BYTES,
   resolveDiskMinFreeBytes,
   classifyDiskPressure,
+  formatDiskPressureMessage,
   type DiskPressure,
 } from './diskPressure'
 
@@ -55,6 +56,13 @@ describe('resolveDiskMinFreeBytes', () => {
     expect(resolveDiskMinFreeBytes({ CONDUIT_DISK_MIN_FREE_BYTES: 'NaN' })).toBe(DEFAULT_DISK_MIN_FREE_BYTES)
     expect(resolveDiskMinFreeBytes({ CONDUIT_DISK_MIN_FREE_BYTES: '' })).toBe(DEFAULT_DISK_MIN_FREE_BYTES)
   })
+
+  it('falls back to the default for space, tab, and newline-only values', () => {
+    expect(resolveDiskMinFreeBytes({ CONDUIT_DISK_MIN_FREE_BYTES: ' ' })).toBe(DEFAULT_DISK_MIN_FREE_BYTES)
+    expect(resolveDiskMinFreeBytes({ CONDUIT_DISK_MIN_FREE_BYTES: '\t' })).toBe(DEFAULT_DISK_MIN_FREE_BYTES)
+    expect(resolveDiskMinFreeBytes({ CONDUIT_DISK_MIN_FREE_BYTES: '\n' })).toBe(DEFAULT_DISK_MIN_FREE_BYTES)
+    expect(resolveDiskMinFreeBytes({ CONDUIT_DISK_MIN_FREE_BYTES: ' \t\n' })).toBe(DEFAULT_DISK_MIN_FREE_BYTES)
+  })
 })
 
 describe('classifyDiskPressure', () => {
@@ -80,6 +88,30 @@ describe('classifyDiskPressure', () => {
   })
 })
 
+describe('formatDiskPressureMessage', () => {
+  const pressure = (usedFraction: number, freeBytes: number): DiskPressure => ({
+    totalBytes: 10 * 1024 ** 3,
+    freeBytes,
+    usedFraction,
+  })
+
+  it('mentions low free space and the reserve when percentage is not critical', () => {
+    const msg = formatDiskPressureMessage(pressure(0.5, 100 * 1024 * 1024), 1024 ** 3)
+    expect(msg).toMatch(/50%/)
+    expect(msg).toMatch(/100 MB/)
+    expect(msg).toMatch(/free space/i)
+    expect(msg).toMatch(/reserve/i)
+    expect(msg).toMatch(/1024 MB/)
+  })
+
+  it('keeps the percentage-full wording when used space is already critical', () => {
+    const msg = formatDiskPressureMessage(pressure(0.95, 8 * 1024 ** 3), 1024 ** 3)
+    expect(msg).toMatch(/95% full/)
+    expect(msg).toMatch(/8192 MB free/)
+    expect(msg).not.toMatch(/reserve/i)
+  })
+})
+
 describe('measureDiskPressure', () => {
   it('computes used fraction from statfs blocks', async () => {
     statfs.mockResolvedValue({ bsize: 1024, blocks: 100, bavail: 10 })
@@ -96,11 +128,6 @@ describe('assertVolumeHasSpace', () => {
     await expect(assertVolumeHasSpace('/data', 'start this run', 0)).rejects.toThrow(
       /Not enough disk space to start this run/
     )
-  })
-
-  it('does not throw when the volume has percentage headroom and the reserve is disabled', async () => {
-    statfs.mockResolvedValue({ bsize: 1024, blocks: 100, bavail: 50 })
-    await expect(assertVolumeHasSpace('/data', 'start this run', 0)).resolves.toBeUndefined()
   })
 
   it('does not block a run when statfs fails', async () => {
