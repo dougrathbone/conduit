@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { isOpaqueOktaId, shareTargetSubtitle, shareTargetTitle } from './shareTargetLabel'
+import { isOpaqueOktaId } from '@shared/oktaId'
+import { shareTargetSubtitle, shareTargetTitle } from './shareTargetLabel'
 
 const opaqueUserId = '00uabcdefghijklmnopq'
 const opaqueGroupId = '00g0123456789ABCDEF1'

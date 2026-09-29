@@ -1,10 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import {
-  isOpaqueOktaId,
-  needsDirectoryLookup,
-  oktaGroupDisplayName,
-  oktaUserDisplayName,
-} from './oktaDisplay'
+import { isOpaqueOktaId } from '../../shared/oktaId'
+import { needsDirectoryLookup, oktaGroupDisplayName, oktaUserDisplayName } from './oktaDisplay'
 
 const OPAQUE_USER_ID = '00u1a2b3c4d5e6f7g8h9'
 const OPAQUE_GROUP_ID = '00g1a2b3c4d5e6f7g8h9'

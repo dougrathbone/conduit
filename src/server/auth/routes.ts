@@ -176,7 +176,7 @@ router.get('/callback', async (req: Request, res: Response) => {
     const groupIds: string[] = []
     for (const claim of claimGroups) {
       let name = claim
-      if (needsDirectoryLookup(claim, claim) && isAuthEnabled()) {
+      if (needsDirectoryLookup(claim, claim)) {
         const remote = await resolveOktaGroupName(claim)
         if (remote && !needsDirectoryLookup(remote.name, claim)) {
           name = remote.name

@@ -10,8 +10,23 @@ interface ResolvedTarget {
   email: string | null
 }
 
-function isFriendlyName(name: string | null | undefined, id: string): boolean {
-  return !needsDirectoryLookup(name, id)
+async function resolveNamedTarget(
+  id: string,
+  loadLocal: () => Promise<ResolvedTarget | null>,
+  loadRemote: () => Promise<{ name: string; email?: string | null } | null>
+): Promise<ResolvedTarget | null> {
+  const local = await loadLocal()
+  if (local && !needsDirectoryLookup(local.name, id)) return local
+  if (isAuthEnabled()) {
+    const remote = await loadRemote()
+    if (remote && !needsDirectoryLookup(remote.name, id)) {
+      return {
+        name: remote.name,
+        email: remote.email ?? local?.email ?? null,
+      }
+    }
+  }
+  return local
 }
 
 /**
@@ -33,34 +48,26 @@ export async function resolveShareNames(shares: Share[]): Promise<ResolvedShare[
 
   await Promise.all([
     ...[...userIds].map(async (id) => {
-      const local = await getUser(id)
-      if (local && isFriendlyName(local.name, id)) {
-        resolved.set(id, { name: local.name, email: local.email })
-        return
-      }
-      if (isAuthEnabled()) {
-        const remote = await resolveOktaUserName(id)
-        if (remote && isFriendlyName(remote.name, id)) {
-          resolved.set(id, { name: remote.name, email: remote.email ?? local?.email ?? null })
-          return
-        }
-      }
-      if (local) resolved.set(id, { name: local.name, email: local.email })
+      const target = await resolveNamedTarget(
+        id,
+        async () => {
+          const user = await getUser(id)
+          return user ? { name: user.name, email: user.email } : null
+        },
+        () => resolveOktaUserName(id)
+      )
+      if (target) resolved.set(id, target)
     }),
     ...[...groupIds].map(async (id) => {
-      const local = await getGroup(id)
-      if (local && isFriendlyName(local.name, id)) {
-        resolved.set(id, { name: local.name, email: null })
-        return
-      }
-      if (isAuthEnabled()) {
-        const remote = await resolveOktaGroupName(id)
-        if (remote && isFriendlyName(remote.name, id)) {
-          resolved.set(id, { name: remote.name, email: null })
-          return
-        }
-      }
-      if (local) resolved.set(id, { name: local.name, email: null })
+      const target = await resolveNamedTarget(
+        id,
+        async () => {
+          const group = await getGroup(id)
+          return group ? { name: group.name, email: null } : null
+        },
+        () => resolveOktaGroupName(id)
+      )
+      if (target) resolved.set(id, target)
     }),
   ])
 

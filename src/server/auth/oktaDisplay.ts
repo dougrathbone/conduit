@@ -1,11 +1,7 @@
-const OPAQUE_OKTA_ID = /^00[ug][a-zA-Z0-9]{17}$/
+import { isOpaqueOktaId } from '../../shared/oktaId'
 
 function isBlank(value: string | null | undefined): boolean {
   return value == null || value.trim() === ''
-}
-
-export function isOpaqueOktaId(value: string): boolean {
-  return OPAQUE_OKTA_ID.test(value)
 }
 
 export function needsDirectoryLookup(name: string | null | undefined, id: string): boolean {
