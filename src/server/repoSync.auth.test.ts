@@ -410,6 +410,120 @@ describe('RepoSyncService credential failures', () => {
     expect(trigger1Settled).toBe(true)
     expect(trigger2Settled).toBe(true)
   })
+
+  it('drains a queued force after resolveRepoToken rejects and early-returns', async () => {
+    const tokenGate = deferred<string>()
+    vi.mocked(resolveRepoToken)
+      .mockImplementationOnce(() => tokenGate.promise)
+      .mockResolvedValue('ghs_token')
+    const retryClone = deferred<void>()
+    vi.mocked(cloneRepo).mockImplementation(() => retryClone.promise)
+
+    let current: Repository = { ...PAT_REPO, url: 'https://github.com/acme/widgets.git' }
+    vi.mocked(getRepository).mockImplementation(async () => current)
+
+    const service = new RepoSyncService(vi.fn())
+    const first = service.syncRepo(PAT_REPO.id)
+    await vi.waitFor(() => expect(resolveRepoToken).toHaveBeenCalledTimes(1))
+
+    current = { ...PAT_REPO, url: 'https://github.com/acme/other.git' }
+    let triggerSettled = false
+    const trigger = service.triggerSync(PAT_REPO.id).then(() => {
+      triggerSettled = true
+    })
+    await Promise.resolve()
+    expect(triggerSettled).toBe(false)
+    expect(cloneRepo).not.toHaveBeenCalled()
+
+    tokenGate.reject(new Error('github app misconfigured'))
+    await vi.waitFor(() => expect(cloneRepo).toHaveBeenCalledTimes(1))
+
+    expect(cloneRepo).toHaveBeenCalledWith(
+      'https://github.com/acme/other.git',
+      PAT_REPO.clonePath,
+      PAT_REPO.defaultBranch,
+      'ghs_token'
+    )
+    expect(resolveRepoToken.mock.calls[1][0].url).toBe('https://github.com/acme/other.git')
+    expect(triggerSettled).toBe(false)
+
+    retryClone.resolve()
+    await Promise.all([first, trigger])
+    expect(triggerSettled).toBe(true)
+  })
+
+  it('settles the queued waiter after an unexpected throw and does not mask it', async () => {
+    const tokenGate = deferred<string>()
+    vi.mocked(resolveRepoToken)
+      .mockImplementationOnce(() => tokenGate.promise)
+      .mockResolvedValue('ghs_token')
+    vi.mocked(cloneRepo).mockResolvedValue(undefined)
+
+    let cloningUpdates = 0
+    vi.mocked(updateRepository).mockImplementation(async (_id, patch) => {
+      if (patch.syncStatus === 'cloning') {
+        cloningUpdates += 1
+        if (cloningUpdates === 1) throw new Error('db write failed')
+      }
+      return PAT_REPO
+    })
+    vi.mocked(getRepository).mockResolvedValue(PAT_REPO)
+
+    const service = new RepoSyncService(vi.fn())
+    const first = service.syncRepo(PAT_REPO.id)
+    await vi.waitFor(() => expect(resolveRepoToken).toHaveBeenCalledTimes(1))
+
+    const trigger = service.triggerSync(PAT_REPO.id)
+    await Promise.resolve()
+    tokenGate.resolve('ghs_token')
+
+    await expect(first).rejects.toThrow('db write failed')
+    await trigger
+    expect(cloneRepo).toHaveBeenCalledOnce()
+  })
+
+  it('rejects the queued waiter when the forced retry itself throws', async () => {
+    const tokenGate = deferred<string>()
+    vi.mocked(resolveRepoToken).mockImplementationOnce(() => tokenGate.promise)
+
+    vi.mocked(updateRepository).mockImplementation(async (_id, patch) => {
+      if (patch.syncStatus === 'cloning') throw new Error('db write failed')
+      return PAT_REPO
+    })
+    let reads = 0
+    vi.mocked(getRepository).mockImplementation(async () => {
+      reads += 1
+      if (reads === 1) return PAT_REPO
+      throw new Error('repo disappeared')
+    })
+
+    const service = new RepoSyncService(vi.fn())
+    const first = service.syncRepo(PAT_REPO.id)
+    await vi.waitFor(() => expect(resolveRepoToken).toHaveBeenCalledTimes(1))
+
+    const trigger = service.triggerSync(PAT_REPO.id)
+    await Promise.resolve()
+    tokenGate.resolve('ghs_token')
+
+    await expect(first).rejects.toThrow('db write failed')
+    await expect(trigger).rejects.toThrow('repo disappeared')
+  })
+
+  it('rejects queued trigger waiters when the service is stopped', async () => {
+    const tokenGate = deferred<string>()
+    vi.mocked(resolveRepoToken).mockImplementation(() => tokenGate.promise)
+
+    const service = new RepoSyncService(vi.fn())
+    const first = service.syncRepo(PAT_REPO.id)
+    await vi.waitFor(() => expect(resolveRepoToken).toHaveBeenCalledTimes(1))
+
+    const trigger = service.triggerSync(PAT_REPO.id)
+    service.stop()
+    await expect(trigger).rejects.toThrow(/stopped/i)
+
+    tokenGate.reject(new Error('github app misconfigured'))
+    await first
+  })
 })
 
 function deferred<T>() {
