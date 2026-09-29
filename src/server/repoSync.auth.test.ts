@@ -23,11 +23,53 @@ vi.mock('./gitOps', async (importOriginal) => ({
   fetchRepo: vi.fn(),
 }))
 
-import { RepoSyncService } from './repoSync'
+import {
+  RepoSyncService,
+  isRepoAuthenticationError,
+  repositoryUpdateNeedsSync,
+} from './repoSync'
 import { reporter } from './observability'
 import { getRepository, updateRepository } from '../main/db/queries/repositories'
 import { resolveRepoToken } from './githubApp'
 import { cloneRepo, fetchRepo } from './gitOps'
+
+describe('repositoryUpdateNeedsSync', () => {
+  it('is false for a name-only update', () => {
+    expect(repositoryUpdateNeedsSync({ name: 'renamed' })).toBe(false)
+  })
+
+  it.each(['url', 'authMethod', 'githubAppId', 'githubPrivateKey'] as const)(
+    'is true when %s is supplied',
+    (field) => {
+      const input =
+        field === 'authMethod'
+          ? { authMethod: 'githubapp' as const }
+          : field === 'url'
+            ? { url: 'https://github.com/acme/other.git' }
+            : { [field]: 'updated' }
+      expect(repositoryUpdateNeedsSync(input)).toBe(true)
+    }
+  )
+})
+
+describe('isRepoAuthenticationError', () => {
+  it.each([
+    'fatal: Authentication failed for https://github.com/acme/widgets.git',
+    'remote: Invalid username or token. Password authentication is not supported.',
+    'could not read Username for https://github.com',
+    'ERROR: Repository not found.',
+  ])('returns true for %s', (message) => {
+    expect(isRepoAuthenticationError(message)).toBe(true)
+  })
+
+  it.each([
+    'git fetch timed out after 600000ms',
+    'The requested URL returned error: 503',
+    'ENOSPC: no space left on device',
+  ])('returns false for %s', (message) => {
+    expect(isRepoAuthenticationError(message)).toBe(false)
+  })
+})
 
 const PAT_REPO: Repository = {
   id: 'repo-1',
@@ -96,7 +138,7 @@ describe('RepoSyncService credential failures', () => {
 
   it('still reports an unexpected clone failure as an exception', async () => {
     vi.mocked(resolveRepoToken).mockResolvedValue('ghs_token')
-    const boom = new Error('fatal: authentication failed')
+    const boom = new Error('fatal: remote hung up unexpectedly')
     vi.mocked(cloneRepo).mockRejectedValue(boom)
 
     await new RepoSyncService(vi.fn()).syncRepo(PAT_REPO.id)
@@ -107,6 +149,100 @@ describe('RepoSyncService credential failures', () => {
       boom,
       expect.objectContaining({ tags: expect.objectContaining({ op: 'clone' }) })
     )
+  })
+
+  const AUTH_FAILED_PREFIX = 'Repository authentication failed.'
+  const TERMINAL_AUTH_ERROR =
+    'Repository authentication failed. Update the repository credentials, then retry synchronization.'
+
+  it('persists a sanitized terminal auth error and reports one warning, not an exception', async () => {
+    vi.mocked(resolveRepoToken).mockResolvedValue('ghs_token')
+    vi.mocked(cloneRepo).mockRejectedValue(
+      new Error('fatal: Authentication failed for https://github.com/acme/widgets.git')
+    )
+
+    await new RepoSyncService(vi.fn()).syncRepo(PAT_REPO.id)
+
+    expect(reporter.captureException).not.toHaveBeenCalled()
+    expect(reporter.captureMessage).toHaveBeenCalledOnce()
+    const [message, level, ctx] = vi.mocked(reporter.captureMessage).mock.calls[0]
+    expect(message.startsWith(AUTH_FAILED_PREFIX)).toBe(true)
+    expect(message).not.toMatch(/ghs_|ghp_|token=|password/i)
+    expect(level).toBe('warning')
+    expect(ctx?.tags).toMatchObject({
+      component: 'repoSync',
+      repoId: PAT_REPO.id,
+      op: 'clone',
+      failureKind: 'authentication',
+    })
+    expect(ctx?.extra).toBeUndefined()
+
+    expect(updateRepository).toHaveBeenCalledWith(PAT_REPO.id, {
+      syncStatus: 'error',
+      syncError: expect.stringMatching(/^Repository authentication failed\./),
+    })
+    const persisted = vi
+      .mocked(updateRepository)
+      .mock.calls.find(([, patch]) => patch.syncStatus === 'error')
+    expect(String(persisted?.[1].syncError)).not.toMatch(/ghs_|ghp_|token=|password/i)
+  })
+
+  it('skips periodic sync when the repository already has a terminal auth error', async () => {
+    vi.mocked(getRepository).mockResolvedValue({
+      ...PAT_REPO,
+      syncStatus: 'error',
+      syncError: TERMINAL_AUTH_ERROR,
+    })
+
+    await new RepoSyncService(vi.fn()).syncRepo(PAT_REPO.id)
+
+    expect(resolveRepoToken).not.toHaveBeenCalled()
+    expect(cloneRepo).not.toHaveBeenCalled()
+    expect(fetchRepo).not.toHaveBeenCalled()
+    expect(reporter.captureException).not.toHaveBeenCalled()
+    expect(reporter.captureMessage).not.toHaveBeenCalled()
+  })
+
+  it('bypasses terminal auth state when triggerSync is invoked', async () => {
+    vi.mocked(getRepository).mockResolvedValue({
+      ...PAT_REPO,
+      syncStatus: 'error',
+      syncError: TERMINAL_AUTH_ERROR,
+    })
+    vi.mocked(resolveRepoToken).mockResolvedValue('ghs_token')
+    vi.mocked(cloneRepo).mockResolvedValue(undefined)
+
+    await new RepoSyncService(vi.fn()).triggerSync(PAT_REPO.id)
+
+    expect(resolveRepoToken).toHaveBeenCalledOnce()
+    expect(cloneRepo).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a timeout on the transient backoff path', async () => {
+    vi.mocked(resolveRepoToken).mockResolvedValue('ghs_token')
+    const boom = new Error('git fetch timed out after 600000ms')
+    vi.mocked(cloneRepo).mockRejectedValue(boom)
+
+    const service = new RepoSyncService(vi.fn())
+    await service.syncRepo(PAT_REPO.id)
+
+    expect(reporter.captureMessage).not.toHaveBeenCalled()
+    expect(reporter.captureException).toHaveBeenCalledOnce()
+    expect(reporter.captureException).toHaveBeenCalledWith(
+      boom,
+      expect.objectContaining({ tags: expect.objectContaining({ op: 'clone' }) })
+    )
+    expect(updateRepository).toHaveBeenCalledWith(PAT_REPO.id, {
+      syncStatus: 'error',
+      syncError: boom.message,
+    })
+
+    vi.mocked(resolveRepoToken).mockClear()
+    vi.mocked(cloneRepo).mockClear()
+    await service.syncRepo(PAT_REPO.id)
+
+    expect(resolveRepoToken).not.toHaveBeenCalled()
+    expect(cloneRepo).not.toHaveBeenCalled()
   })
 
   // A full data volume used to reach the owner as a raw git dump naming an

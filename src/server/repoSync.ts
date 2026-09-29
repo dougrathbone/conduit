@@ -5,10 +5,12 @@ import { resolveRepoToken } from './githubApp'
 import { DEV_CONTEXT } from './auth/config'
 import { reporter } from './observability'
 import type { BroadcastFn } from './runner'
-import type { RepoSyncStatus } from '../shared/types'
+import type { RepoSyncStatus, RepositoryInput } from '../shared/types'
 
 const SYNC_BACKOFF_BASE_MS = 10 * 60 * 1000 // 10 min
 const SYNC_BACKOFF_MAX_MS = 4 * 60 * 60 * 1000 // 4 h
+const REPO_AUTH_FAILED_MESSAGE =
+  'Repository authentication failed. Update the repository credentials, then retry synchronization.'
 
 /** Per-repo consecutive-failure state driving the retry backoff. */
 export interface SyncFailureState {
@@ -34,6 +36,23 @@ export function nextSyncBackoff(prev: SyncFailureState | undefined, now: number)
 /** True while a repo is still inside its backoff window and must be skipped. */
 export function isInSyncBackoff(state: SyncFailureState | undefined, now: number): boolean {
   return state !== undefined && now < state.nextAttemptAt
+}
+
+/** True when a git/auth error message is a rejected credential, not a transient fault. */
+export function isRepoAuthenticationError(message: string): boolean {
+  return /authentication failed|invalid username or token|could not read username|repository not found/i.test(
+    message
+  )
+}
+
+/** Auth-relevant repository updates should force an immediate sync retry. */
+export function repositoryUpdateNeedsSync(input: Partial<RepositoryInput>): boolean {
+  return (
+    input.url !== undefined ||
+    input.authMethod !== undefined ||
+    input.githubAppId !== undefined ||
+    input.githubPrivateKey !== undefined
+  )
 }
 
 /** How to describe the failed sync step in an operator-facing message. */
@@ -85,10 +104,10 @@ export class RepoSyncService {
     // A manual retry is an explicit "try now" — clear any backoff so a repo the
     // user just fixed (e.g. corrected credentials) syncs immediately.
     this.failures.delete(repoId)
-    await this.syncRepo(repoId)
+    await this.syncRepo(repoId, true)
   }
 
-  async syncRepo(repoId: string): Promise<void> {
+  async syncRepo(repoId: string, force = false): Promise<void> {
     if (this.syncInProgress.has(repoId)) return
     this.syncInProgress.add(repoId)
 
@@ -100,6 +119,16 @@ export class RepoSyncService {
       // be retried every 5-min cycle — that hammered GitHub and flooded Sentry
       // with 284 identical clone failures/day. Skip until its backoff elapses.
       if (isInSyncBackoff(this.failures.get(repoId), Date.now())) return
+
+      // Rejected credentials are terminal until the operator retries or updates
+      // auth config. Persist across restarts via the sanitized syncError prefix.
+      if (
+        !force &&
+        repo.syncStatus === 'error' &&
+        repo.syncError?.startsWith('Repository authentication failed.')
+      ) {
+        return
+      }
 
       // Credential resolution can throw (e.g. GitHub App misconfigured). Treat it
       // as a sync failure so it also backs off, rather than escaping to syncAll.
@@ -197,13 +226,22 @@ export class RepoSyncService {
     this.failures.set(repoId, nextSyncBackoff(prev, Date.now()))
     const raw = err instanceof Error ? err.message : String(err)
     const diskFull = isDiskFullError(raw)
-    const message = diskFull ? diskFullMessage(syncAction(op)) : raw
+    const authFailed = isRepoAuthenticationError(raw)
+    const message = diskFull
+      ? diskFullMessage(syncAction(op))
+      : authFailed
+        ? REPO_AUTH_FAILED_MESSAGE
+        : raw
     if (!prev) {
       const tags = { component: 'repoSync', repoId, op }
       if (opts?.expected) {
         reporter.captureMessage(message, 'warning', { tags })
       } else if (diskFull) {
         reporter.captureMessage(message, 'error', { tags, extra: { gitError: raw } })
+      } else if (authFailed) {
+        reporter.captureMessage(message, 'warning', {
+          tags: { ...tags, failureKind: 'authentication' },
+        })
       } else {
         reporter.captureException(err, { tags })
       }

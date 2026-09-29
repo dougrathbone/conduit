@@ -39,7 +39,7 @@ import {
   updateRepository,
   deleteRepository,
 } from '../main/db/queries/repositories'
-import { RepoSyncService } from './repoSync'
+import { RepoSyncService, repositoryUpdateNeedsSync } from './repoSync'
 import { DataDirSweeper, sweepOnce, getStorageUsage } from './dataDirSweeper'
 import { encryptSecret } from './crypto'
 import { mintInstallationToken, resolveRepoToken } from './githubApp'
@@ -471,7 +471,13 @@ const handlers: Record<string, HandlerFn> = {
     ) {
       throw new Error('Only the owner can change GitHub App credentials')
     }
-    return Promise.resolve(updateRepository(id as string, withEncryptedKey(input)))
+    const updated = await updateRepository(id as string, withEncryptedKey(input))
+    if (repositoryUpdateNeedsSync(input)) {
+      repoSyncService.triggerSync(id as string).catch((err) =>
+        console.error(`[server] Re-sync after update failed for repo ${id}:`, err)
+      )
+    }
+    return updated
   },
   'repos:delete': async ([id], _ws, ctx) => {
     if (!(await isEntityOwner('repository', id as string, ctx.userId))) {
