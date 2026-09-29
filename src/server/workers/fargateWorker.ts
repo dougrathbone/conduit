@@ -8,8 +8,12 @@
  * dispatches the RunSpec to that exact worker via assignTo. When the run exits
  * (or is cancelled/fails) the task is stopped and DescribeTasks confirms
  * STOPPED. Factory shutdown stops every in-flight task the same way.
- * Stop verification waits 60s — Fargate's default stopTimeout is 30s of
- * SIGTERM before SIGKILL, so a 15s wait false-failed every StopTask.
+ * A StopTask that ECS has accepted (desiredStatus STOPPED, or lastStatus
+ * DEACTIVATING / STOPPING / DEPROVISIONING) is not a failure: Fargate's
+ * default stopTimeout is 30s of SIGTERM before SIGKILL, and ENI teardown
+ * after that routinely takes minutes. Those tasks are polled until STOPPED
+ * or a deprovision budget, and Sentry is notified once — not on every
+ * 60s slice. A task that stays RUNNING is retried, then reported once.
  *
  * CONDUIT_WORKER_TOKEN: prefer baking it into the task definition as a
  * Secrets Manager secret (task def `secrets`), so it never appears in
@@ -62,8 +66,19 @@ export const FARGATE_WORKER_MEMORY_MIB = '8192'
 
 /** Fargate default container stopTimeout: SIGTERM, then SIGKILL after 30s. */
 export const FARGATE_DEFAULT_STOP_TIMEOUT_MS = 30_000
-/** Must exceed {@link FARGATE_DEFAULT_STOP_TIMEOUT_MS}; DEACTIVATING is not STOPPED. */
+/**
+ * How long a StopTask may leave desiredStatus RUNNING before it is retried.
+ * Must exceed {@link FARGATE_DEFAULT_STOP_TIMEOUT_MS}; DEACTIVATING is not STOPPED.
+ */
 export const STOP_VERIFY_TIMEOUT_MS = 60_000
+/**
+ * How long to keep polling after ECS has accepted the stop. Production tasks
+ * sit in DEPROVISIONING for many minutes while the ENI detaches; a 60s cap
+ * false-failed every one of those and retried StopTask in a loop.
+ */
+export const STOP_DEPROVISION_TIMEOUT_MS = 10 * 60 * 1000
+/** lastStatus values that mean StopTask has taken effect but the task is not STOPPED yet. */
+export const FARGATE_STOP_IN_PROGRESS = new Set(['DEACTIVATING', 'STOPPING', 'DEPROVISIONING'])
 const STOP_ATTEMPTS = 3
 const STOP_BACKOFF_MS = 50
 const UNCLEAN_RETRY_MS = 30_000
@@ -75,10 +90,49 @@ const BACKOFF_CAP_MS = 2_000
 export interface FargateStopPolicy {
   stopAttempts?: number
   stopVerifyTimeoutMs?: number
+  /** Budget once ECS has accepted the stop. Defaults to {@link STOP_DEPROVISION_TIMEOUT_MS}. */
+  stopDeprovisionTimeoutMs?: number
   stopBackoffMs?: number
   /** 0 disables the periodic unclean-task retry timer. */
   uncleanRetryMs?: number
   shutdownDeadlineMs?: number
+}
+
+export interface TaskStopSnapshot {
+  lastStatus?: string
+  desiredStatus?: string
+  stoppedReason?: string
+}
+
+export type StopWaitVerdict = 'continue' | 'stopped' | 'not-accepted' | 'deprovision-stuck'
+
+/**
+ * Decide whether a DescribeTasks sample means the stop is done, still in
+ * progress, or never accepted. `elapsedMs` is measured from the start of
+ * this wait, not from the original RunTask.
+ */
+export function stopWaitVerdict(
+  task: TaskStopSnapshot | undefined,
+  elapsedMs: number,
+  stopVerifyTimeoutMs: number,
+  deprovisionTimeoutMs: number
+): StopWaitVerdict {
+  if (!task || task.lastStatus === 'STOPPED') return 'stopped'
+  const accepted =
+    task.desiredStatus === 'STOPPED' ||
+    (typeof task.lastStatus === 'string' && FARGATE_STOP_IN_PROGRESS.has(task.lastStatus))
+  if (accepted) {
+    return elapsedMs >= deprovisionTimeoutMs ? 'deprovision-stuck' : 'continue'
+  }
+  return elapsedMs >= stopVerifyTimeoutMs ? 'not-accepted' : 'continue'
+}
+
+function formatTaskStatus(task: TaskStopSnapshot | undefined): string {
+  if (!task) return 'missing'
+  const last = task.lastStatus ?? 'unknown'
+  const desired = task.desiredStatus ?? 'unknown'
+  const reason = task.stoppedReason?.trim()
+  return reason ? `${last} (desired ${desired}, ${reason})` : `${last} (desired ${desired})`
 }
 
 export interface FargateWorkerConfig {
@@ -180,11 +234,16 @@ export class FargateWorkerFactory implements WorkerFactory {
   private readonly stopping = new Map<string, Promise<void>>()
   private readonly stopAttempts: number
   private readonly stopVerifyTimeoutMs: number
+  private readonly stopDeprovisionTimeoutMs: number
   private readonly stopBackoffMs: number
   private readonly uncleanRetryMs: number
   private readonly shutdownDeadlineMs: number
   /** Tasks whose last stop attempt failed; retried by the periodic timer. */
   private readonly failedStops = new Map<string, { taskArn: string; reason: string }>()
+  /** Task ARNs already reported to Sentry, so unclean retries do not page again. */
+  private readonly reportedStopFailures = new Set<string>()
+  /** Set while shutdown is in progress so a long deprovision wait cannot outlive it. */
+  private shutdownDeadlineAt?: number
   private uncleanTimer?: NodeJS.Timeout
 
   constructor(
@@ -196,6 +255,7 @@ export class FargateWorkerFactory implements WorkerFactory {
     this.ecs = ecs ?? tryLoadE2eFakeEcsClient() ?? new ECSClient(buildFargateEcsClientConfig(config))
     this.stopAttempts = stopPolicy?.stopAttempts ?? STOP_ATTEMPTS
     this.stopVerifyTimeoutMs = stopPolicy?.stopVerifyTimeoutMs ?? STOP_VERIFY_TIMEOUT_MS
+    this.stopDeprovisionTimeoutMs = stopPolicy?.stopDeprovisionTimeoutMs ?? STOP_DEPROVISION_TIMEOUT_MS
     this.stopBackoffMs = stopPolicy?.stopBackoffMs ?? STOP_BACKOFF_MS
     this.uncleanRetryMs = stopPolicy?.uncleanRetryMs ?? UNCLEAN_RETRY_MS
     this.shutdownDeadlineMs = stopPolicy?.shutdownDeadlineMs ?? SHUTDOWN_DEADLINE_MS
@@ -346,7 +406,16 @@ export class FargateWorkerFactory implements WorkerFactory {
   private async stopTaskWithRetry(taskArn: string, runId: string, reason: string): Promise<void> {
     let delay = this.stopBackoffMs
     let lastError: unknown
+    let lastTask: Task | undefined
+    let attemptsUsed = 0
+    let interrupted = false
     for (let attempt = 1; attempt <= this.stopAttempts; attempt++) {
+      attemptsUsed = attempt
+      if (this.shutdownDeadlineAt !== undefined && Date.now() >= this.shutdownDeadlineAt) {
+        interrupted = true
+        lastError = new Error(`Stopping task ${taskArn} interrupted by shutdown`)
+        break
+      }
       try {
         await this.ecs.send(
           new StopTaskCommand({
@@ -357,8 +426,7 @@ export class FargateWorkerFactory implements WorkerFactory {
         )
       } catch (err) {
         if (isTaskGone(err)) {
-          this.active.delete(runId)
-          this.failedStops.delete(runId)
+          this.forgetStopped(runId, taskArn)
           return
         }
         lastError = err
@@ -377,30 +445,58 @@ export class FargateWorkerFactory implements WorkerFactory {
         continue
       }
 
-      if (await this.waitUntilStopped(taskArn, runId)) {
-        this.active.delete(runId)
-        this.failedStops.delete(runId)
+      const wait = await this.waitUntilStopped(taskArn, runId)
+      lastTask = wait.task
+      if (wait.verdict === 'stopped') {
+        this.forgetStopped(runId, taskArn)
         return
       }
-      lastError = new Error(`Task ${taskArn} did not reach STOPPED`)
+      if (wait.verdict === 'interrupted') {
+        interrupted = true
+        lastError = new Error(`Stopping task ${taskArn} interrupted by shutdown`)
+        break
+      }
+      const status = formatTaskStatus(wait.task)
+      lastError = new Error(`Task ${taskArn} did not reach STOPPED (${status})`)
+      // ECS already accepted the stop and the deprovision budget elapsed.
+      // Another immediate StopTask will not make DEPROVISIONING faster.
+      if (wait.verdict === 'deprovision-stuck') break
       if (attempt < this.stopAttempts) {
         await sleep(delay)
         delay = Math.min(delay * 2, BACKOFF_CAP_MS)
       }
     }
 
+    const status = formatTaskStatus(lastTask)
     const message =
       `[workers/fargate] Giving up stopping task ${taskArn} (run ${runId}) after ` +
-      `${this.stopAttempts} attempt(s); remaining tracked for later retry`
-    console.error(message, lastError)
-    reporter.captureMessage(message, 'error', {
-      tags: { component: 'workers/fargate', op: 'stopTask', runId },
-      extra: { taskArn, attempts: this.stopAttempts },
-    })
+      `${attemptsUsed} attempt(s); last status ${status}; remaining tracked for later retry`
+    if (!interrupted) {
+      console.error(message, lastError)
+      if (!this.reportedStopFailures.has(taskArn)) {
+        this.reportedStopFailures.add(taskArn)
+        reporter.captureMessage(message, 'error', {
+          tags: { component: 'workers/fargate', op: 'stopTask', runId },
+          extra: {
+            taskArn,
+            attempts: attemptsUsed,
+            lastStatus: lastTask?.lastStatus,
+            desiredStatus: lastTask?.desiredStatus,
+            stoppedReason: lastTask?.stoppedReason,
+          },
+        })
+      }
+    }
     this.failedStops.set(runId, { taskArn, reason })
     throw lastError instanceof Error
       ? lastError
       : new Error(`Failed to stop Fargate task ${taskArn} for run ${runId}`)
+  }
+
+  private forgetStopped(runId: string, taskArn: string): void {
+    this.active.delete(runId)
+    this.failedStops.delete(runId)
+    this.reportedStopFailures.delete(taskArn)
   }
 
   private retryFailedStops(): void {
@@ -410,27 +506,45 @@ export class FargateWorkerFactory implements WorkerFactory {
     }
   }
 
-  private async waitUntilStopped(taskArn: string, runId: string): Promise<boolean> {
+  private async waitUntilStopped(
+    taskArn: string,
+    runId: string
+  ): Promise<{ verdict: Exclude<StopWaitVerdict, 'continue'> | 'interrupted'; task?: Task }> {
     let delay = 50
-    const deadline = Date.now() + this.stopVerifyTimeoutMs
+    const startedAt = Date.now()
+    let lastTask: Task | undefined
     for (;;) {
+      if (this.shutdownDeadlineAt !== undefined && Date.now() >= this.shutdownDeadlineAt) {
+        return { verdict: 'interrupted', task: lastTask }
+      }
       try {
         const task = await this.describeTask(taskArn)
-        if (!task || task.lastStatus === 'STOPPED') return true
+        lastTask = task
+        const verdict = stopWaitVerdict(
+          task,
+          Date.now() - startedAt,
+          this.stopVerifyTimeoutMs,
+          this.stopDeprovisionTimeoutMs
+        )
+        if (verdict !== 'continue') return { verdict, task }
       } catch (err) {
-        if (isTaskGone(err)) return true
+        if (isTaskGone(err)) return { verdict: 'stopped' }
         console.error(`[workers/fargate] Failed to describe task ${taskArn} (run ${runId}):`, err)
         reporter.captureException(err, {
           tags: { component: 'workers/fargate', op: 'describeTask', runId },
         })
-      }
-      if (Date.now() >= deadline) {
-        const message = `[workers/fargate] Task ${taskArn} (run ${runId}) did not reach STOPPED within ${this.stopVerifyTimeoutMs}ms`
-        console.error(message)
-        reporter.captureMessage(message, 'error', {
-          tags: { component: 'workers/fargate', op: 'waitUntilStopped', runId },
-        })
-        return false
+        const elapsed = Date.now() - startedAt
+        if (lastTask) {
+          const prior = stopWaitVerdict(
+            lastTask,
+            elapsed,
+            this.stopVerifyTimeoutMs,
+            this.stopDeprovisionTimeoutMs
+          )
+          if (prior !== 'continue') return { verdict: prior, task: lastTask }
+        } else if (elapsed >= this.stopVerifyTimeoutMs) {
+          return { verdict: 'not-accepted', task: lastTask }
+        }
       }
       await sleep(delay)
       delay = Math.min(delay * 2, BACKOFF_CAP_MS)
@@ -443,6 +557,7 @@ export class FargateWorkerFactory implements WorkerFactory {
       this.uncleanTimer = undefined
     }
     const deadline = Date.now() + this.shutdownDeadlineMs
+    this.shutdownDeadlineAt = deadline
     while (this.active.size > 0) {
       const inflight = [...this.active.entries()]
       await Promise.allSettled(

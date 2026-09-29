@@ -11,14 +11,17 @@ import {
   FARGATE_DEFAULT_STOP_TIMEOUT_MS,
   FARGATE_WORKER_CPU,
   FARGATE_WORKER_MEMORY_MIB,
+  STOP_DEPROVISION_TIMEOUT_MS,
   STOP_VERIFY_TIMEOUT_MS,
   FargateWorkerFactory,
   buildFargateEcsClientConfig,
   isAllowlistedE2eModule,
   resolveFargateConfig,
+  stopWaitVerdict,
   tryLoadE2eFakeEcsClient,
   type FargateWorkerConfig,
 } from './fargateWorker'
+import { reporter } from '../observability'
 
 vi.mock('../observability', () => ({
   reporter: { captureException: vi.fn(), captureMessage: vi.fn() },
@@ -837,6 +840,111 @@ describe('FargateWorkerFactory', () => {
 
   it('waits longer than Fargate default stopTimeout before giving up on STOPPED', () => {
     expect(STOP_VERIFY_TIMEOUT_MS).toBeGreaterThan(FARGATE_DEFAULT_STOP_TIMEOUT_MS)
+    expect(STOP_DEPROVISION_TIMEOUT_MS).toBeGreaterThan(STOP_VERIFY_TIMEOUT_MS)
+  })
+
+  it('keeps polling a stop ECS has already accepted instead of failing at the verify cap', () => {
+    const deprovisioning = { lastStatus: 'DEPROVISIONING', desiredStatus: 'STOPPED' }
+    expect(stopWaitVerdict(deprovisioning, STOP_VERIFY_TIMEOUT_MS, STOP_VERIFY_TIMEOUT_MS, STOP_DEPROVISION_TIMEOUT_MS)).toBe(
+      'continue'
+    )
+    expect(stopWaitVerdict(deprovisioning, STOP_DEPROVISION_TIMEOUT_MS, STOP_VERIFY_TIMEOUT_MS, STOP_DEPROVISION_TIMEOUT_MS)).toBe(
+      'deprovision-stuck'
+    )
+    expect(stopWaitVerdict({ lastStatus: 'RUNNING', desiredStatus: 'STOPPED' }, 1_000, 60_000, 600_000)).toBe('continue')
+    expect(stopWaitVerdict({ lastStatus: 'RUNNING', desiredStatus: 'RUNNING' }, 60_000, 60_000, 600_000)).toBe(
+      'not-accepted'
+    )
+    expect(stopWaitVerdict({ lastStatus: 'STOPPED', desiredStatus: 'STOPPED' }, 0, 60_000, 600_000)).toBe('stopped')
+    expect(stopWaitVerdict(undefined, 0, 60_000, 600_000)).toBe('stopped')
+  })
+
+  it('does not report a stop failure while the task is still deprovisioning', async () => {
+    vi.mocked(reporter.captureMessage).mockClear()
+    factory = new FargateWorkerFactory(cp.plane, baseConfig(), ecs as unknown as ECSClient, {
+      uncleanRetryMs: 0,
+      stopVerifyTimeoutMs: 30,
+      stopDeprovisionTimeoutMs: 5_000,
+      stopBackoffMs: 1,
+      stopAttempts: 1,
+    })
+    let describes = 0
+    const original = ecs.send.bind(ecs)
+    ecs.send = async (command) => {
+      if (command.constructor.name === 'DescribeTasksCommand') {
+        describes++
+        ecs.calls.push({ name: 'DescribeTasksCommand', input: (command.input ?? {}) as Record<string, unknown> })
+        if (describes < 4) {
+          return { tasks: [{ taskArn: TASK_ARN, lastStatus: 'DEPROVISIONING', desiredStatus: 'STOPPED' }] }
+        }
+        return { tasks: [{ taskArn: TASK_ARN, lastStatus: 'STOPPED', desiredStatus: 'STOPPED' }] }
+      }
+      return original(command)
+    }
+    const handle = await factory.startRun(SPEC, sink)
+    await expect(handle.cancel()).resolves.toBeUndefined()
+    expect(describes).toBeGreaterThanOrEqual(4)
+    expect(reporter.captureMessage).not.toHaveBeenCalled()
+    expect(ecs.of('StopTaskCommand')).toHaveLength(1)
+  })
+
+  it('reports a stuck RUNNING task once, with the status ECS actually returned', async () => {
+    vi.mocked(reporter.captureMessage).mockClear()
+    factory = new FargateWorkerFactory(cp.plane, baseConfig(), ecs as unknown as ECSClient, {
+      uncleanRetryMs: 0,
+      stopVerifyTimeoutMs: 40,
+      stopDeprovisionTimeoutMs: 5_000,
+      stopBackoffMs: 1,
+      stopAttempts: 2,
+    })
+    const original = ecs.send.bind(ecs)
+    ecs.send = async (command) => {
+      if (command.constructor.name === 'DescribeTasksCommand') {
+        ecs.calls.push({ name: 'DescribeTasksCommand', input: (command.input ?? {}) as Record<string, unknown> })
+        return {
+          tasks: [
+            {
+              taskArn: TASK_ARN,
+              lastStatus: 'RUNNING',
+              desiredStatus: 'RUNNING',
+              stoppedReason: 'still going',
+            },
+          ],
+        }
+      }
+      return original(command)
+    }
+    const handle = await factory.startRun(SPEC, sink)
+    await expect(handle.cancel()).rejects.toThrow(/RUNNING/)
+    expect(ecs.of('StopTaskCommand')).toHaveLength(2)
+    expect(reporter.captureMessage).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(reporter.captureMessage).mock.calls[0]?.[0]).toMatch(/RUNNING/)
+    expect(vi.mocked(reporter.captureMessage).mock.calls[0]?.[2]).toMatchObject({
+      extra: { lastStatus: 'RUNNING', desiredStatus: 'RUNNING' },
+    })
+  })
+
+  it('waits out the deprovision budget once instead of retrying StopTask on every slice', async () => {
+    vi.mocked(reporter.captureMessage).mockClear()
+    factory = new FargateWorkerFactory(cp.plane, baseConfig(), ecs as unknown as ECSClient, {
+      uncleanRetryMs: 0,
+      stopVerifyTimeoutMs: 20,
+      stopDeprovisionTimeoutMs: 80,
+      stopBackoffMs: 1,
+      stopAttempts: 3,
+    })
+    const original = ecs.send.bind(ecs)
+    ecs.send = async (command) => {
+      if (command.constructor.name === 'DescribeTasksCommand') {
+        ecs.calls.push({ name: 'DescribeTasksCommand', input: (command.input ?? {}) as Record<string, unknown> })
+        return { tasks: [{ taskArn: TASK_ARN, lastStatus: 'DEPROVISIONING', desiredStatus: 'STOPPED' }] }
+      }
+      return original(command)
+    }
+    const handle = await factory.startRun(SPEC, sink)
+    await expect(handle.cancel()).rejects.toThrow(/DEPROVISIONING/)
+    expect(ecs.of('StopTaskCommand')).toHaveLength(1)
+    expect(reporter.captureMessage).toHaveBeenCalledTimes(1)
   })
 
   it('waits through DEACTIVATING until DescribeTasks reports STOPPED', async () => {
