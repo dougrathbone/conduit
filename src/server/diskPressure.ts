@@ -11,6 +11,24 @@ export type DiskPressureLevel = 'ok' | 'warning' | 'critical'
 export const DISK_WARNING_FRACTION = 0.8
 export const DISK_CRITICAL_FRACTION = 0.9
 
+/** Conservative default headroom for a repository worktree (1 GiB). */
+export const DEFAULT_DISK_MIN_FREE_BYTES = 1024 ** 3
+/** Alias for the default absolute reserve (overridable via `CONDUIT_DISK_MIN_FREE_BYTES`). */
+export const DISK_MIN_FREE_BYTES = DEFAULT_DISK_MIN_FREE_BYTES
+
+/**
+ * Parse `CONDUIT_DISK_MIN_FREE_BYTES`. A valid non-negative integer overrides
+ * the 1 GiB default; `0` disables the absolute reserve. Negative, fractional,
+ * NaN, and empty values fall back to the default.
+ */
+export function resolveDiskMinFreeBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.CONDUIT_DISK_MIN_FREE_BYTES
+  if (raw === undefined || raw === '') return DEFAULT_DISK_MIN_FREE_BYTES
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return DEFAULT_DISK_MIN_FREE_BYTES
+  return n
+}
+
 /** Bucket a used-space fraction (0–1) into an alerting level. */
 export function classifyDiskUsage(usedFraction: number): DiskPressureLevel {
   if (usedFraction >= DISK_CRITICAL_FRACTION) return 'critical'
@@ -22,6 +40,20 @@ export interface DiskPressure {
   totalBytes: number
   freeBytes: number
   usedFraction: number
+}
+
+/**
+ * Combine percentage fill with an absolute free-byte reserve. Critical when
+ * either the used fraction is at/above {@link DISK_CRITICAL_FRACTION} or
+ * available space is below a non-zero reserve. A reserve of `0` disables the
+ * absolute check so classification falls through to {@link classifyDiskUsage}.
+ */
+export function classifyDiskPressure(
+  pressure: DiskPressure,
+  minFreeBytes = resolveDiskMinFreeBytes()
+): DiskPressureLevel {
+  if (minFreeBytes > 0 && pressure.freeBytes < minFreeBytes) return 'critical'
+  return classifyDiskUsage(pressure.usedFraction)
 }
 
 /**
@@ -39,18 +71,22 @@ export async function measureDiskPressure(dir: string): Promise<DiskPressure> {
 }
 
 /**
- * Throw an operator-facing disk-full error when `dir`'s volume is at/above
- * {@link DISK_CRITICAL_FRACTION}. A measurement failure is ignored — we must
- * not block runs because `statfs` is unavailable.
+ * Throw an operator-facing disk-full error when `dir`'s volume is critically
+ * full by percentage or below the absolute reserve. A measurement failure is
+ * ignored — we must not block runs because `statfs` is unavailable.
  */
-export async function assertVolumeHasSpace(dir: string, action: string): Promise<void> {
+export async function assertVolumeHasSpace(
+  dir: string,
+  action: string,
+  minFreeBytes = resolveDiskMinFreeBytes()
+): Promise<void> {
   let pressure: DiskPressure
   try {
     pressure = await measureDiskPressure(dir)
   } catch {
     return
   }
-  if (classifyDiskUsage(pressure.usedFraction) === 'critical') {
+  if (classifyDiskPressure(pressure, minFreeBytes) === 'critical') {
     throw new Error(diskFullMessage(action))
   }
 }

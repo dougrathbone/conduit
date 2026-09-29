@@ -10,6 +10,10 @@ import {
   measureDiskPressure,
   assertVolumeHasSpace,
   DISK_CRITICAL_FRACTION,
+  DEFAULT_DISK_MIN_FREE_BYTES,
+  resolveDiskMinFreeBytes,
+  classifyDiskPressure,
+  type DiskPressure,
 } from './diskPressure'
 
 afterEach(() => {
@@ -31,6 +35,51 @@ describe('classifyDiskUsage', () => {
   })
 })
 
+describe('resolveDiskMinFreeBytes', () => {
+  it('defaults to 1 GiB when CONDUIT_DISK_MIN_FREE_BYTES is unset', () => {
+    expect(resolveDiskMinFreeBytes({})).toBe(1_073_741_824)
+    expect(resolveDiskMinFreeBytes({})).toBe(DEFAULT_DISK_MIN_FREE_BYTES)
+  })
+
+  it('overrides the default with a valid non-negative integer', () => {
+    expect(resolveDiskMinFreeBytes({ CONDUIT_DISK_MIN_FREE_BYTES: '2097152' })).toBe(2_097_152)
+  })
+
+  it('treats 0 as a disabled absolute reserve', () => {
+    expect(resolveDiskMinFreeBytes({ CONDUIT_DISK_MIN_FREE_BYTES: '0' })).toBe(0)
+  })
+
+  it('falls back to the default for negative, fractional, NaN, and empty values', () => {
+    expect(resolveDiskMinFreeBytes({ CONDUIT_DISK_MIN_FREE_BYTES: '-1' })).toBe(DEFAULT_DISK_MIN_FREE_BYTES)
+    expect(resolveDiskMinFreeBytes({ CONDUIT_DISK_MIN_FREE_BYTES: '1.5' })).toBe(DEFAULT_DISK_MIN_FREE_BYTES)
+    expect(resolveDiskMinFreeBytes({ CONDUIT_DISK_MIN_FREE_BYTES: 'NaN' })).toBe(DEFAULT_DISK_MIN_FREE_BYTES)
+    expect(resolveDiskMinFreeBytes({ CONDUIT_DISK_MIN_FREE_BYTES: '' })).toBe(DEFAULT_DISK_MIN_FREE_BYTES)
+  })
+})
+
+describe('classifyDiskPressure', () => {
+  const pressure = (usedFraction: number, freeBytes: number): DiskPressure => ({
+    totalBytes: 10_000,
+    freeBytes,
+    usedFraction,
+  })
+
+  it('is critical when free bytes are below a non-zero reserve', () => {
+    expect(classifyDiskPressure(pressure(0.5, 500), 1024)).toBe('critical')
+  })
+
+  it('delegates to percentage classification when the reserve is satisfied', () => {
+    expect(classifyDiskPressure(pressure(0.5, 2000), 1024)).toBe('ok')
+    expect(classifyDiskPressure(pressure(0.85, 2000), 1024)).toBe('warning')
+    expect(classifyDiskPressure(pressure(0.95, 2000), 1024)).toBe('critical')
+  })
+
+  it('ignores the absolute reserve when it is disabled (0)', () => {
+    expect(classifyDiskPressure(pressure(0.5, 500), 0)).toBe('ok')
+    expect(classifyDiskPressure(pressure(0.91, 500), 0)).toBe('critical')
+  })
+})
+
 describe('measureDiskPressure', () => {
   it('computes used fraction from statfs blocks', async () => {
     statfs.mockResolvedValue({ bsize: 1024, blocks: 100, bavail: 10 })
@@ -44,18 +93,31 @@ describe('measureDiskPressure', () => {
 describe('assertVolumeHasSpace', () => {
   it('throws an operator-facing message when the volume is critically full', async () => {
     statfs.mockResolvedValue({ bsize: 1024, blocks: 100, bavail: 5 })
-    await expect(assertVolumeHasSpace('/data', 'start this run')).rejects.toThrow(
+    await expect(assertVolumeHasSpace('/data', 'start this run', 0)).rejects.toThrow(
       /Not enough disk space to start this run/
     )
   })
 
-  it('does not throw when the volume has headroom', async () => {
+  it('does not throw when the volume has percentage headroom and the reserve is disabled', async () => {
     statfs.mockResolvedValue({ bsize: 1024, blocks: 100, bavail: 50 })
-    await expect(assertVolumeHasSpace('/data', 'start this run')).resolves.toBeUndefined()
+    await expect(assertVolumeHasSpace('/data', 'start this run', 0)).resolves.toBeUndefined()
   })
 
   it('does not block a run when statfs fails', async () => {
     statfs.mockRejectedValue(new Error('ENOENT'))
     await expect(assertVolumeHasSpace('/missing', 'start this run')).resolves.toBeUndefined()
+  })
+
+  it('rejects a run below 90% used when free bytes are under the absolute reserve', async () => {
+    // 50% used, 50 KiB free — percentage-ok, but below the default 1 GiB reserve.
+    statfs.mockResolvedValue({ bsize: 1024, blocks: 100, bavail: 50 })
+    await expect(assertVolumeHasSpace('/data', 'start this run')).rejects.toThrow(
+      /Not enough disk space to start this run/
+    )
+  })
+
+  it('permits the same filesystem when the absolute reserve is disabled', async () => {
+    statfs.mockResolvedValue({ bsize: 1024, blocks: 100, bavail: 50 })
+    await expect(assertVolumeHasSpace('/data', 'start this run', 0)).resolves.toBeUndefined()
   })
 })
