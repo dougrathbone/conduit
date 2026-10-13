@@ -5,6 +5,7 @@ import {
   cliKillDiagnostic,
   failedStartLastLine,
   isDerivedWorkerControlFailure,
+  redactFailureLastLine,
 } from './runFailure'
 
 describe('buildRunFailureReport', () => {
@@ -83,6 +84,39 @@ describe('classifyRunFailure', () => {
     }
   )
 
+  it.each([
+    'CURSOR_API_KEY is not set',
+    'ANTHROPIC_API_KEY is not set',
+    'API key not set',
+    'No API key',
+    'Error: No API key provided',
+    'cursor: not logged in',
+    'Login required',
+    'claude: login required to continue',
+  ])('classifies missing-credential / login CLI line %j as authentication', (lastLine) => {
+    expect(classifyRunFailure(lastLine, 1)).toBe('authentication')
+  })
+
+  it('classifies a missing API key on the trailing line of multi-line CLI output', () => {
+    expect(classifyRunFailure('some preamble\nCURSOR_API_KEY is not set\n', 1)).toBe(
+      'authentication'
+    )
+    expect(classifyRunFailure('noise\nnot logged in', 1)).toBe('authentication')
+  })
+
+  it.each([
+    'Cannot use this model: foo. Available models: …',
+    'cannot use this model: composer-9',
+    'error: unknown option "--legacy-flag"',
+    'Unknown option: --foo',
+  ])('classifies runner startup rejection %j as launch_config', (lastLine) => {
+    expect(classifyRunFailure(lastLine, 1)).toBe('launch_config')
+  })
+
+  it('classifies a launch-config rejection on the trailing CLI line', () => {
+    expect(classifyRunFailure('starting…\nCannot use this model: bad-id', 1)).toBe('launch_config')
+  })
+
   it('classifies a framed Conduit worker-control line as worker_control even with a signal exit', () => {
     const lastLine = '[Conduit: worker worker-1 lost contact (lease expired) — failing this run.]'
     expect(classifyRunFailure(lastLine, null)).toBe('worker_control')
@@ -145,11 +179,26 @@ describe('buildRunFailureReport authentication', () => {
     })
     expect(r.message).toBe('Agent credential rejected (cursor)')
     expect(r.ctx.tags?.failureKind).toBe('authentication')
+    expect(r.level).toBe('warning')
     expect(r.ctx.extra).not.toHaveProperty('lastLine')
     expect(JSON.stringify(r.ctx.extra ?? {})).not.toContain(lastLine)
   })
 
-  it('tags disk, signal, worker-control, and generic reports with their failureKind', () => {
+  it('reports missing API key / login failures as authentication without lastLine', () => {
+    for (const lastLine of ['CURSOR_API_KEY is not set', 'not logged in']) {
+      const r = buildRunFailureReport({
+        runId: 'r-auth-miss',
+        runner: 'cursor',
+        exitCode: 1,
+        lastLine,
+      })
+      expect(r.message).toBe('Agent credential rejected (cursor)')
+      expect(r.ctx.tags?.failureKind).toBe('authentication')
+      expect(r.ctx.extra).toEqual({})
+    }
+  })
+
+  it('tags disk, signal, worker-control, launch_config, and generic reports with their failureKind', () => {
     expect(
       buildRunFailureReport({
         runId: 'r-disk',
@@ -172,11 +221,87 @@ describe('buildRunFailureReport authentication', () => {
     ).toBe('worker_control')
     expect(
       buildRunFailureReport({
+        runId: 'r-launch',
+        runner: 'cursor',
+        exitCode: 1,
+        lastLine: 'Cannot use this model: bad-id',
+      }).ctx.tags?.failureKind
+    ).toBe('launch_config')
+    expect(
+      buildRunFailureReport({
         runId: 'r-gen',
         runner: 'amp',
         exitCode: 1,
         lastLine: 'TypeError: something broke',
       }).ctx.tags?.failureKind
     ).toBe('agent_error')
+  })
+})
+
+describe('buildRunFailureReport launch_config', () => {
+  it('reports a stable launch-config message with a redacted lastLine at warning', () => {
+    const lastLine = 'Cannot use this model: bad-id'
+    const r = buildRunFailureReport({
+      runId: 'r-lc',
+      runner: 'cursor',
+      exitCode: 1,
+      lastLine,
+    })
+    expect(r.message).toBe('Agent runner rejected the launch configuration (cursor)')
+    expect(r.level).toBe('warning')
+    expect(r.ctx.tags?.failureKind).toBe('launch_config')
+    expect(r.ctx.extra).toEqual({ lastLine })
+  })
+
+  it('keeps ordinary agent failures as agent_error with the exit-1 message', () => {
+    const r = buildRunFailureReport({
+      runId: 'r-agent',
+      runner: 'cursor',
+      exitCode: 1,
+      lastLine: 'TypeError: something broke',
+    })
+    expect(r.message).toBe('Agent run failed (exit 1)')
+    expect(r.ctx.tags?.failureKind).toBe('agent_error')
+    expect(r.level).toBe('warning')
+    expect(r.ctx.extra).toEqual({ lastLine: 'TypeError: something broke' })
+  })
+})
+
+describe('redactFailureLastLine', () => {
+  it('redacts synthetic sk-/Bearer/assignment secrets so Sentry keeps the diagnostic', () => {
+    expect(redactFailureLastLine('rejected key sk-test-secret at startup')).toBe(
+      'rejected key [redacted] at startup'
+    )
+    expect(redactFailureLastLine('Authorization: Bearer abcdef')).toBe(
+      'Authorization: Bearer [redacted]'
+    )
+    expect(redactFailureLastLine('failed with api_key=supersecret')).toBe(
+      'failed with api_key=[redacted]'
+    )
+    expect(redactFailureLastLine('token: hush-token-value')).toBe('token: [redacted]')
+    expect(redactFailureLastLine('secret=also-secret password=pw123')).toBe(
+      'secret=[redacted] password=[redacted]'
+    )
+  })
+
+  it('attaches a redacted lastLine on non-auth reports and never embeds the raw secret', () => {
+    const secret = 'sk-test-secret'
+    const lastLine = `startup failed; echo ${secret}`
+    const r = buildRunFailureReport({
+      runId: 'r-redact',
+      runner: 'cursor',
+      exitCode: 1,
+      lastLine,
+    })
+    expect(r.ctx.tags?.failureKind).toBe('agent_error')
+    expect(r.ctx.extra?.lastLine).toBe('startup failed; echo [redacted]')
+    const serialized = JSON.stringify(r)
+    expect(serialized).not.toContain(secret)
+    expect(serialized).not.toContain('sk-test')
+  })
+
+  it('leaves ordinary diagnostics unchanged', () => {
+    expect(redactFailureLastLine('TypeError: something broke')).toBe('TypeError: something broke')
+    expect(redactFailureLastLine('Cannot use this model: foo')).toBe('Cannot use this model: foo')
   })
 })

@@ -14,22 +14,74 @@ export type RunFailureKind =
   | 'disk_full'
   | 'process_signal'
   | 'worker_control'
+  | 'launch_config'
   | 'agent_error'
 
 const API_KEY_FAILURE_RE = /invalid api key|the provided api key is invalid/i
+/** Line-anchored CLI auth rejection — not mid-sentence upstream 401s. */
 const CLI_AUTH_LINE_RE =
   /^(?:(?:claude|amp|cursor)\s*:\s*)?(?:unauthorized|authentication failed)\b/i
+/** Missing/absent credential diagnostics from the agent CLIs. */
+const MISSING_API_KEY_RE =
+  /\b(?:(?:CURSOR|ANTHROPIC|AMP)_API_KEY|API[_ ]?KEY)\b.{0,40}\b(?:is\s+)?(?:not\s+set|missing|absent|unset)\b|\bno\s+api[_ ]?key\b|\bapi[_ ]?key\s+not\s+set\b/i
+const CLI_LOGIN_RE = /\b(?:not logged in|login required)\b/i
+
+/** Immediate runner startup rejection (bad model id, removed flag) — not an agent crash. */
+const LAUNCH_CONFIG_RE = /\bcannot use this model\b|\bunknown option\b/i
 
 const WORKER_CONTROL_PREFIX = '[Conduit: worker '
+
+const REDACTED = '[redacted]'
 
 /** True when the last line is a Conduit-generated worker-control failure. */
 export function isDerivedWorkerControlFailure(lastLine: string | undefined): boolean {
   return (lastLine ?? '').trim().startsWith(WORKER_CONTROL_PREFIX)
 }
 
+/** Last non-empty line of CLI output (auth / launch diagnostics are usually here). */
+function trailingDiagnosticLine(text: string): string {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+  return lines.length > 0 ? lines[lines.length - 1]! : text.trim()
+}
+
 function isAuthenticationFailure(lastLine: string): boolean {
-  const line = lastLine.trim()
-  return API_KEY_FAILURE_RE.test(line) || CLI_AUTH_LINE_RE.test(line)
+  const line = trailingDiagnosticLine(lastLine)
+  return (
+    API_KEY_FAILURE_RE.test(line) ||
+    CLI_AUTH_LINE_RE.test(line) ||
+    MISSING_API_KEY_RE.test(line) ||
+    CLI_LOGIN_RE.test(line)
+  )
+}
+
+function isLaunchConfigFailure(lastLine: string): boolean {
+  return LAUNCH_CONFIG_RE.test(trailingDiagnosticLine(lastLine))
+}
+
+/**
+ * Strip secret-like material from a diagnostic line before attaching it to a
+ * reporter payload. Sentry's server-side scrubber otherwise replaces the whole
+ * line with `[Filtered]`, which leaves operators with no signal.
+ */
+export function redactFailureLastLine(line: string): string {
+  let s = line
+  // Assignment-style: api_key=… / token: … / secret=… / password …
+  s = s.replace(
+    /\b((?:api[_\s-]?key|token|secret|password)\s*[=:]\s*)(\S+)/gi,
+    `$1${REDACTED}`
+  )
+  // Bearer tokens
+  s = s.replace(/\bBearer\s+\S+/gi, `Bearer ${REDACTED}`)
+  // sk-… API key shapes (and similar opaque secrets)
+  s = s.replace(/\bsk-[A-Za-z0-9_-]+\b/g, REDACTED)
+  // Long hex blobs (installation tokens, digests, etc.)
+  s = s.replace(/\b[0-9a-fA-F]{32,}\b/g, REDACTED)
+  // Other token-shaped base64url blobs (24+ chars of alnum/_/-)
+  s = s.replace(/\b[A-Za-z0-9_-]{40,}\b/g, REDACTED)
+  return s
 }
 
 /** Stable operational cause for a failed agent run. */
@@ -40,6 +92,7 @@ export function classifyRunFailure(
   const text = lastLine ?? ''
   if (isDerivedWorkerControlFailure(text)) return 'worker_control'
   if (isAuthenticationFailure(text)) return 'authentication'
+  if (isLaunchConfigFailure(text)) return 'launch_config'
   if (isDiskFullError(text)) return 'disk_full'
   if (typeof exitCode !== 'number') return 'process_signal'
   return 'agent_error'
@@ -86,6 +139,20 @@ export function cliKillDiagnostic(
   return undefined
 }
 
+function failureMessage(kind: RunFailureKind, runner: RunnerType, exitCodeTag: string): string {
+  switch (kind) {
+    case 'authentication':
+      return `Agent credential rejected (${runner})`
+    case 'launch_config':
+      return `Agent runner rejected the launch configuration (${runner})`
+    case 'disk_full':
+    case 'process_signal':
+    case 'worker_control':
+    case 'agent_error':
+      return `Agent run failed (exit ${exitCodeTag})`
+  }
+}
+
 /**
  * Build the error-reporter payload for a failed agent run.
  *
@@ -110,10 +177,10 @@ export function buildRunFailureReport(opts: {
   const killedBySignal = typeof exitCode !== 'number'
   const exitCodeTag = killedBySignal ? 'signal' : String(exitCode)
   const authentication = failureKind === 'authentication'
+  const redactedLastLine =
+    lastLine && lastLine.length > 0 ? redactFailureLastLine(lastLine) : undefined
   return {
-    message: authentication
-      ? `Agent credential rejected (${runner})`
-      : `Agent run failed (exit ${exitCodeTag})`,
+    message: failureMessage(failureKind, runner, exitCodeTag),
     level: diskFull || killedBySignal ? 'error' : 'warning',
     ctx: {
       tags: {
@@ -126,7 +193,7 @@ export function buildRunFailureReport(opts: {
         killedBySignal: String(killedBySignal),
         failureKind,
       },
-      extra: authentication ? {} : { lastLine: lastLine || undefined },
+      extra: authentication ? {} : { lastLine: redactedLastLine },
     },
   }
 }
