@@ -12,8 +12,10 @@
  * DEACTIVATING / STOPPING / DEPROVISIONING) is not a failure: Fargate's
  * default stopTimeout is 30s of SIGTERM before SIGKILL, and ENI teardown
  * after that routinely takes minutes. Those tasks are polled until STOPPED
- * or a deprovision budget, and Sentry is notified once — not on every
- * 60s slice. A task that stays RUNNING is retried, then reported once.
+ * or a deprovision budget. Exhausting the budget is still not a StopTask
+ * failure — the task is already stopping — so Conduit drops the ARN and
+ * warns once instead of paging or retrying StopTask. A task that stays
+ * RUNNING (stop never accepted) is retried, then reported once.
  *
  * CONDUIT_WORKER_TOKEN: prefer baking it into the task definition as a
  * Secrets Manager secret (task def `secrets`), so it never appears in
@@ -228,7 +230,7 @@ export function buildFargateRunTaskInput(config: FargateWorkerConfig, spec: RunS
 export class FargateWorkerFactory implements WorkerFactory {
   readonly kind = 'fargate'
   private readonly ecs: ECSClient
-  /** In-flight runId → task ARN. Removed only after STOPPED / not-found. */
+  /** In-flight runId → task ARN. Removed after STOPPED / not-found / accepted deprovision. */
   private readonly active = new Map<string, string>()
   /** In-flight stop+verify promises, keyed by task ARN (idempotent). */
   private readonly stopping = new Map<string, Promise<void>>()
@@ -456,11 +458,20 @@ export class FargateWorkerFactory implements WorkerFactory {
         lastError = new Error(`Stopping task ${taskArn} interrupted by shutdown`)
         break
       }
+      // ECS already accepted the stop; ENI teardown can outlast the budget.
+      // Drop the ARN — another StopTask will not hurry DEPROVISIONING — and
+      // do not treat this as a stop failure for Sentry or failedStops retry.
+      if (wait.verdict === 'deprovision-stuck') {
+        const status = formatTaskStatus(wait.task)
+        console.warn(
+          `[workers/fargate] Task ${taskArn} (run ${runId}) still ${status} after ` +
+            `deprovision budget; stop was accepted — forgetting ARN without retry`
+        )
+        this.forgetStopped(runId, taskArn)
+        return
+      }
       const status = formatTaskStatus(wait.task)
       lastError = new Error(`Task ${taskArn} did not reach STOPPED (${status})`)
-      // ECS already accepted the stop and the deprovision budget elapsed.
-      // Another immediate StopTask will not make DEPROVISIONING faster.
-      if (wait.verdict === 'deprovision-stuck') break
       if (attempt < this.stopAttempts) {
         await sleep(delay)
         delay = Math.min(delay * 2, BACKOFF_CAP_MS)

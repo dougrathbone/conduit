@@ -926,12 +926,14 @@ describe('FargateWorkerFactory', () => {
 
   it('waits out the deprovision budget once instead of retrying StopTask on every slice', async () => {
     vi.mocked(reporter.captureMessage).mockClear()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
     factory = new FargateWorkerFactory(cp.plane, baseConfig(), ecs as unknown as ECSClient, {
-      uncleanRetryMs: 0,
+      uncleanRetryMs: 25,
       stopVerifyTimeoutMs: 20,
       stopDeprovisionTimeoutMs: 80,
       stopBackoffMs: 1,
       stopAttempts: 3,
+      shutdownDeadlineMs: 40,
     })
     const original = ecs.send.bind(ecs)
     ecs.send = async (command) => {
@@ -942,9 +944,18 @@ describe('FargateWorkerFactory', () => {
       return original(command)
     }
     const handle = await factory.startRun(SPEC, sink)
-    await expect(handle.cancel()).rejects.toThrow(/DEPROVISIONING/)
+    // Stop was accepted; lingering DEPROVISIONING is not a StopTask failure.
+    await expect(handle.cancel()).resolves.toBeUndefined()
     expect(ecs.of('StopTaskCommand')).toHaveLength(1)
-    expect(reporter.captureMessage).toHaveBeenCalledTimes(1)
+    expect(reporter.captureMessage).not.toHaveBeenCalled()
+    expect(warnSpy.mock.calls.some((c) => String(c[0]).includes('DEPROVISIONING'))).toBe(true)
+    // Unclean retry must not fire StopTask again for this ARN.
+    await new Promise((r) => setTimeout(r, 80))
+    expect(ecs.of('StopTaskCommand')).toHaveLength(1)
+    // Forgotten from active — shutdown must not hang waiting on deprovision.
+    await expect(factory.shutdown()).resolves.toBeUndefined()
+    expect(ecs.of('StopTaskCommand')).toHaveLength(1)
+    warnSpy.mockRestore()
   })
 
   it('waits through DEACTIVATING until DescribeTasks reports STOPPED', async () => {
