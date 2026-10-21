@@ -185,10 +185,26 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
   const nameInputRef = useRef<HTMLInputElement>(null)
   const focusedForRef = useRef<string | null>(null)
 
-  // Initialize draft from agent data
+  // The agent's updatedAt the draft was last loaded from, and whether a save is
+  // in flight — together they tell an external change (another tab, an MCP
+  // client) apart from the echo of our own autosave.
+  const syncedUpdatedAtRef = useRef<number | null>(null)
+  const savingRef = useRef(false)
+
+  // Initialize draft from agent data, and re-sync it when the agent changes
+  // elsewhere while there are no unsaved local edits — otherwise the next
+  // autosave of the stale draft would silently revert the external change.
   useEffect(() => {
-    if (agent && initializedRef.current !== agent.id) {
+    if (!agent) return
+    const isNewAgent = initializedRef.current !== agent.id
+    const changedElsewhere =
+      !isNewAgent &&
+      syncedUpdatedAtRef.current !== agent.updatedAt &&
+      !debounceRef.current &&
+      !savingRef.current
+    if (isNewAgent || changedElsewhere) {
       initializedRef.current = agent.id
+      syncedUpdatedAtRef.current = agent.updatedAt
       setDraft({
         name: agent.name,
         description: agent.description,
@@ -226,13 +242,17 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
   const save = useCallback(
     async (updates: Partial<Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>>) => {
       setSaveStateAndNotify('saving')
+      savingRef.current = true
       try {
-        await updateAgent.mutateAsync({ id: agentId, data: updates })
+        const saved = await updateAgent.mutateAsync({ id: agentId, data: updates })
+        syncedUpdatedAtRef.current = saved.updatedAt
         setSaveStateAndNotify('saved')
         setTimeout(() => setSaveStateAndNotify('idle'), 2000)
       } catch {
         setSaveStateAndNotify('error')
         setTimeout(() => setSaveStateAndNotify('idle'), 3000)
+      } finally {
+        savingRef.current = false
       }
     },
     [agentId, updateAgent, setSaveStateAndNotify]
@@ -242,6 +262,7 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
     (updates: Partial<Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>>) => {
       if (debounceRef.current) clearTimeout(debounceRef.current)
       debounceRef.current = setTimeout(() => {
+        debounceRef.current = null
         save(updates)
       }, 500)
     },

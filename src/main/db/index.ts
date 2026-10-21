@@ -290,6 +290,34 @@ export async function initDb(): Promise<void> {
       data_enc TEXT NOT NULL,
       created_at BIGINT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS mcp_access_tokens (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      token_hash TEXT NOT NULL,
+      token_prefix TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      expires_at BIGINT,
+      last_used_at BIGINT,
+      revoked_at BIGINT,
+      created_at BIGINT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS mcp_access_tokens_token_hash
+      ON mcp_access_tokens (token_hash);
+    CREATE INDEX IF NOT EXISTS mcp_access_tokens_user ON mcp_access_tokens (user_id);
+
+    CREATE TABLE IF NOT EXISTS prompt_revisions (
+      id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      source TEXT NOT NULL,
+      note TEXT,
+      created_by TEXT,
+      created_at BIGINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS prompt_revisions_agent
+      ON prompt_revisions (agent_id, created_at);
   `)
 
   // Guarded primary-key swap for oauth_tokens: drop the old single-column PK
