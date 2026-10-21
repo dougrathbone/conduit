@@ -316,6 +316,62 @@ MCP servers that require OAuth use **server-mode OAuth 2.0 + PKCE** — Conduit 
 - `src/main/db/queries/mcpOAuthClients.ts` — `getClient`, `saveClient`, `deleteClient` (DCR client cache)
 - `src/renderer/hooks/useMcpOAuth.ts` — TanStack Query hooks for OAuth status + mutations
 
+## Conduit MCP Server
+
+Conduit itself is exposed as an MCP server so LLM clients (Claude Code, Cursor,
+…) can configure agents, investigate runs, and iterate on prompts without the UI.
+(Distinct from *MCP OAuth* above, where Conduit is the MCP **client**.)
+
+**Endpoint**: `POST /mcp` — stateless Streamable HTTP (`src/server/mcp/http.ts`);
+a fresh `McpServer` + transport per request, JSON responses, GET/DELETE → 405.
+Mounted before session middleware; cross-origin browser requests are 403'd.
+
+**Auth**: per-user personal access tokens (`cdt_…`), minted in Settings → MCP
+access (WS `mcpTokens:list|create|revoke`). Only the SHA-256 hash is stored
+(`mcp_access_tokens`). Scope `read` or `write` — write tools are not even
+registered for read tokens. The caller acts as the token's user with the normal
+ownership/sharing rules (`canAccessEntity` / `isEntityOwner`). Dev-bypass mode
+accepts tokenless requests as `dev-user` unless `CONDUIT_MCP_REQUIRE_TOKEN=true`.
+
+**Redaction**: secrets (env vars, MCP headers/env, URL credentials, publish-target
+and webhook secrets) are returned as `"[redacted]"`; sending `"[redacted]"` back
+on a write keeps the stored value.
+
+**Surface** (`src/server/mcp/`):
+- Tools — agents: `list_agents`, `get_agent`, `create_agent`, `update_agent`,
+ `delete_agent` (owner-only, requires `confirmName`), `set_agent_mcp_server`,
+ `remove_agent_mcp_server`, `check_mcp_server`; runs: `list_runs`, `get_run`,
+ `get_run_log` (filtered/paged digest), `start_run`, `stop_run`; triggers:
+ `list_triggers`, `create_trigger`, `update_trigger`, `delete_trigger`; workspace:
+ `get_conduit_status`, `list_repositories`, `sync_repository`,
+ `list_publish_targets`, `list_global_mcp_servers`; prompts: `get_agent_prompt`,
+ `update_agent_prompt` (optional `expectedUpdatedAt`), `edit_agent_prompt`
+ (exact-substring replace), `list_prompt_revisions`, `get_prompt_revision`,
+ `restore_prompt_revision`, `get_prompt_performance`.
+- Resources — `conduit://agents/{agentId}`, `conduit://agents/{agentId}/prompt`,
+ `conduit://runs/{runId}`, `conduit://runs/{runId}/log`.
+- Prompts — `investigate-run`, `improve-agent-prompt`, `triage-failures`, `design-agent`.
+
+**Prompt history**: every prompt change (UI or MCP) is recorded in
+`prompt_revisions` (`src/main/db/queries/promptRevisions.ts`); the first change
+also stores a `baseline`; consecutive UI autosaves by the same user within 10
+minutes coalesce. MCP writes broadcast `entity:changed` so open UIs refresh
+(the AgentEditor re-syncs its draft only when no save is pending).
+
+**Connect**:
+```bash
+claude mcp add --transport http conduit http://localhost:7456/mcp --header "Authorization: Bearer cdt_…"
+# stdio-only clients: relay via the bridge
+CONDUIT_MCP_URL=http://localhost:7456/mcp CONDUIT_MCP_TOKEN=cdt_… npm run mcp:stdio
+```
+
+**Env**: `CONDUIT_MCP_ENABLED` (default on; `false` disables `/mcp`),
+`CONDUIT_MCP_REQUIRE_TOKEN` (force tokens in dev bypass), bridge-side
+`CONDUIT_MCP_URL` / `CONDUIT_MCP_TOKEN`.
+
+**Tests**: unit + in-memory SDK client tests in `src/server/mcp/*.test.ts`;
+`npm run e2e:mcp` drives a live server over HTTP and the stdio bridge.
+
 ## Ownership & Sharing
 
 Every entity (agents, publish targets, repositories, global MCP servers) has an `ownerId` column linking to a user. Triggers inherit visibility from their parent agent.
