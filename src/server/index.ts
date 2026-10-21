@@ -26,6 +26,7 @@ import {
   revokeMcpAccessToken,
 } from '../main/db/queries/mcpAccessTokens'
 import { recordPromptChange } from '../main/db/queries/promptRevisions'
+import { CONDUIT_MCP_HTTP_PATH } from '../shared/types'
 import { resolveWorkerReconnectTimeoutMs } from '../shared/workerControl'
 import { recoverRemoteRun, reconcileOrphanedRuns, stopOrphanReconciliation } from './runRecovery'
 import { getWorkerFactory } from './workers'
@@ -169,10 +170,10 @@ app.use('/mcp/oauth', createMcpOAuthRouter(broadcast))
 
 // Conduit's own MCP server (Streamable HTTP). Authenticates with personal access
 // tokens rather than the session cookie, so it sits before sessionMiddleware and
-// before the SPA catch-all (which would otherwise answer GET /mcp with HTML).
+// before the SPA catch-all (which would otherwise answer GET /api/mcp with HTML).
 if (isMcpEnabled()) {
   app.use(
-    '/mcp',
+    CONDUIT_MCP_HTTP_PATH,
     createMcpRouter({
       startRun: (agentId, startedBy, triggerContext) =>
         startRunServer(agentId, broadcast, triggerContext, startedBy),
@@ -602,7 +603,7 @@ const handlers: Record<string, HandlerFn> = {
   'runnerSettings:setTimeout': ([runner, seconds], _ws, ctx) =>
     setRunnerTimeout(ctx.userId, runner as RunnerType, Number(seconds) || 0).then(() => undefined),
 
-  // Personal access tokens for the /mcp endpoint, always scoped to the acting user.
+  // Personal access tokens for the /api/mcp endpoint, always scoped to the acting user.
   'mcpTokens:list': (_args, _ws, ctx) => listMcpAccessTokens(ctx.userId),
   'mcpTokens:create': ([input], _ws, ctx) => createMcpAccessToken(ctx.userId, input as McpAccessTokenInput),
   'mcpTokens:revoke': async ([id], _ws, ctx) => {

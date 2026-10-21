@@ -123,7 +123,7 @@ export const runnerSettings = pgTable('runner_settings', {
   pk: primaryKey({ columns: [table.userId, table.runner] }),
 }))
 
-// Personal access tokens for Conduit's own MCP endpoint (`/mcp`). Only the
+// Personal access tokens for Conduit's own MCP endpoint (`/api/mcp`). Only the
 // SHA-256 hash of the token is stored; the plaintext is shown once at creation.
 export const mcpAccessTokens = pgTable('mcp_access_tokens', {
   id: text('id').primaryKey(),

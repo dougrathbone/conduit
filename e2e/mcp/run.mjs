@@ -2,7 +2,7 @@
  * MCP server e2e (`npm run e2e:mcp`): boots the built server against Postgres
  * with tokens required (CONDUIT_MCP_REQUIRE_TOKEN=true) and the stub `claude`
  * CLI on PATH, mints tokens over the browser WebSocket like the Settings UI
- * does, then drives /mcp with the official MCP SDK client — over Streamable
+ * does, then drives /api/mcp with the official MCP SDK client — over Streamable
  * HTTP and through the stdio bridge.
  *
  * Env overrides: CONDUIT_E2E_MCP_PORT (default 7561), CONDUIT_E2E_MCP_DB,
@@ -30,7 +30,7 @@ import {
 const PORT = Number(process.env.CONDUIT_E2E_MCP_PORT) || 7561
 const DB_NAME = process.env.CONDUIT_E2E_MCP_DB || 'conduit_e2e_mcp'
 const BASE = `http://localhost:${PORT}`
-const MCP_URL = `${BASE}/mcp`
+const MCP_URL = `${BASE}/api/mcp`
 
 let passed = 0
 async function step(name, fn) {

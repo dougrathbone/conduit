@@ -4,7 +4,7 @@ import { formatDistanceToNow } from 'date-fns'
 import { Button } from '@renderer/components/ui/button'
 import { Input } from '@renderer/components/ui/input'
 import { useCreateMcpToken, useMcpTokens, useRevokeMcpToken } from '@renderer/hooks/useMcpTokens'
-import type { CreatedMcpAccessToken, McpAccessTokenScope } from '@shared/types'
+import { CONDUIT_MCP_HTTP_PATH, type CreatedMcpAccessToken, type McpAccessTokenScope } from '@shared/types'
 
 const EXPIRY_OPTIONS = [
   { days: 30, label: '30 days' },
@@ -14,7 +14,7 @@ const EXPIRY_OPTIONS = [
 ]
 
 function mcpUrl(): string {
-  return `${window.location.origin}/mcp`
+  return `${window.location.origin}${CONDUIT_MCP_HTTP_PATH}`
 }
 
 function CopyButton({ text }: { text: string }) {

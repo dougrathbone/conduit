@@ -388,7 +388,10 @@ export interface GlobalMcpServer {
  */
 export type McpAccessTokenScope = 'read' | 'write'
 
-/** A personal access token for Conduit's `/mcp` endpoint. Never carries the secret. */
+/** HTTP path of Conduit's own MCP server (stateless Streamable HTTP). */
+export const CONDUIT_MCP_HTTP_PATH = '/api/mcp'
+
+/** A personal access token for Conduit's `/api/mcp` endpoint. Never carries the secret. */
 export interface McpAccessToken {
   id: string
   name: string

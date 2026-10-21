@@ -189,13 +189,13 @@ Agent-specific and global MCP servers are merged before each run (agent config w
 
 ### Driving Conduit from an MCP client
 
-Conduit is itself an MCP server at `POST /mcp`, so an LLM client can create and edit agents, start and debug runs, manage triggers, and iterate on prompts (with revision history and per-revision success rates) without the UI. Mint a token in **Settings → MCP access** (`read` or `write` scope), then:
+Conduit is itself an MCP server at `POST /api/mcp`, so an LLM client can create and edit agents, start and debug runs, manage triggers, and iterate on prompts (with revision history and per-revision success rates) without the UI. Mint a token in **Settings → MCP access** (`read` or `write` scope), then:
 
 ```bash
-claude mcp add --transport http conduit http://localhost:7456/mcp --header "Authorization: Bearer cdt_…"
+claude mcp add --transport http conduit http://localhost:7456/api/mcp --header "Authorization: Bearer cdt_…"
 ```
 
-Or in an `mcp.json`: `{ "mcpServers": { "conduit": { "url": "http://localhost:7456/mcp", "headers": { "Authorization": "Bearer cdt_…" } } } }`. For stdio-only clients, run the bridge: `CONDUIT_MCP_URL=http://localhost:7456/mcp CONDUIT_MCP_TOKEN=cdt_… npm run mcp:stdio`. In dev-bypass mode tokens are optional unless `CONDUIT_MCP_REQUIRE_TOKEN=true`; set `CONDUIT_MCP_ENABLED=false` to turn the endpoint off. Secrets are always returned as `[redacted]`.
+Or in an `mcp.json`: `{ "mcpServers": { "conduit": { "url": "http://localhost:7456/api/mcp", "headers": { "Authorization": "Bearer cdt_…" } } } }`. For stdio-only clients, run the bridge: `CONDUIT_MCP_URL=http://localhost:7456/api/mcp CONDUIT_MCP_TOKEN=cdt_… npm run mcp:stdio`. In dev-bypass mode tokens are optional unless `CONDUIT_MCP_REQUIRE_TOKEN=true`; set `CONDUIT_MCP_ENABLED=false` to turn the endpoint off. Secrets are always returned as `[redacted]`.
 
 ### Publish targets
 

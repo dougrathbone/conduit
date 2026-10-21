@@ -1,15 +1,16 @@
 /**
  * conduit-mcp-stdio — relays an MCP client's stdio session to a Conduit
- * server's Streamable-HTTP `/mcp` endpoint, for clients that can only launch
+ * server's Streamable-HTTP `/api/mcp` endpoint, for clients that can only launch
  * local MCP servers. stdout carries the protocol, so diagnostics go to stderr.
  *
- * Env: CONDUIT_MCP_URL (default http://localhost:7456/mcp), CONDUIT_MCP_TOKEN.
+ * Env: CONDUIT_MCP_URL (default http://localhost:7456/api/mcp), CONDUIT_MCP_TOKEN.
  */
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js'
+import { CONDUIT_MCP_HTTP_PATH } from '../shared/types'
 
-const url = new URL(process.env.CONDUIT_MCP_URL ?? 'http://localhost:7456/mcp')
+const url = new URL(process.env.CONDUIT_MCP_URL ?? `http://localhost:7456${CONDUIT_MCP_HTTP_PATH}`)
 const token = process.env.CONDUIT_MCP_TOKEN
 
 const upstream = new StreamableHTTPClientTransport(url, {

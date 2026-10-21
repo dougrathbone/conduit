@@ -322,7 +322,7 @@ Conduit itself is exposed as an MCP server so LLM clients (Claude Code, Cursor,
 …) can configure agents, investigate runs, and iterate on prompts without the UI.
 (Distinct from *MCP OAuth* above, where Conduit is the MCP **client**.)
 
-**Endpoint**: `POST /mcp` — stateless Streamable HTTP (`src/server/mcp/http.ts`);
+**Endpoint**: `POST /api/mcp` — stateless Streamable HTTP (`src/server/mcp/http.ts`);
 a fresh `McpServer` + transport per request, JSON responses, GET/DELETE → 405.
 Mounted before session middleware; cross-origin browser requests are 403'd.
 
@@ -360,12 +360,12 @@ minutes coalesce. MCP writes broadcast `entity:changed` so open UIs refresh
 
 **Connect**:
 ```bash
-claude mcp add --transport http conduit http://localhost:7456/mcp --header "Authorization: Bearer cdt_…"
+claude mcp add --transport http conduit http://localhost:7456/api/mcp --header "Authorization: Bearer cdt_…"
 # stdio-only clients: relay via the bridge
-CONDUIT_MCP_URL=http://localhost:7456/mcp CONDUIT_MCP_TOKEN=cdt_… npm run mcp:stdio
+CONDUIT_MCP_URL=http://localhost:7456/api/mcp CONDUIT_MCP_TOKEN=cdt_… npm run mcp:stdio
 ```
 
-**Env**: `CONDUIT_MCP_ENABLED` (default on; `false` disables `/mcp`),
+**Env**: `CONDUIT_MCP_ENABLED` (default on; `false` disables `/api/mcp`),
 `CONDUIT_MCP_REQUIRE_TOKEN` (force tokens in dev bypass), bridge-side
 `CONDUIT_MCP_URL` / `CONDUIT_MCP_TOKEN`.
 
