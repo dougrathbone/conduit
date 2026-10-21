@@ -7,6 +7,7 @@ import { useRunnerTimeouts, useSetRunnerTimeout } from '@renderer/hooks/useRunne
 import { useDataDirSweep } from '@renderer/hooks/useDataDirSweep'
 import { useStorageUsage } from '@renderer/hooks/useStorageUsage'
 import { formatBytes } from '@renderer/lib/utils'
+import { McpAccessCard } from './McpAccessCard'
 import type { RunnerType, SweepResult } from '@shared/types'
 
 interface RunnerMeta {
@@ -278,7 +279,7 @@ export function SettingsManager() {
         <div>
           <h1 className="text-sm font-semibold text-[var(--text-primary)]">Settings</h1>
           <p className="text-xs text-[var(--text-secondary)] mt-0.5">
-            Agent authentication and storage maintenance
+            Agent authentication, MCP access, and storage maintenance
           </p>
         </div>
       </div>
@@ -304,6 +305,9 @@ export function SettingsManager() {
             seconds={timeouts?.[meta.runner] ?? 0}
           />
         ))}
+
+        <h2 className="text-xs font-medium text-[var(--text-secondary)] pt-3">MCP access</h2>
+        <McpAccessCard />
 
         <h2 className="text-xs font-medium text-[var(--text-secondary)] pt-3">Storage maintenance</h2>
         <StorageMaintenanceCard />

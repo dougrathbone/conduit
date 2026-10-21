@@ -13,7 +13,20 @@ import { initDb } from '../main/db/index'
 import { listAgents, getAgent, createAgent, updateAgent, deleteAgent } from '../main/db/queries/agents'
 import { listRuns } from '../main/db/queries/runs'
 import { startRunServer, stopRun, setRunFinalizedHook } from './runner'
-import { getWorkerControlPlane, stopWorkerControlPlane, WorkerControlPlane } from './workerControl'
+import {
+  getWorkerControlPlane,
+  peekWorkerControlPlane,
+  stopWorkerControlPlane,
+  WorkerControlPlane,
+} from './workerControl'
+import { createMcpRouter, isMcpEnabled } from './mcp/http'
+import {
+  createMcpAccessToken,
+  listMcpAccessTokens,
+  revokeMcpAccessToken,
+} from '../main/db/queries/mcpAccessTokens'
+import { recordPromptChange } from '../main/db/queries/promptRevisions'
+import { CONDUIT_MCP_HTTP_PATH } from '../shared/types'
 import { resolveWorkerReconnectTimeoutMs } from '../shared/workerControl'
 import { recoverRemoteRun, reconcileOrphanedRuns, stopOrphanReconciliation } from './runRecovery'
 import { getWorkerFactory } from './workers'
@@ -56,8 +69,8 @@ import { TriggerService } from './triggers/triggerService'
 import { createTriggerRoutes } from './triggers/triggerRoutes'
 import { createMcpOAuthRouter } from './mcpOAuth/routes'
 import { startAuth as mcpStartAuth, getStatus as mcpGetStatus, revoke as mcpRevoke, probeOAuthSupport as mcpProbe } from './mcpOAuth/service'
-import { listMcpTools } from './mcpTools'
-import { classifyUrlHealth, buildHealthProbeHeaders } from './mcpHealth'
+import { checkMcpServerHealth, listMcpServerTools } from './mcpServerProbe'
+import { checkRunnerClis } from './runnerCli'
 import { getGithubPat } from './store'
 import { readRunLog } from './utils'
 import { Octokit } from '@octokit/rest'
@@ -87,6 +100,7 @@ import type { ReporterUser } from '../shared/observability'
 import type {
   AgentConfig,
   GlobalMcpServer,
+  McpAccessTokenInput,
   PublishTarget,
   RepositoryInput,
   RepoTestConnectionInput,
@@ -153,6 +167,33 @@ app.use('/auth', authRoutes)
 // MCP OAuth callback route — must be before sessionMiddleware so the OAuth
 // provider's redirect arrives without requiring a Conduit session cookie.
 app.use('/mcp/oauth', createMcpOAuthRouter(broadcast))
+
+// Conduit's own MCP server (Streamable HTTP). Authenticates with personal access
+// tokens rather than the session cookie, so it sits before sessionMiddleware and
+// before the SPA catch-all (which would otherwise answer GET /api/mcp with HTML).
+if (isMcpEnabled()) {
+  app.use(
+    CONDUIT_MCP_HTTP_PATH,
+    createMcpRouter({
+      startRun: (agentId, startedBy, triggerContext) =>
+        startRunServer(agentId, broadcast, triggerContext, startedBy),
+      stopRun,
+      registerTrigger: (trigger) => triggerService.registerTrigger(trigger),
+      unregisterTrigger: (triggerId) => triggerService.unregisterTrigger(triggerId),
+      triggerRepoSync: (repoId) => repoSyncService.triggerSync(repoId),
+      broadcast,
+      workerStatus: () => {
+        const plane = peekWorkerControlPlane()
+        return {
+          factory: getWorkerFactory().kind,
+          connectedWorkers: plane?.connectedWorkerCount,
+          activeAssignments: plane?.activeAssignmentCount,
+        }
+      },
+      baseUrl: (process.env.CONDUIT_BASE_URL ?? `http://localhost:${PORT}`).replace(/\/+$/, ''),
+    })
+  )
+}
 
 // Serve the SPA shell + static assets WITHOUT requiring a session, so an
 // unauthenticated browser can load the app and drive the Okta/OIDC login flow.
@@ -258,12 +299,22 @@ const handlers: Record<string, HandlerFn> = {
     if (!(await canAccessEntity('agent', id as string, ctx.userId, ctx.userGroupIds))) {
       throw new ClientError('Access denied')
     }
-    return Promise.resolve(
-      updateAgent(
-        id as string,
-        data as Partial<Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>>
+    const patch = data as Partial<Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>>
+    const before = patch.prompt !== undefined ? await getAgent(id as string) : null
+    const updated = await updateAgent(id as string, patch)
+    if (before && patch.prompt !== undefined) {
+      await recordPromptChange({
+        agentId: before.id,
+        previousPrompt: before.prompt,
+        previousAt: before.updatedAt,
+        nextPrompt: patch.prompt,
+        source: 'ui',
+        userId: ctx.userId,
+      }).catch((err) =>
+        reporter.captureException(err, { tags: { component: 'promptRevisions' }, user: contextToReporterUser(ctx) })
       )
-    )
+    }
+    return updated
   },
   'agents:delete': async ([id], _ws, ctx) => {
     if (!(await isEntityOwner('agent', id as string, ctx.userId))) {
@@ -331,119 +382,13 @@ const handlers: Record<string, HandlerFn> = {
     return Promise.resolve()
   },
 
-  'globalMcps:checkHealth': async ([serverConfig], _ws, ctx) => {
-    const config = serverConfig as import('../shared/types').McpServerEntry
+  'globalMcps:checkHealth': ([serverConfig], _ws, ctx) =>
+    checkMcpServerHealth(serverConfig as import('../shared/types').McpServerEntry, ctx.userId),
 
-    if (isUrlMcpServer(config) && config.url) {
-      try {
-        // Probe with a real MCP `initialize` handshake, not a bare GET. Streamable-
-        // HTTP MCP servers (Linear/Sentry/Figma/…) reject a bare GET or `Accept: */*`
-        // with 405 Method Not Allowed / 406 Not Acceptable — so once a valid token
-        // gets past the 401, the probe would surface a misleading "Method Not
-        // Allowed". A POST initialize with the streamable-HTTP Accept header is what
-        // an actual MCP client sends: 200 when authenticated + usable, 401 when not.
-        // Carry the user's own headers (a manual `Authorization: Bearer …`, or
-        // Datadog-style DD-API-KEY headers) so the probe reflects real auth. A
-        // resolved OAuth token (global, else the acting user's) overrides — matching
-        // runtime injection precedence. Without this, a manually-authed server
-        // always 401s here, reads as `unauthorized`, and wrongly kicks OAuth.
-        let authOverride: string | undefined
-        try {
-          const { resolveMcpTokenForUrl } = await import('../main/utils/mcp')
-          const { normalizeTokenScheme } = await import('./mcpOAuth/flow')
-          const token = await resolveMcpTokenForUrl(config.url, ctx.userId)
-          if (token) authOverride = `${normalizeTokenScheme(token.tokenType)} ${token.accessToken}`
-        } catch {
-          // No token resolvable — fall through to the config's own headers.
-        }
-        const headers = buildHealthProbeHeaders(config.headers, authOverride)
-        const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), 4000)
-        const res = await fetch(config.url, {
-          method: 'POST',
-          signal: controller.signal,
-          headers,
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            id: 1,
-            method: 'initialize',
-            params: {
-              protocolVersion: '2025-06-18',
-              capabilities: {},
-              clientInfo: { name: 'conduit-healthcheck', version: '1' },
-            },
-          }),
-        })
-        clearTimeout(timeout)
-        return classifyUrlHealth(res.status, res.statusText)
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'Connection failed'
-        return { status: 'unhealthy', message: msg }
-      }
-    }
+  'runners:checkCli': () => checkRunnerClis(),
 
-    const command = config.command ?? ''
-    if (!command) return { status: 'unhealthy', message: 'No command configured' }
-
-    try {
-      const { execFileSync } = await import('child_process')
-      // execFile (not exec) avoids shell interpretation of `command`.
-      execFileSync('which', [command], { stdio: 'ignore' })
-      return { status: 'healthy', message: `${command} found in PATH` }
-    } catch {
-      return { status: 'unhealthy', message: `${command} not found in PATH` }
-    }
-  },
-
-  'runners:checkCli': async () => {
-    const { execFile } = await import('child_process')
-    const { promisify } = await import('util')
-    const run = promisify(execFile)
-    // Binary each runner shells out to (see server/runner.ts spawn). Cursor's
-    // headless agent binary is `cursor-agent`.
-    const RUNNER_BINARIES: Record<import('../shared/types').RunnerType, string> = {
-      claude: 'claude',
-      amp: 'amp',
-      cursor: 'cursor-agent',
-    }
-    const runners = Object.keys(RUNNER_BINARIES) as import('../shared/types').RunnerType[]
-    return Promise.all(
-      runners.map(async (runner) => {
-        const binary = RUNNER_BINARIES[runner]
-        try {
-          const { stdout } = await run('which', [binary])
-          return { runner, binary, installed: true, path: stdout.trim() }
-        } catch {
-          return { runner, binary, installed: false }
-        }
-      })
-    )
-  },
-
-  'globalMcps:listTools': async ([serverConfig], _ws, ctx) => {
-    let config = serverConfig as import('../shared/types').McpServerEntry
-    // Inject a stored OAuth token (global, else the acting user's) so tools load
-    // for authenticated servers instead of 401ing on the initialize call.
-    if (isUrlMcpServer(config) && config.url) {
-      try {
-        const { resolveMcpTokenForUrl } = await import('../main/utils/mcp')
-        const { normalizeTokenScheme } = await import('./mcpOAuth/flow')
-        const token = await resolveMcpTokenForUrl(config.url, ctx.userId)
-        if (token) {
-          config = {
-            ...config,
-            headers: {
-              ...config.headers,
-              Authorization: `${normalizeTokenScheme(token.tokenType)} ${token.accessToken}`,
-            },
-          }
-        }
-      } catch {
-        // No token — list unauthenticated (will surface the server's own error).
-      }
-    }
-    return listMcpTools(config)
-  },
+  'globalMcps:listTools': ([serverConfig], _ws, ctx) =>
+    listMcpServerTools(serverConfig as import('../shared/types').McpServerEntry, ctx.userId),
 
   // Repositories
   'repos:list': (_args, _ws, ctx) => Promise.resolve(listRepositories(ctx.userId, ctx.userGroupIds)),
@@ -657,6 +602,15 @@ const handlers: Record<string, HandlerFn> = {
   'runnerSettings:getTimeouts': (_args, _ws, ctx) => getRunnerTimeouts(ctx.userId),
   'runnerSettings:setTimeout': ([runner, seconds], _ws, ctx) =>
     setRunnerTimeout(ctx.userId, runner as RunnerType, Number(seconds) || 0).then(() => undefined),
+
+  // Personal access tokens for the /api/mcp endpoint, always scoped to the acting user.
+  'mcpTokens:list': (_args, _ws, ctx) => listMcpAccessTokens(ctx.userId),
+  'mcpTokens:create': ([input], _ws, ctx) => createMcpAccessToken(ctx.userId, input as McpAccessTokenInput),
+  'mcpTokens:revoke': async ([id], _ws, ctx) => {
+    if (!(await revokeMcpAccessToken(ctx.userId, id as string))) {
+      throw new ClientError('Token not found')
+    }
+  },
 
   // Data-directory maintenance — run the sweeper on demand from Settings. Safe
   // for any authenticated user: it only removes artifacts of runs that are not
