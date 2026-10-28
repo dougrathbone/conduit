@@ -55,8 +55,9 @@ export interface RunSpec {
   env: Record<string, string>
   /**
    * Serialized McpServersConfig with global servers merged, OAuth tokens
-   * injected, and env vars expanded. Undefined for cursor (cursor-agent has no
-   * --mcp-config flag); required for claude/amp.
+   * injected, and env vars expanded. claude/amp read it via --mcp-config;
+   * cursor gets it merged into the workspace's .cursor/mcp.json. Optional only
+   * so a newer worker accepts a cursor RunSpec from an older server.
    */
   mcpConfigContent?: string
   /** claude only: --strict-mcp-config (ignore repo/host MCP configs). */

@@ -4,6 +4,7 @@ import type { RunSpec, WorkerEventSink, WorkerFactory, WorkerHandle } from '../.
 import { createWorkspace, deleteWorkspace } from '../../main/execution/workspace'
 import { writeMcpConfigContent, deleteMcpConfig } from '../../main/utils/mcpConfigFile'
 import { writeClaudeConfig, deleteClaudeConfig } from '../../main/utils/claudeConfig'
+import { installCursorMcpConfig } from './cursorMcpConfig'
 import { createConfiguredWorktree, removeWorktree, runGit, buildAuthUrl, configureWorktreeGit, DEFAULT_GIT_TIMEOUT_MS } from '../gitOps'
 import { buildClaudeArgs, parseClaudeEvents } from '../../main/execution/adapters/claude'
 import { buildAmpArgs, parseAmpEvents } from '../../main/execution/adapters/amp'
@@ -99,14 +100,28 @@ export class LocalWorkerFactory implements WorkerFactory {
     worktreeClonePath: string | undefined,
     ephemeral: boolean
   ): Promise<WorkerHandle> {
-    // 2. Write the MCP config the CLI will read by path. Cursor has no
-    // --mcp-config flag, so nothing is written for it.
+    // 2. Write the MCP config. Claude/Amp read it by path (--mcp-config);
+    // cursor-agent has no such flag, so it is merged into the workspace's
+    // .cursor/mcp.json instead and restored when the process exits.
     let mcpConfigPath: string | undefined
-    if (spec.runner !== 'cursor') {
+    let restoreCursorMcp: (() => Promise<void>) | undefined
+    if (spec.runner === 'cursor') {
+      // Absent only in a RunSpec from a pre-injection server.
+      if (spec.mcpConfigContent) {
+        restoreCursorMcp = await installCursorMcpConfig(workspacePath, spec.mcpConfigContent)
+      }
+    } else {
       if (!spec.mcpConfigContent) {
         throw new Error(`RunSpec for run ${spec.runId} is missing mcpConfigContent`)
       }
       mcpConfigPath = writeMcpConfigContent(spec.runId, spec.mcpConfigContent)
+    }
+    const restoreWorkspaceMcp = async (): Promise<void> => {
+      try {
+        await restoreCursorMcp?.()
+      } catch (err) {
+        console.error(`[workers/local] Failed to restore .cursor/mcp.json for run ${spec.runId}:`, err)
+      }
     }
 
     // 3. Environment: the worker's own env overlaid with the orchestrator-
@@ -133,11 +148,17 @@ export class LocalWorkerFactory implements WorkerFactory {
 
     const binary = spec.runner === 'amp' ? 'amp' : spec.runner === 'cursor' ? 'cursor-agent' : 'claude'
 
-    const child = spawn(binary, cliArgs, {
-      cwd: workspacePath,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
+    let child: ChildProcess
+    try {
+      child = spawn(binary, cliArgs, {
+        cwd: workspacePath,
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+    } catch (err) {
+      await restoreWorkspaceMcp()
+      throw err
+    }
 
     // Write prompt to stdin — avoids --mcp-config <configs...> greedily
     // consuming the prompt as an additional config path argument.
@@ -166,6 +187,7 @@ export class LocalWorkerFactory implements WorkerFactory {
     // reporting/finalization via onError; 'close' may still fire afterwards.
     child.on('error', (err) => {
       this.active.delete(spec.runId)
+      void restoreWorkspaceMcp()
       sink.onError?.(err)
     })
 
@@ -186,8 +208,9 @@ export class LocalWorkerFactory implements WorkerFactory {
       })
     }
 
-    child.on('close', (code, signal) => {
+    child.on('close', async (code, signal) => {
       this.active.delete(spec.runId)
+      await restoreWorkspaceMcp()
       const diagnostic = cliKillDiagnostic(code, signal)
       if (diagnostic) sink.onEvent({ kind: 'raw', stream: 'system', text: diagnostic })
       sink.onExit(code === 0 ? 'completed' : 'failed', code)

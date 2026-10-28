@@ -535,14 +535,9 @@ export async function startRunServer(
   //    can't be decrypted). Since the run record already exists, an unhandled
   //    throw here would leave it orphaned as "running" forever with no log — so
   //    on failure we mark it failed, record why in its log, and surface it.
-  //    Skipped for cursor: cursor-agent has no --mcp-config flag (it loads MCPs
-  //    from the workspace's .cursor/mcp.json and the user's global Cursor
-  //    config), so Conduit-managed MCP injection doesn't apply to that runner.
-  let mcpConfigContent: string | undefined
+  let mcpConfigContent: string
   try {
-    if (agent.runner !== 'cursor') {
-      mcpConfigContent = await buildMcpConfigContent(agent.mcpConfig, actingUserId)
-    }
+    mcpConfigContent = await buildMcpConfigContent(agent.mcpConfig, actingUserId)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     appendRunLog(runId, `Failed to prepare run: ${msg}`)
@@ -563,16 +558,6 @@ export async function startRunServer(
       `⚠️  Could not obtain GitHub push credentials for this repository: ${pushCredentialError}\n` +
       `   The agent can read the code, but "git push" (and opening PRs) will fail. ` +
       `Check the repository's authentication settings.`
-    )
-  }
-
-  // Cursor loads MCPs from the workspace/user config, not from Conduit's
-  // injected config — say so up front rather than silently ignoring them.
-  if (agent.runner === 'cursor' && Object.keys(agent.mcpConfig?.mcpServers ?? {}).length > 0) {
-    orch.emitSystemMessage(
-      `[Conduit: cursor-agent has no --mcp-config flag, so this agent's configured MCP ` +
-        `servers are not injected. Cursor loads MCPs from the workspace .cursor/mcp.json ` +
-        `and the user's global Cursor config.]`
     )
   }
 
