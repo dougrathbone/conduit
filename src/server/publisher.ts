@@ -2,7 +2,7 @@ import * as crypto from 'crypto'
 import type { ExecutionRun, SlackPublishConfig, EmailPublishConfig, WebhookPublishConfig, PublishTargetType, PublishConfig, PublishTargetHealthResult } from '../shared/types'
 import { getPublishTarget } from '../main/db/queries/publishTargets'
 import { getAgent } from '../main/db/queries/agents'
-import { readRunOutputText } from './utils'
+import { readRunOutputMessages } from './utils'
 
 /**
  * Publish target is a dumb delivery channel — the agent controls the content.
@@ -19,7 +19,9 @@ import { readRunOutputText } from './utils'
  * never used as a fallback — a malformed block skips publishing rather than
  * dumping the full run.
  *
- * Agents that never emit a publish marker still deliver their full stdout.
+ * Agents that never emit a publish marker deliver only their last message,
+ * labelled as such — never the whole transcript. Failed runs post a short
+ * failure notice instead of their output.
  */
 
 const PUBLISH_MARKER_RE =
@@ -72,7 +74,74 @@ export function resolveRunPublishMessage(stdout: string): string | null {
   return null
 }
 
+/**
+ * Content to publish for a completed run, from its output messages (in order).
+ * A publish block wins; without one, only the final message is posted, with a
+ * note that the agent didn't write a summary. Exported for unit tests.
+ */
+export function selectPublishContent(messages: string[], agentName: string): string | null {
+  const nonEmpty = messages.map((m) => m.trim()).filter(Boolean)
+  if (nonEmpty.length === 0) return null
+
+  const full = nonEmpty.join('\n')
+  if (findPublishMarkers(full).some((m) => m.kind === 'open')) {
+    return resolveRunPublishMessage(full)
+  }
+
+  return `_${agentName} finished without a publish summary. Its last message:_\n\n${nonEmpty[nonEmpty.length - 1]}`
+}
+
+/** Exported for unit tests. */
+export function buildFailureNotice(
+  agentName: string,
+  run: Pick<ExecutionRun, 'id' | 'agentId' | 'lastLine'>,
+  baseUrl: string
+): string {
+  const reason = run.lastLine?.trim() || 'No failure reason was recorded.'
+  const url = `${baseUrl.replace(/\/+$/, '')}/agents/${run.agentId}/runs/${run.id}`
+  return `:warning: *${agentName}* run failed.\n\n${reason}\n\n<${url}|View run>`
+}
+
 // ── Slack ────────────────────────────────────────────────────────────────────
+
+/** Slack rejects a section block whose text exceeds this many characters. */
+export const SLACK_SECTION_MAX_CHARS = 3000
+/** Slack rejects a message with more blocks than this. */
+const SLACK_MAX_BLOCKS = 50
+
+/**
+ * Split text into Slack section-sized chunks: pack paragraphs, fall back to
+ * line boundaries for an oversized paragraph, and hard-split a single line
+ * that is itself too long. Exported for unit tests.
+ */
+export function splitSlackSections(text: string, max = SLACK_SECTION_MAX_CHARS): string[] {
+  const chunks: string[] = []
+  let current = ''
+  const push = (piece: string, sep: string) => {
+    if (current && current.length + sep.length + piece.length <= max) {
+      current += sep + piece
+      return
+    }
+    if (current) chunks.push(current)
+    current = piece
+  }
+
+  for (const paragraph of text.split(/\n\n+/)) {
+    if (paragraph.length <= max) {
+      push(paragraph, '\n\n')
+      continue
+    }
+    for (const line of paragraph.split('\n')) {
+      if (line.length <= max) {
+        push(line, '\n')
+        continue
+      }
+      for (let i = 0; i < line.length; i += max) push(line.slice(i, i + max), '')
+    }
+  }
+  if (current) chunks.push(current)
+  return chunks
+}
 
 function markdownToSlackMrkdwn(text: string): string {
   let result = text
@@ -89,26 +158,11 @@ interface SlackBlock {
 async function postToSlack(config: SlackPublishConfig, message: string): Promise<void> {
   const slackMessage = markdownToSlackMrkdwn(message)
 
-  const blocks: SlackBlock[] = []
-  const chunks: string[] = []
-  if (slackMessage.length <= 3000) {
-    chunks.push(slackMessage)
-  } else {
-    const paragraphs = slackMessage.split(/\n\n+/)
-    let current = ''
-    for (const p of paragraphs) {
-      if (current.length + p.length + 2 > 3000) {
-        if (current) chunks.push(current.trim())
-        current = p
-      } else {
-        current += (current ? '\n\n' : '') + p
-      }
-    }
-    if (current) chunks.push(current.trim())
-  }
-
-  for (const chunk of chunks) {
-    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: chunk } })
+  const sections = splitSlackSections(slackMessage)
+  const kept = sections.length > SLACK_MAX_BLOCKS ? sections.slice(0, SLACK_MAX_BLOCKS - 1) : sections
+  const blocks: SlackBlock[] = kept.map((chunk) => ({ type: 'section', text: { type: 'mrkdwn', text: chunk } }))
+  if (kept.length < sections.length) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '_…(truncated)_' } })
   }
 
   const body: Record<string, unknown> = {
@@ -327,31 +381,40 @@ export async function checkPublishTargetHealth(
 
 // ── Publish run result ───────────────────────────────────────────────────────
 
+export type PublishOutcome =
+  | { targetName: string; ok: true }
+  | { targetName: string; ok: false; error: string }
+
+/** Per-target delivery outcomes, so the caller can record them on the run. */
 export async function publishRunResult(
   agentId: string,
   run: ExecutionRun
-): Promise<void> {
-  if (run.status !== 'completed') return
+): Promise<PublishOutcome[]> {
+  if (run.status !== 'completed' && run.status !== 'failed') return []
 
   const agent = await getAgent(agentId)
-  if (!agent?.publishTargetIds?.length) return
+  if (!agent?.publishTargetIds?.length) return []
 
-  let fullStdout: string
-  try {
-    fullStdout = readRunOutputText(run.id)
-  } catch {
-    return
+  let publishContent: string | null
+  if (run.status === 'failed') {
+    const baseUrl = process.env.CONDUIT_BASE_URL ?? `http://localhost:${process.env.PORT ?? 7456}`
+    publishContent = buildFailureNotice(agent.name, run, baseUrl)
+  } else {
+    let messages: string[]
+    try {
+      messages = readRunOutputMessages(run.id)
+    } catch {
+      return []
+    }
+    publishContent = selectPublishContent(messages, agent.name)
   }
-
-  if (!fullStdout) return
-
-  const publishContent = resolveRunPublishMessage(fullStdout)
-  if (!publishContent) return
+  if (!publishContent) return []
 
   const message = publishContent.length > 39000
     ? publishContent.slice(0, 39000) + '\n…(truncated)'
     : publishContent
 
+  const outcomes: PublishOutcome[] = []
   for (const targetId of agent.publishTargetIds) {
     const target = await getPublishTarget(targetId)
     if (!target || !target.enabled) continue
@@ -373,8 +436,11 @@ export async function publishRunResult(
           await postToWebhook(target.config as WebhookPublishConfig, message, agent.name, run.id)
           break
       }
+      outcomes.push({ targetName: target.name, ok: true })
     } catch (err) {
       console.error(`[publisher] Failed to publish to target ${target.name}:`, err)
+      outcomes.push({ targetName: target.name, ok: false, error: err instanceof Error ? err.message : String(err) })
     }
   }
+  return outcomes
 }

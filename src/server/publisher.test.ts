@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { resolveRunPublishMessage } from './publisher'
+import {
+  resolveRunPublishMessage,
+  selectPublishContent,
+  splitSlackSections,
+  buildFailureNotice,
+  SLACK_SECTION_MAX_CHARS,
+} from './publisher'
 
 const SUMMARY = [
   '## Run Summary — AIA-607: Hoist route prefetch above subdomain gate',
@@ -98,5 +104,65 @@ describe('resolveRunPublishMessage', () => {
     expect(resolveRunPublishMessage('<!--CONDUIT:PUBLISH-->\n<!--/CONDUIT:PUBLISH-->')).toBeNull()
     expect(resolveRunPublishMessage('<!--CONDUIT:PUBLISH-->\n<!--CONDUIT:PUBLISH-->')).toBeNull()
     expect(resolveRunPublishMessage('')).toBeNull()
+  })
+})
+
+describe('selectPublishContent', () => {
+  it('uses the publish block when one was emitted', () => {
+    const messages = ['Starting.', `Done.\n\n<!--CONDUIT:PUBLISH-->\n${SUMMARY}`]
+    expect(selectPublishContent(messages, 'FE bot')).toBe(SUMMARY)
+  })
+
+  it('posts only the labelled last message, not the transcript, when no block was emitted', () => {
+    const messages = ['Starting the FE-perf loop.', 'Let me babysit CI.', 'Stopped the noisy monitor.']
+    const content = selectPublishContent(messages, 'FE bot')!
+    expect(content).toContain('FE bot finished without a publish summary')
+    expect(content).toContain('Stopped the noisy monitor.')
+    expect(content).not.toContain('Starting the FE-perf loop.')
+  })
+
+  it('returns null when there is nothing to post', () => {
+    expect(selectPublishContent([], 'FE bot')).toBeNull()
+    expect(selectPublishContent(['  '], 'FE bot')).toBeNull()
+  })
+})
+
+describe('splitSlackSections', () => {
+  it('keeps short text as one section', () => {
+    expect(splitSlackSections('hello\n\nworld')).toEqual(['hello\n\nworld'])
+  })
+
+  it('splits a single oversized paragraph on line boundaries', () => {
+    const bullet = '- ' + 'x'.repeat(398)
+    const paragraph = Array.from({ length: 20 }, () => bullet).join('\n')
+    const sections = splitSlackSections(paragraph)
+    expect(sections.length).toBeGreaterThan(1)
+    for (const s of sections) expect(s.length).toBeLessThanOrEqual(SLACK_SECTION_MAX_CHARS)
+    expect(sections.join('\n')).toBe(paragraph)
+  })
+
+  it('hard-splits a single line longer than the section limit', () => {
+    const line = 'y'.repeat(SLACK_SECTION_MAX_CHARS * 2 + 10)
+    const sections = splitSlackSections(line)
+    for (const s of sections) expect(s.length).toBeLessThanOrEqual(SLACK_SECTION_MAX_CHARS)
+    expect(sections.join('')).toBe(line)
+  })
+})
+
+describe('buildFailureNotice', () => {
+  it('names the agent, includes the reason, and links to the run', () => {
+    const notice = buildFailureNotice(
+      'FE bot',
+      { id: 'run-1', agentId: 'agent-1', lastLine: '✗ Run process was killed (SIGKILL)' },
+      'https://conduit.example'
+    )
+    expect(notice).toContain('*FE bot*')
+    expect(notice).toContain('killed (SIGKILL)')
+    expect(notice).toContain('<https://conduit.example/agents/agent-1/runs/run-1|View run>')
+  })
+
+  it('falls back to a generic reason when the run has no last line', () => {
+    const notice = buildFailureNotice('FE bot', { id: 'r', agentId: 'a' }, 'http://localhost:7456')
+    expect(notice).toContain('No failure reason was recorded')
   })
 })

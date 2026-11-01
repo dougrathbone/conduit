@@ -355,7 +355,17 @@ export function createRunOrchestration(opts: {
           endedAt,
           durationMs,
         })
-        await publishRunResult(agentId, finalRun)
+        const outcomes = (await publishRunResult(agentId, finalRun)) ?? []
+        for (const outcome of outcomes) {
+          if (outcome.ok) {
+            appendRunLog(runId, `Published to ${outcome.targetName}`)
+            continue
+          }
+          appendRunLog(runId, `⚠️  Publish to ${outcome.targetName} failed: ${outcome.error}`)
+          reporter.captureException(new Error(`Publish to ${outcome.targetName} failed: ${outcome.error}`), {
+            tags: { component: 'runner', op: 'publishRunResult', runId, runner },
+          })
+        }
       }
     } catch (err) {
       console.error(`[server/runner] Publish failed for run ${runId}:`, err)

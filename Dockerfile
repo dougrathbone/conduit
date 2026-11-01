@@ -59,10 +59,28 @@ WORKDIR /app
 # No PID-1 wrapper (tini/dumb-init): the mode-aware entrypoint exec's node so
 # it remains PID 1 and receives SIGTERM/SIGINT. The server and worker install
 # their own handlers for graceful shutdown.
+#
+# The rest is the agents' shell toolbox — without them agent scripts fail
+# with "command not found" and burn turns on workarounds: jq for JSON, xz for
+# .tar.xz release archives, and python3 + make + g++ so node-gyp can build
+# native modules (e.g. sharp) during a repo's `yarn install`.
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends git git-lfs ca-certificates curl && \
+    apt-get install -y --no-install-recommends git git-lfs ca-certificates curl \
+      jq xz-utils python3 make g++ && \
     git lfs install --system && \
     rm -rf /var/lib/apt/lists/*
+
+# pnpm via corepack. The shims must be created at build time: the runtime
+# user (`node`) can't write /usr/local/bin, so `corepack enable` from inside a
+# run fails with EACCES. The binary is pre-cached in COREPACK_HOME so runs
+# don't each download it; the cache is owned by `node` so a repo pinning a
+# different pnpm version can still fetch it. Download prompts are disabled so
+# a headless run never blocks waiting for confirmation.
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 COREPACK_HOME=/opt/corepack
+RUN corepack enable pnpm && \
+    corepack install --global pnpm@latest && \
+    chown -R node:node "$COREPACK_HOME" && \
+    pnpm --version
 
 # GitHub CLI (`gh`), installed from GitHub's official apt repo (needs the `curl`
 # installed above to fetch the signing key). Agents use it for API/PR operations
