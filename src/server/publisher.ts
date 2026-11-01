@@ -99,7 +99,10 @@ export function buildFailureNotice(
 ): string {
   const reason = run.lastLine?.trim() || 'No failure reason was recorded.'
   const url = `${baseUrl.replace(/\/+$/, '')}/agents/${run.agentId}/runs/${run.id}`
-  return `:warning: *${agentName}* run failed.\n\n${reason}\n\n<${url}|View run>`
+  // Canonical markdown (not Slack-native `<url|text>` syntax) — postToSlack /
+  // sendEmail each convert this the same way they convert agent-authored
+  // publish blocks, so this notice renders correctly on every target type.
+  return `:warning: **${agentName}** run failed.\n\n${reason}\n\n[View run](${url})`
 }
 
 // ── Slack ────────────────────────────────────────────────────────────────────
@@ -143,8 +146,22 @@ export function splitSlackSections(text: string, max = SLACK_SECTION_MAX_CHARS):
   return chunks
 }
 
-function markdownToSlackMrkdwn(text: string): string {
-  let result = text
+/**
+ * Slack's mrkdwn parser treats a bare `&`, `<`, or `>` as the start of its
+ * own syntax (links, `<@user>` / `<#channel>` mentions) — an unescaped
+ * literal like a backtick-quoted `<set>` or `a & b` in agent-authored text
+ * isn't a valid reference, so Slack's renderer garbles it into the visible
+ * literal text "&lt;set&gt;" instead of showing a plain `<set>`. Escaping
+ * first (so our own generated `<url|text>` / `*bold*` syntax isn't
+ * re-escaped) tells Slack these are literal characters, not its metachars.
+ */
+function escapeSlackEntities(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** Exported for unit tests. */
+export function markdownToSlackMrkdwn(text: string): string {
+  let result = escapeSlackEntities(text)
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>')
   result = result.replace(/\*\*([^*]+)\*\*/g, '*$1*')
   return result
@@ -166,7 +183,7 @@ async function postToSlack(config: SlackPublishConfig, message: string): Promise
   }
 
   const body: Record<string, unknown> = {
-    text: message,
+    text: slackMessage,
     blocks,
     unfurl_links: false,
     unfurl_media: false,

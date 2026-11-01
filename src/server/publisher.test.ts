@@ -4,6 +4,7 @@ import {
   selectPublishContent,
   splitSlackSections,
   buildFailureNotice,
+  markdownToSlackMrkdwn,
   SLACK_SECTION_MAX_CHARS,
 } from './publisher'
 
@@ -149,6 +150,30 @@ describe('splitSlackSections', () => {
   })
 })
 
+describe('markdownToSlackMrkdwn', () => {
+  it('escapes literal angle brackets so Slack renders them instead of garbling them', () => {
+    // Regression: Sentinel's daily sweep described a sanitizer fix using
+    // backtick-quoted `<set>` / `<animate>` tags. Sent unescaped, Slack's
+    // API treats `<set>` as an attempted (invalid) special reference and
+    // the client displays it back as the literal text "&lt;set&gt;".
+    const input = 'Logos can include `<set>`, `<animate>` or `@import` payloads.'
+    const result = markdownToSlackMrkdwn(input)
+    expect(result).toBe('Logos can include `&lt;set&gt;`, `&lt;animate&gt;` or `@import` payloads.')
+    expect(result).not.toContain('<set>')
+  })
+
+  it('escapes a bare ampersand', () => {
+    expect(markdownToSlackMrkdwn('Rules & regulations')).toBe('Rules &amp; regulations')
+  })
+
+  it('converts markdown links and bold without double-escaping the generated syntax', () => {
+    const input = 'See [PR #1](https://example.com/pr/1?a=1&b=2) for **details**.'
+    expect(markdownToSlackMrkdwn(input)).toBe(
+      'See <https://example.com/pr/1?a=1&amp;b=2|PR #1> for *details*.'
+    )
+  })
+})
+
 describe('buildFailureNotice', () => {
   it('names the agent, includes the reason, and links to the run', () => {
     const notice = buildFailureNotice(
@@ -156,9 +181,13 @@ describe('buildFailureNotice', () => {
       { id: 'run-1', agentId: 'agent-1', lastLine: '✗ Run process was killed (SIGKILL)' },
       'https://conduit.example'
     )
-    expect(notice).toContain('*FE bot*')
+    // Canonical markdown — converted per-target (Slack/email), not Slack-native syntax.
+    expect(notice).toContain('**FE bot**')
     expect(notice).toContain('killed (SIGKILL)')
-    expect(notice).toContain('<https://conduit.example/agents/agent-1/runs/run-1|View run>')
+    expect(notice).toContain('[View run](https://conduit.example/agents/agent-1/runs/run-1)')
+    expect(markdownToSlackMrkdwn(notice)).toContain(
+      '<https://conduit.example/agents/agent-1/runs/run-1|View run>'
+    )
   })
 
   it('falls back to a generic reason when the run has no last line', () => {
