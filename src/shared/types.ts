@@ -251,6 +251,12 @@ export interface AgentConfig {
    */
   memoryCapMb?: number
   /**
+   * Fargate task memory in MiB for this agent's runs. Valid range at the
+   * factory's 2 vCPU is 4096–16384 in steps of 1024. Unset uses 8192.
+   * Ignored by the local and EKS factories.
+   */
+  workerMemoryMib?: number
+  /**
    * When true, MCP servers configured in the repository (its `.mcp.json`) and the
    * host's personal connectors load alongside Conduit's managed MCPs. When false
    * (default), only Conduit's global + agent MCPs are used (`--strict-mcp-config`).

@@ -632,6 +632,7 @@ export async function startRunServer(
     env: await buildRunnerEnvOverlay(agent, startedBy, pushToken),
     mcpConfigContent,
     strictMcpConfig: agent.runner === 'claude' ? !agent.enableRepoMcps : undefined,
+    workerMemoryMib: agent.workerMemoryMib,
     workspace: workspaceSpec,
   }
 

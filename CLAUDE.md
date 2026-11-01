@@ -197,7 +197,9 @@ are required. Optional: `CONDUIT_FARGATE_CONTAINER_NAME` (default `worker`),
 `ENABLED`), `CONDUIT_FARGATE_PLATFORM_VERSION`. AWS credentials/region: standard
 SDK chain. Bake `CONDUIT_WORKER_TOKEN` into the task definition via Secrets
 Manager (`secrets`), not `CONDUIT_FARGATE_WORKER_TOKEN` — the latter is a plain
-env override visible in DescribeTask output and is for dev only. The Fargate
+env override visible in DescribeTask output and is for dev only. Every task is
+2 vCPU; memory defaults to 8192 MiB and an agent's `workerMemoryMib` overrides
+it (4096–16384, steps of 1024 — 16384 is the top of the 2 vCPU range). The Fargate
 task stays running while the worker retries delivery; once the terminal ACK
 arrives the one-shot worker exits and the task reaches `STOPPED`. A replacement
 server does not need the old factory's in-memory task ARN for that normal path.

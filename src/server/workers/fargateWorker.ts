@@ -62,9 +62,35 @@ import { resolveAssignTimeoutMs, resolveConnectTimeoutMs } from '../workerContro
 import { resolveWorkerServerUrl } from './cloudConfig'
 import { reporter } from '../observability'
 
-/** Compatible Fargate allocation: 2 vCPU / 8 GiB. Enforced on every RunTask. */
+/** Default Fargate allocation: 2 vCPU / 8 GiB. A run can raise memory up to 16 GiB. */
 export const FARGATE_WORKER_CPU = '2048'
 export const FARGATE_WORKER_MEMORY_MIB = '8192'
+
+/** Memory range Fargate allows at 2 vCPU, in MiB. */
+const FARGATE_MEMORY_MIN_MIB = 4096
+const FARGATE_MEMORY_MAX_MIB = 16384
+const FARGATE_MEMORY_STEP_MIB = 1024
+
+/**
+ * Task cpu/memory for a run. An unset override keeps the 8 GiB default. A set
+ * override must be a size Fargate accepts at 2 vCPU, so RunTask fails here
+ * with a clear reason instead of an ECS rejection.
+ */
+export function resolveFargateTaskSize(memoryMib?: number): { cpu: string; memory: string } {
+  if (memoryMib == null) return { cpu: FARGATE_WORKER_CPU, memory: FARGATE_WORKER_MEMORY_MIB }
+  if (
+    !Number.isInteger(memoryMib) ||
+    memoryMib < FARGATE_MEMORY_MIN_MIB ||
+    memoryMib > FARGATE_MEMORY_MAX_MIB ||
+    memoryMib % FARGATE_MEMORY_STEP_MIB !== 0
+  ) {
+    throw new Error(
+      `Fargate worker memory must be ${FARGATE_MEMORY_MIN_MIB}–${FARGATE_MEMORY_MAX_MIB} MiB ` +
+        `in steps of ${FARGATE_MEMORY_STEP_MIB} at 2 vCPU (got ${memoryMib}).`
+    )
+  }
+  return { cpu: FARGATE_WORKER_CPU, memory: String(memoryMib) }
+}
 
 /** Fargate default container stopTimeout: SIGTERM, then SIGKILL after 30s. */
 export const FARGATE_DEFAULT_STOP_TIMEOUT_MS = 30_000
@@ -193,8 +219,9 @@ export function resolveFargateConfig(env: NodeJS.ProcessEnv = process.env): Farg
   }
 }
 
-/** Pure RunTask payload: startedBy, tags, 2 vCPU / 8 GiB, no secrets by default. */
+/** Pure RunTask payload: startedBy, tags, 2 vCPU and the run's memory, no secrets by default. */
 export function buildFargateRunTaskInput(config: FargateWorkerConfig, spec: RunSpec): RunTaskCommandInput {
+  const size = resolveFargateTaskSize(spec.workerMemoryMib)
   const workerId = `fargate-${spec.runId}`
   const environment = [
     { name: 'CONDUIT_SERVER_URL', value: config.serverUrl },
@@ -215,8 +242,8 @@ export function buildFargateRunTaskInput(config: FargateWorkerConfig, spec: RunS
       },
     },
     overrides: {
-      cpu: FARGATE_WORKER_CPU,
-      memory: FARGATE_WORKER_MEMORY_MIB,
+      cpu: size.cpu,
+      memory: size.memory,
       containerOverrides: [{ name: config.containerName, environment }],
     },
     tags: [

@@ -165,6 +165,14 @@ export function registerAgentTools(server: McpServer, env: ToolEnv): void {
       enableRepoMcps: z.boolean().optional().describe("Also load MCP servers from the repository's .mcp.json."),
       bgTaskTimeoutSeconds: z.number().int().min(0).optional(),
       memoryCapMb: z.number().int().min(0).optional(),
+      workerMemoryMib: z
+        .number()
+        .int()
+        .min(4096)
+        .max(16384)
+        .refine((n) => n % 1024 === 0, 'must be a multiple of 1024')
+        .optional()
+        .describe('Fargate task memory in MiB (4096–16384, steps of 1024, at 2 vCPU). Unset uses 8192.'),
     },
     run: async (args, { caller, deps }) => {
       await assertReferences(caller, args)
@@ -187,6 +195,7 @@ export function registerAgentTools(server: McpServer, env: ToolEnv): void {
           enableRepoMcps: args.enableRepoMcps,
           bgTaskTimeoutSeconds: args.bgTaskTimeoutSeconds,
           memoryCapMb: args.memoryCapMb,
+          workerMemoryMib: args.workerMemoryMib,
         },
         caller.userId
       )
@@ -215,6 +224,15 @@ export function registerAgentTools(server: McpServer, env: ToolEnv): void {
       enableRepoMcps: z.boolean().optional(),
       bgTaskTimeoutSeconds: z.number().int().min(0).nullable().optional(),
       memoryCapMb: z.number().int().min(0).nullable().optional(),
+      workerMemoryMib: z
+        .number()
+        .int()
+        .min(4096)
+        .max(16384)
+        .refine((n) => n % 1024 === 0, 'must be a multiple of 1024')
+        .nullable()
+        .optional()
+        .describe('Fargate task memory in MiB. Null clears it back to the 8192 default.'),
     },
     run: async ({ agentId, envVars, ...fields }, { caller, deps }) => {
       const agent = await requireAgent(caller, agentId)
@@ -224,7 +242,7 @@ export function registerAgentTools(server: McpServer, env: ToolEnv): void {
       if (fields.runner !== undefined) patch.runner = fields.runner
       if (fields.publishTargetIds !== undefined) patch.publishTargetIds = fields.publishTargetIds
       if (fields.enableRepoMcps !== undefined) patch.enableRepoMcps = fields.enableRepoMcps
-      for (const key of ['description', 'model', 'effort', 'repositoryId', 'bgTaskTimeoutSeconds', 'memoryCapMb'] as const) {
+      for (const key of ['description', 'model', 'effort', 'repositoryId', 'bgTaskTimeoutSeconds', 'memoryCapMb', 'workerMemoryMib'] as const) {
         if (fields[key] !== undefined) (patch as Record<string, unknown>)[key] = fields[key] ?? undefined
       }
       if (envVars) patch.envVars = applyRecordPatch(agent.envVars ?? {}, envVars, 'Env var')

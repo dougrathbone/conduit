@@ -62,6 +62,11 @@ export interface RunSpec {
   mcpConfigContent?: string
   /** claude only: --strict-mcp-config (ignore repo/host MCP configs). */
   strictMcpConfig?: boolean
+  /**
+   * Fargate task memory in MiB. Unset uses the factory default (8192 at 2 vCPU).
+   * The Fargate factory rejects values outside 4096–16384 (steps of 1024).
+   */
+  workerMemoryMib?: number
   workspace: WorkspaceSpec
 }
 

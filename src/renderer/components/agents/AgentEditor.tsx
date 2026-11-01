@@ -220,6 +220,7 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
         model: agent.model,
         bgTaskTimeoutSeconds: agent.bgTaskTimeoutSeconds,
         memoryCapMb: agent.memoryCapMb,
+        workerMemoryMib: agent.workerMemoryMib,
         enableRepoMcps: agent.enableRepoMcps ?? false,
       })
     }
@@ -286,8 +287,8 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
       clearTimeout(debounceRef.current)
       debounceRef.current = null
     }
-    const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, memoryCapMb, enableRepoMcps } = draft
-    await save({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, memoryCapMb, enableRepoMcps })
+    const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, memoryCapMb, workerMemoryMib, enableRepoMcps } = draft
+    await save({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, memoryCapMb, workerMemoryMib, enableRepoMcps })
   }, [draft, save])
 
   useImperativeHandle(ref, () => ({
@@ -305,8 +306,8 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
     (field: keyof typeof draft, value: unknown) => {
       const updated = { ...draft, [field]: value }
       setDraft(updated)
-      const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, memoryCapMb, enableRepoMcps } = updated
-      scheduleSave({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, memoryCapMb, enableRepoMcps })
+      const { name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, memoryCapMb, workerMemoryMib, enableRepoMcps } = updated
+      scheduleSave({ name, description, runner, prompt, envVars, mcpConfig, gistId, workingDir, publishTargetIds, repositoryId, effort, model, bgTaskTimeoutSeconds, memoryCapMb, workerMemoryMib, enableRepoMcps })
     },
     [draft, scheduleSave]
   )
@@ -566,6 +567,32 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
               Heap ceiling injected as --max-old-space-size for every Node process the run spawns
               (agent CLI, tsc, test workers). Caps each process, not the whole run. 0 is uncapped.
               Leave blank to inherit the server-wide default.
+            </p>
+          </div>
+
+          {/* Fargate task memory — whole-task size, distinct from the Node heap cap */}
+          <div className="space-y-1.5">
+            <label className="block text-xs font-medium text-[var(--text-secondary)]">
+              Fargate task memory (MiB)
+            </label>
+            <Input
+              type="number"
+              min={4096}
+              max={16384}
+              step={1024}
+              value={draft.workerMemoryMib ?? ''}
+              onChange={(e) => {
+                const raw = e.target.value.trim()
+                handleChange(
+                  'workerMemoryMib',
+                  raw === '' ? undefined : Math.max(0, Math.floor(Number(raw) || 0))
+                )
+              }}
+              placeholder="8192 (2 vCPU default)"
+            />
+            <p className="text-[10px] text-[var(--text-secondary)] opacity-70">
+              Memory of the Fargate task this agent runs in, at 2 vCPU. 4096–16384 MiB, in steps of
+              1024. Leave blank for 8192. Ignored when the run executes locally.
             </p>
           </div>
 

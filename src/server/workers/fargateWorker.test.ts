@@ -15,6 +15,7 @@ import {
   STOP_VERIFY_TIMEOUT_MS,
   FargateWorkerFactory,
   buildFargateEcsClientConfig,
+  resolveFargateTaskSize,
   isAllowlistedE2eModule,
   resolveFargateConfig,
   stopWaitVerdict,
@@ -121,6 +122,24 @@ function envNames(input: Record<string, unknown>): string[] {
   }
   return (overrides.containerOverrides[0].environment ?? []).map((e) => e.name)
 }
+
+describe('resolveFargateTaskSize', () => {
+  it('defaults to 2 vCPU / 8192 MiB', () => {
+    expect(resolveFargateTaskSize()).toEqual({ cpu: '2048', memory: '8192' })
+    expect(resolveFargateTaskSize(undefined)).toEqual({ cpu: '2048', memory: '8192' })
+  })
+
+  it('accepts the top of the 2 vCPU range', () => {
+    expect(resolveFargateTaskSize(16384)).toEqual({ cpu: '2048', memory: '16384' })
+    expect(resolveFargateTaskSize(4096)).toEqual({ cpu: '2048', memory: '4096' })
+  })
+
+  it('rejects sizes outside the 2 vCPU range or off the 1024 step', () => {
+    for (const memory of [2048, 9000, 32768, 8192.5]) {
+      expect(() => resolveFargateTaskSize(memory)).toThrow(/4096–16384/)
+    }
+  })
+})
 
 describe('resolveFargateConfig', () => {
   it('requires cluster, task definition, and subnets', () => {
@@ -981,6 +1000,16 @@ describe('FargateWorkerFactory', () => {
     const handle = await factory.startRun(SPEC, sink)
     await expect(handle.cancel()).resolves.toBeUndefined()
     expect(describes).toBeGreaterThanOrEqual(3)
+  })
+
+  it('raises the task memory when the run asks for 16 GiB', async () => {
+    await factory.startRun({ ...SPEC, workerMemoryMib: 16384 }, sink)
+    expect(ecs.of('RunTaskCommand')[0].overrides).toMatchObject({ cpu: '2048', memory: '16384' })
+  })
+
+  it('refuses a task memory Fargate will not run at 2 vCPU', async () => {
+    await expect(factory.startRun({ ...SPEC, workerMemoryMib: 9000 }, sink)).rejects.toThrow(/4096–16384/)
+    expect(ecs.of('RunTaskCommand')).toHaveLength(0)
   })
 
   it('sends an exact RunTask shape with startedBy, tags, and 2 vCPU / 8192 MiB', async () => {
