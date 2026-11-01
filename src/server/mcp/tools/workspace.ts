@@ -2,7 +2,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { listAgents } from '../../../main/db/queries/agents'
 import { listRecentRuns } from '../../../main/db/queries/runs'
-import { getRepository, listRepositories } from '../../../main/db/queries/repositories'
+import { createRepository, getRepository, listRepositories } from '../../../main/db/queries/repositories'
 import { listPublishTargets } from '../../../main/db/queries/publishTargets'
 import { listGlobalMcps } from '../../../main/db/queries/globalMcps'
 import { getCredentialStatus } from '../../../main/db/queries/agentCredentials'
@@ -11,10 +11,42 @@ import { canAccessEntity } from '../../../main/db/queries/access'
 import { isAuthEnabled } from '../../auth/config'
 import { ClientError } from '../../errors'
 import { checkRunnerClis } from '../../runnerCli'
+import { testRepoConnection } from '../../gitOps'
+import { resolveTestToken, withEncryptedKey } from '../../repoCredentials'
 import { redactGlobalMcp, redactPublishTarget, redactUrl } from '../redact'
-import { registerTool, type ToolEnv } from '../registry'
+import { errorMessage, registerTool, type ToolEnv } from '../registry'
 import { failureKind, summarizeRun } from './runs'
-import type { Repository } from '../../../shared/types'
+import type { Repository, RepositoryInput } from '../../../shared/types'
+
+const PEM_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+-----END [A-Z ]*PRIVATE KEY-----/
+
+/** Reject combinations the repo-sync and run paths cannot use, before anything is stored. */
+function assertRepositoryInput(input: RepositoryInput): void {
+  let parsed: URL | undefined
+  try {
+    parsed = new URL(input.url)
+  } catch {
+    if (!/^[\w.-]+@[\w.-]+:.+/.test(input.url)) {
+      throw new ClientError(`"${input.url}" is not a valid clone URL.`)
+    }
+  }
+  if (parsed && (parsed.username || parsed.password)) {
+    throw new ClientError('Do not embed credentials in the URL; set authMethod and its credentials instead.')
+  }
+  if ((input.authMethod === 'githubapp' || input.authMethod === 'pat') && parsed?.protocol !== 'https:') {
+    throw new ClientError(`authMethod "${input.authMethod}" needs an https:// clone URL.`)
+  }
+  if (input.authMethod === 'githubapp') {
+    if (!input.githubAppId || !/^\d+$/.test(input.githubAppId)) {
+      throw new ClientError('GitHub App auth needs a numeric githubAppId.')
+    }
+    if (!input.githubPrivateKey || !PEM_RE.test(input.githubPrivateKey)) {
+      throw new ClientError('GitHub App auth needs githubPrivateKey: the full PEM, including its BEGIN/END lines.')
+    }
+  } else if (input.githubAppId || input.githubPrivateKey) {
+    throw new ClientError('githubAppId and githubPrivateKey are only used with authMethod "githubapp".')
+  }
+}
 
 function presentRepository(repo: Repository) {
   return {
@@ -110,6 +142,67 @@ export function registerWorkspaceTools(server: McpServer, env: ToolEnv): void {
       await deps.triggerRepoSync(repositoryId)
       const after = await getRepository(repositoryId)
       return presentRepository(after ?? repo)
+    },
+  })
+
+  registerTool(server, env, {
+    name: 'create_repository',
+    title: 'Create repository',
+    description:
+      'Add a managed git repository owned by you, then start its first sync in the background (poll list_repositories for syncStatus). For authMethod "githubapp" pass githubAppId and githubPrivateKey (the PEM). The key is encrypted at rest and never returned; responses only report hasGithubKey. Use test_repository_connection to check the credential.',
+    access: 'write',
+    openWorld: true,
+    input: {
+      name: z.string().min(1),
+      url: z.string().min(1).describe('Clone URL, e.g. "https://github.com/org/repo.git". No embedded credentials.'),
+      defaultBranch: z.string().min(1).optional().describe("Default 'main'."),
+      authMethod: z
+        .enum(['none', 'pat', 'ssh', 'githubapp'])
+        .describe("'none' (public), 'pat' (the server's GitHub PAT), 'ssh' (server SSH agent), or 'githubapp'."),
+      githubAppId: z.string().optional().describe('GitHub App ID (numeric). githubapp only.'),
+      githubPrivateKey: z.string().optional().describe('GitHub App private key PEM. githubapp only. Write-only.'),
+      commitAuthorName: z.string().optional().describe('Git author name for agent commits.'),
+      commitAuthorEmail: z.string().optional().describe('Git author email for agent commits.'),
+    },
+    run: async (args, { caller, deps }) => {
+      const input: RepositoryInput = {
+        name: args.name.trim(),
+        url: args.url.trim(),
+        defaultBranch: args.defaultBranch?.trim() || 'main',
+        authMethod: args.authMethod,
+        githubAppId: args.githubAppId?.trim() || undefined,
+        githubPrivateKey: args.githubPrivateKey,
+        commitAuthorName: args.commitAuthorName?.trim() || undefined,
+        commitAuthorEmail: args.commitAuthorEmail?.trim() || undefined,
+      }
+      assertRepositoryInput(input)
+      const repo = await createRepository(withEncryptedKey(input), caller.userId)
+      deps.triggerRepoSync(repo.id).catch((err) =>
+        console.error(`[mcp] Initial sync failed for repo ${repo.id}:`, err)
+      )
+      return presentRepository(repo)
+    },
+  })
+
+  registerTool(server, env, {
+    name: 'test_repository_connection',
+    title: 'Test repository connection',
+    description:
+      "Check a repository's stored credential: resolve its token (minting a GitHub App installation token when needed) and list the remote's branches. Nothing is changed, and the token is never returned.",
+    access: 'read',
+    openWorld: true,
+    input: { repositoryId: z.string() },
+    run: async ({ repositoryId }, { caller }) => {
+      const repo = await getRepository(repositoryId)
+      if (!repo || !(await canAccessEntity('repository', repositoryId, caller.userId, caller.userGroupIds))) {
+        throw new ClientError(`Repository "${repositoryId}" was not found or is not accessible to you.`)
+      }
+      try {
+        const token = await resolveTestToken({ url: repo.url, authMethod: repo.authMethod, repoId: repo.id })
+        return { repositoryId, success: true, message: await testRepoConnection(repo.url, token) }
+      } catch (err) {
+        return { repositoryId, success: false, message: errorMessage(err) }
+      }
     },
   })
 

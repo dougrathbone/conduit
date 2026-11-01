@@ -5,9 +5,11 @@ import type {
   AgentConfig,
   ExecutionRun,
   PromptRevision,
+  Repository,
   RunLog,
   Trigger,
 } from '../../shared/types'
+import type { RepoWriteData } from '../../main/db/queries/repositories'
 import type { McpCaller, McpDeps } from './context'
 
 // ── In-memory fake of the data layer ─────────────────────────────────────────
@@ -17,6 +19,9 @@ const db = vi.hoisted(() => ({
   triggers: new Map<string, Trigger>(),
   revisions: [] as PromptRevision[],
   logs: new Map<string, RunLog>(),
+  repos: new Map<string, Repository>(),
+  /** repoId → stored (encrypted) GitHub App key. */
+  repoKeys: new Map<string, string>(),
   /** agentId → userIds allowed to see it (besides the owner). */
   sharedWith: new Map<string, string[]>(),
   seq: 0,
@@ -81,8 +86,35 @@ vi.mock('../../main/db/queries/promptRevisions', () => ({
   },
 }))
 vi.mock('../../main/db/queries/repositories', () => ({
-  getRepository: async () => null,
-  listRepositories: async () => [],
+  getRepository: async (id: string) => db.repos.get(id) ?? null,
+  listRepositories: async () => [...db.repos.values()],
+  createRepository: async (data: RepoWriteData, ownerId: string) => {
+    const { githubPrivateKeyEnc, ...rest } = data
+    const repo: Repository = {
+      ...rest,
+      id: `repo-${++db.seq}`,
+      ownerId,
+      syncStatus: 'pending',
+      hasGithubKey: !!githubPrivateKeyEnc,
+      createdAt: 1,
+      updatedAt: 1,
+    }
+    db.repos.set(repo.id, repo)
+    if (githubPrivateKeyEnc) db.repoKeys.set(repo.id, githubPrivateKeyEnc)
+    return repo
+  },
+}))
+vi.mock('../crypto', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../crypto')>()),
+  encryptSecret: (s: string) => `enc:${s.length}`,
+}))
+vi.mock('../githubApp', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../githubApp')>()),
+  resolveRepoToken: vi.fn(async () => 'ghs_installation'),
+}))
+vi.mock('../gitOps', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../gitOps')>()),
+  testRepoConnection: vi.fn(async () => 'Connected — 3 branches found'),
 }))
 vi.mock('../../main/db/queries/publishTargets', () => ({
   getPublishTarget: async () => null,
@@ -107,6 +139,10 @@ vi.mock('../mcpServerProbe', () => ({
 }))
 
 import { createConduitMcpServer } from './server'
+import { resolveRepoToken } from '../githubApp'
+import { testRepoConnection } from '../gitOps'
+
+const PEM = '-----BEGIN RSA PRIVATE KEY-----\nMIIEsecretkeymaterial\n-----END RSA PRIVATE KEY-----\n'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 const deps: McpDeps = {
@@ -145,6 +181,7 @@ async function call(client: Client, name: string, args: Record<string, unknown> 
 
 function seed() {
   db.agents.clear(); db.runs.clear(); db.triggers.clear(); db.logs.clear(); db.sharedWith.clear()
+  db.repos.clear(); db.repoKeys.clear()
   db.revisions.length = 0
   db.agents.set('a1', {
     id: 'a1', name: 'Triage bot', runner: 'claude', prompt: 'Triage issues.\nBe brief.',
@@ -186,7 +223,8 @@ describe('Conduit MCP server', () => {
       'update_trigger', 'delete_trigger', 'list_runs', 'get_run', 'get_run_log', 'start_run', 'stop_run',
       'get_agent_prompt', 'update_agent_prompt', 'edit_agent_prompt', 'list_prompt_revisions',
       'get_prompt_revision', 'restore_prompt_revision', 'get_prompt_performance', 'list_repositories',
-      'sync_repository', 'list_publish_targets', 'list_global_mcp_servers',
+      'sync_repository', 'create_repository', 'test_repository_connection', 'list_publish_targets',
+      'list_global_mcp_servers',
     ]))
     const prompts = (await client.listPrompts()).prompts.map((p) => p.name)
     expect(prompts).toEqual(['investigate-run', 'improve-agent-prompt', 'triage-failures', 'design-agent'])
@@ -199,7 +237,7 @@ describe('Conduit MCP server', () => {
     const client = await connect(caller('alice', 'read'))
     const tools = (await client.listTools()).tools
     const names = tools.map((t) => t.name)
-    for (const w of ['create_agent', 'update_agent', 'delete_agent', 'edit_agent_prompt', 'start_run', 'create_trigger']) {
+    for (const w of ['create_agent', 'update_agent', 'delete_agent', 'edit_agent_prompt', 'start_run', 'create_trigger', 'create_repository']) {
       expect(names).not.toContain(w)
     }
     expect(names).toContain('get_run_log')
@@ -300,6 +338,55 @@ describe('Conduit MCP server', () => {
     expect(page.json.events.map((e: { index: number }) => e.index)).toEqual([1, 2])
     const failed = await call(client, 'list_runs', { status: 'failed' })
     expect(failed.json.runs[0]).toMatchObject({ id: 'r1', agentName: 'Triage bot', failureKind: 'authentication' })
+  })
+
+  it('creates a GitHub App repository, stores only the encrypted key, and starts its first sync', async () => {
+    const client = await connect(caller('alice', 'write'))
+    const res = await call(client, 'create_repository', {
+      name: 'platform (Arbiter)', url: 'https://github.com/acme/platform.git', defaultBranch: 'master',
+      authMethod: 'githubapp', githubAppId: '5563623', githubPrivateKey: PEM,
+    })
+    expect(res.isError).toBe(false)
+    expect(res.json).toMatchObject({
+      name: 'platform (Arbiter)', defaultBranch: 'master', authMethod: 'githubapp',
+      githubAppId: '5563623', hasGithubKey: true, syncStatus: 'pending',
+    })
+    expect(res.text).not.toContain('PRIVATE KEY')
+    expect(res.text).not.toContain('secretkeymaterial')
+    expect(db.repos.get(res.json.id)).toMatchObject({ ownerId: 'alice' })
+    expect(db.repoKeys.get(res.json.id)).toBe(`enc:${PEM.trim().length}`)
+    expect(deps.triggerRepoSync).toHaveBeenCalledWith(res.json.id)
+  })
+
+  it('rejects repository input the sync path cannot use', async () => {
+    const client = await connect(caller('alice', 'write'))
+    const base = { name: 'r', url: 'https://github.com/acme/r.git', authMethod: 'githubapp', githubAppId: '1' }
+    expect((await call(client, 'create_repository', base)).text).toMatch(/needs githubPrivateKey/)
+    expect((await call(client, 'create_repository', { ...base, githubPrivateKey: 'not a pem' })).text).toMatch(/needs githubPrivateKey/)
+    expect((await call(client, 'create_repository', { ...base, githubAppId: 'abc', githubPrivateKey: PEM })).text).toMatch(/numeric githubAppId/)
+    expect((await call(client, 'create_repository', { ...base, url: 'git@github.com:acme/r.git', githubPrivateKey: PEM })).text).toMatch(/https:\/\/ clone URL/)
+    expect((await call(client, 'create_repository', { ...base, url: 'https://x:ghp_t@github.com/acme/r.git', githubPrivateKey: PEM })).text).toMatch(/embed credentials/)
+    expect((await call(client, 'create_repository', { name: 'r', url: 'https://github.com/acme/r.git', authMethod: 'none', githubAppId: '1' })).text).toMatch(/only used with authMethod "githubapp"/)
+    expect(db.repos.size).toBe(0)
+    expect(deps.triggerRepoSync).not.toHaveBeenCalled()
+  })
+
+  it('tests a stored repository credential without returning the token', async () => {
+    const client = await connect(caller('alice', 'write'))
+    const created = await call(client, 'create_repository', {
+      name: 'p', url: 'https://github.com/acme/p.git', authMethod: 'githubapp', githubAppId: '7', githubPrivateKey: PEM,
+    })
+    const ok = await call(client, 'test_repository_connection', { repositoryId: created.json.id })
+    expect(ok.json).toEqual({ repositoryId: created.json.id, success: true, message: 'Connected — 3 branches found' })
+    expect(resolveRepoToken).toHaveBeenCalledWith({ id: created.json.id, url: 'https://github.com/acme/p.git', authMethod: 'githubapp' })
+    expect(testRepoConnection).toHaveBeenCalledWith('https://github.com/acme/p.git', 'ghs_installation')
+    expect(ok.text).not.toContain('ghs_installation')
+
+    vi.mocked(resolveRepoToken).mockRejectedValueOnce(new Error('GitHub App (id 7) is not installed for acme/p'))
+    const failed = await call(client, 'test_repository_connection', { repositoryId: created.json.id })
+    expect(failed.json).toMatchObject({ success: false, message: 'GitHub App (id 7) is not installed for acme/p' })
+
+    expect((await call(client, 'test_repository_connection', { repositoryId: 'nope' })).text).toMatch(/not found or is not accessible/)
   })
 
   it('starts runs attributed to the caller', async () => {

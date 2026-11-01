@@ -349,7 +349,8 @@ on a write keeps the stored value.
  `get_run_log` (filtered/paged digest), `start_run`, `stop_run`; triggers:
  `list_triggers`, `create_trigger`, `update_trigger`, `delete_trigger`; workspace:
  `get_conduit_status`, `list_repositories`, `sync_repository`,
- `list_publish_targets`, `list_global_mcp_servers`; prompts: `get_agent_prompt`,
+ `create_repository` (GitHub App PEM is write-only, encrypted at rest),
+ `test_repository_connection`, `list_publish_targets`, `list_global_mcp_servers`; prompts: `get_agent_prompt`,
  `update_agent_prompt` (optional `expectedUpdatedAt`), `edit_agent_prompt`
  (exact-substring replace), `list_prompt_revisions`, `get_prompt_revision`,
  `restore_prompt_revision`, `get_prompt_performance`.
