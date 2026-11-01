@@ -266,6 +266,8 @@ describe('WorkerControlPlane', () => {
     const handle = await handlePromise
     expect(handle.runId).toBe(SPEC.runId)
     expect(handle.workspacePath).toBe('/tmp/x')
+    await handle.updateRepoToken?.('ghs_fresh')
+    expect(await worker.next()).toEqual({ type: 'run:credentials', runId: SPEC.runId, repoToken: 'ghs_fresh' })
     await handle.cancel()
     expect(await worker.next()).toEqual({ type: 'run:cancel', runId: SPEC.runId })
   })

@@ -71,7 +71,10 @@ can still be adopted), `worker:heartbeat` (30s lease with active run ids),
 `run:started`, `run:event` (batched), `run:exit` — started/event/exit frames carry
 a per-run delivery sequence. Server→worker `run:assign` (RunSpec plus
 `reconnectTimeoutMs`), `run:ack` (highest contiguous sequence durably applied),
-`run:resume` (replay from the durable cursor), `run:reject`, `run:cancel`.
+`run:resume` (replay from the durable cursor), `run:reject`, `run:cancel`,
+`run:credentials` (a freshly minted GitHub App token every 45 minutes; the
+worker re-points the checkout's tokenized `origin` and the `gh` wrapper it puts
+on PATH, since installation tokens expire after an hour — older workers ignore it).
 
 The worker keeps every frame on a process-local spool until the matching
 contiguous sequence is ACKed, then resends later frames in order after

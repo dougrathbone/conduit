@@ -1,6 +1,6 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import type { ExecutionRun, RunEvent, TriggerContext, RunnerType } from '../shared/types'
+import type { ExecutionRun, RunEvent, TriggerContext, RunnerType, Repository } from '../shared/types'
 import type { RunSpec, WorkspaceSpec, WorkerEventSink, WorkerHandle } from '../shared/worker'
 import { summarizeEvent } from '../shared/runEvents'
 import { createRun, updateRun, updateRunIfRunning, getRunningRunForAgent } from '../main/db/queries/runs'
@@ -214,6 +214,8 @@ export interface RunOrchestration {
   emitSystemMessage: (text: string) => void
   register: (handle: WorkerHandle) => void
   abort: () => void
+  /** Run `cb` once the run leaves the active set (terminal state or abort). */
+  onFinalized: (cb: () => void) => void
 }
 
 /**
@@ -290,6 +292,10 @@ export function createRunOrchestration(opts: {
   })
 
   let finalized = false
+  const finalizers: Array<() => void> = []
+  const runFinalizers = (): void => {
+    for (const cb of finalizers.splice(0)) cb()
+  }
   let workspacePath: string | undefined = run.workspacePath
   let isEphemeral = false
   let worktreeClonePath: string | undefined = undefined
@@ -334,6 +340,7 @@ export function createRunOrchestration(opts: {
     }
 
     activeProcesses.delete(runId)
+    runFinalizers()
 
     if (eventBuffer.length > 0) {
       const events = eventBuffer.splice(0)
@@ -419,9 +426,48 @@ export function createRunOrchestration(opts: {
     },
     abort: () => {
       finalized = true
+      runFinalizers()
       logStream.end()
     },
+    onFinalized: (cb) => {
+      finalizers.push(cb)
+    },
   }
+}
+
+/** GitHub App installation tokens last an hour; replace them well before that. */
+export const REPO_TOKEN_REFRESH_MS = 45 * 60_000
+
+/**
+ * Periodically mint a fresh repo token and hand it to the worker, so `git push`
+ * and `gh` keep working in runs that outlive the token they started with.
+ */
+export function startRepoTokenRefresh(
+  runId: string,
+  repo: Pick<Repository, 'id' | 'url' | 'authMethod'>,
+  handle: WorkerHandle,
+  orch: Pick<RunOrchestration, 'emitSystemMessage' | 'onFinalized'>,
+  intervalMs = REPO_TOKEN_REFRESH_MS
+): void {
+  const refresh = async (): Promise<void> => {
+    try {
+      const { token, error } = await resolvePushCredential(repo)
+      if (error) throw error
+      if (token) await handle.updateRepoToken?.(token)
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err))
+      orch.emitSystemMessage(
+        `⚠️  Could not refresh GitHub credentials: ${e.message}\n` +
+          `   "git push" and "gh" will fail once the current token expires.\n`
+      )
+      reporter.captureException(e, {
+        tags: { component: 'runner', op: 'refreshRepoToken', runId, repoId: repo.id },
+      })
+    }
+  }
+  const timer = setInterval(() => void refresh(), intervalMs)
+  timer.unref?.()
+  orch.onFinalized(() => clearInterval(timer))
 }
 
 /**
@@ -464,10 +510,13 @@ export async function startRunServer(
   // token). Tokenizes the checkout's `origin` for `git push` AND is handed to
   // the agent as GH_TOKEN so the `gh` CLI authenticates as the same identity.
   let pushToken: string | undefined
+  // Set for GitHub App repos, whose installation tokens expire mid-run.
+  let refreshableRepo: Pick<Repository, 'id' | 'url' | 'authMethod'> | undefined
 
   if (agent.repositoryId) {
     const repo = await getRepository(agent.repositoryId)
     if (!repo) throw new Error(`Repository ${agent.repositoryId} not found`)
+    if (repo.authMethod === 'githubapp') refreshableRepo = repo
     if (factory.kind === 'local' && repo.syncStatus !== 'ready') {
       // The local factory worktrees off the server-side bare clone, so it must
       // be synced; remote factories clone from the remote and don't use it.
@@ -606,6 +655,9 @@ export async function startRunServer(
   }
 
   orch.register(handle)
+  if (refreshableRepo && pushToken && handle.updateRepoToken) {
+    startRepoTokenRefresh(runId, refreshableRepo, handle, orch)
+  }
 
   // Record the resolved workspace path (worker-local for remote factories) and
   // the executing worker's identity.

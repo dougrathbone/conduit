@@ -454,6 +454,11 @@ export class WorkerControlPlane {
       cancel: async () => {
         this.requestCancel(runId)
       },
+      // Best effort: a detached run misses this refresh and gets the next one.
+      updateRepoToken: async (token) => {
+        const a = this.runs.get(runId)
+        if (a) this.sendOn(a.ws, { type: 'run:credentials', runId, repoToken: token })
+      },
     }
   }
 

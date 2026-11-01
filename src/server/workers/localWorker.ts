@@ -5,6 +5,7 @@ import { createWorkspace, deleteWorkspace } from '../../main/execution/workspace
 import { writeMcpConfigContent, deleteMcpConfig } from '../../main/utils/mcpConfigFile'
 import { writeClaudeConfig, deleteClaudeConfig } from '../../main/utils/claudeConfig'
 import { installCursorMcpConfig } from './cursorMcpConfig'
+import { installRepoCredentials } from './repoCredentials'
 import { createConfiguredWorktree, removeWorktree, runGit, buildAuthUrl, configureWorktreeGit, DEFAULT_GIT_TIMEOUT_MS } from '../gitOps'
 import { buildClaudeArgs, parseClaudeEvents } from '../../main/execution/adapters/claude'
 import { buildAmpArgs, parseAmpEvents } from '../../main/execution/adapters/amp'
@@ -135,6 +136,19 @@ export class LocalWorkerFactory implements WorkerFactory {
       const trusted = [workspacePath, worktreeClonePath].filter((p): p is string => !!p)
       env.CLAUDE_CONFIG_DIR = writeClaudeConfig(spec.runId, trusted)
     }
+    const ws = spec.workspace
+    const repo = ws.kind === 'worktree' || ws.kind === 'repo-clone' ? ws.repo : undefined
+    const repoCredentials = repo
+      ? installRepoCredentials({ runId: spec.runId, workspacePath, repo, env })
+      : undefined
+    Object.assign(env, repoCredentials?.env)
+    const disposeRepoCredentials = (): void => {
+      try {
+        repoCredentials?.dispose()
+      } catch (err) {
+        console.error(`[workers/local] Failed to remove credentials for run ${spec.runId}:`, err)
+      }
+    }
 
     // 4. Spawn the runner CLI. Cursor runs cursor-agent in "Run Everything"
     // mode (--force / --yolo) — see buildCursorArgs — so the agent executes
@@ -157,6 +171,7 @@ export class LocalWorkerFactory implements WorkerFactory {
       })
     } catch (err) {
       await restoreWorkspaceMcp()
+      disposeRepoCredentials()
       throw err
     }
 
@@ -181,6 +196,7 @@ export class LocalWorkerFactory implements WorkerFactory {
           console.error(`[workers/local] Failed to kill process for run ${spec.runId}:`, err)
         }
       },
+      updateRepoToken: repoCredentials ? (token) => repoCredentials.update(token) : undefined,
     }
 
     // Spawn errors (binary not in PATH, etc.) — the orchestrator owns
@@ -188,6 +204,7 @@ export class LocalWorkerFactory implements WorkerFactory {
     child.on('error', (err) => {
       this.active.delete(spec.runId)
       void restoreWorkspaceMcp()
+      disposeRepoCredentials()
       sink.onError?.(err)
     })
 
@@ -211,6 +228,7 @@ export class LocalWorkerFactory implements WorkerFactory {
     child.on('close', async (code, signal) => {
       this.active.delete(spec.runId)
       await restoreWorkspaceMcp()
+      disposeRepoCredentials()
       const diagnostic = cliKillDiagnostic(code, signal)
       if (diagnostic) sink.onEvent({ kind: 'raw', stream: 'system', text: diagnostic })
       sink.onExit(code === 0 ? 'completed' : 'failed', code)

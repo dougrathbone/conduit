@@ -14,6 +14,10 @@ const GLOBAL_OWNER = '__global__'
 // provider already considers dead. Matches the Okta session skew pattern.
 const REFRESH_SKEW_MS = 5 * 60_000
 
+// Run injection bakes the bearer into the run's config for its whole life, and
+// runs go for hours, so at launch renew anything that would die within this window.
+const RUN_LAUNCH_REFRESH_SKEW_MS = 2 * 60 * 60_000
+
 // Serialises concurrent refreshes of the same (url, owner). Providers that
 // rotate refresh tokens (Linear, Auth0-style) invalidate the previous RT once
 // a refresh succeeds — two racing refreshes make the loser get invalid_grant
@@ -38,21 +42,21 @@ export async function buildMergedMcpConfig(
   }
 }
 
-function needsRefresh(token: OAuthToken): boolean {
+function needsRefresh(token: OAuthToken, skewMs = REFRESH_SKEW_MS): boolean {
   if (token.expiresAt === undefined) return false
-  return token.expiresAt - Date.now() <= REFRESH_SKEW_MS
+  return token.expiresAt - Date.now() <= skewMs
 }
 
 function stillHardValid(token: OAuthToken): boolean {
   return token.expiresAt === undefined || token.expiresAt > Date.now()
 }
 
-async function refreshTokenForOwner(url: string, owner: string): Promise<OAuthToken | null> {
+async function refreshTokenForOwner(url: string, owner: string, skewMs: number): Promise<OAuthToken | null> {
   // Re-read under the lock: a just-finished refresh (or another pod) may have
   // already persisted a fresh pair before we started the network call.
   const current = await getToken(url, owner)
   if (!current) return null
-  if (!needsRefresh(current)) return current
+  if (!needsRefresh(current, skewMs)) return current
   if (!current.refreshToken) return stillHardValid(current) ? current : null
 
   const client = await getClient(url)
@@ -74,7 +78,7 @@ async function refreshTokenForOwner(url: string, owner: string): Promise<OAuthTo
     // that copy over declaring the connection dead — and skip the failure
     // audit/warn when we recovered, so logs stay meaningful.
     const latest = await getToken(url, owner)
-    if (latest && !needsRefresh(latest)) return latest
+    if (latest && !needsRefresh(latest, skewMs)) return latest
     if (latest && stillHardValid(latest)) return latest
     const msg = err instanceof Error ? err.message : String(err)
     auditMcpOAuth('token_refresh_failed', { serverUrl: url, owner, clientId: client.clientId, error: msg })
@@ -83,16 +87,20 @@ async function refreshTokenForOwner(url: string, owner: string): Promise<OAuthTo
   }
 }
 
-async function resolveValidToken(url: string, owner: string): Promise<OAuthToken | null> {
+async function resolveValidToken(
+  url: string,
+  owner: string,
+  skewMs = REFRESH_SKEW_MS
+): Promise<OAuthToken | null> {
   const token = await getToken(url, owner)
   if (!token) return null
-  if (!needsRefresh(token)) return token
+  if (!needsRefresh(token, skewMs)) return token
   if (!token.refreshToken) return stillHardValid(token) ? token : null
 
   const key = `${url}::${owner}`
   let lock = refreshLocks.get(key)
   if (!lock) {
-    lock = refreshTokenForOwner(url, owner).finally(() => refreshLocks.delete(key))
+    lock = refreshTokenForOwner(url, owner, skewMs).finally(() => refreshLocks.delete(key))
     refreshLocks.set(key, lock)
   }
   return lock
@@ -132,7 +140,7 @@ export async function injectOAuthTokens(
   for (const [key, entry] of Object.entries(config.mcpServers)) {
     if (isUrlMcpServer(entry)) {
       const owner = globalUrls.has(entry.url!) ? GLOBAL_OWNER : actingUserId
-      const token = await resolveValidToken(entry.url!, owner)
+      const token = await resolveValidToken(entry.url!, owner, RUN_LAUNCH_REFRESH_SKEW_MS)
       if (token) {
         updated[key] = {
           ...entry,

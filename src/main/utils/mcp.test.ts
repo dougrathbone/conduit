@@ -59,6 +59,29 @@ describe('injectOAuthTokens', () => {
     expect(out.mcpServers.aserver.headers?.Authorization).toBe('Bearer FRESH')
   })
 
+  it('renews at launch a token that would expire partway through a long run', async () => {
+    tokens.set('https://a::user-1', { serverUrl: 'https://a', accessToken: 'OLD', refreshToken: 'RT', tokenType: 'Bearer', expiresAt: Date.now() + 30 * 60_000 })
+    const config = { mcpServers: { aserver: { type: 'url' as const, url: 'https://a' } } }
+    const out = await injectOAuthTokens(config, 'user-1', new Set())
+    expect(out.mcpServers.aserver.headers?.Authorization).toBe('Bearer FRESH')
+  })
+
+  it('keeps a long-lived token at launch without refreshing', async () => {
+    tokens.set('https://a::user-1', { serverUrl: 'https://a', accessToken: 'LONG', refreshToken: 'RT', tokenType: 'Bearer', expiresAt: Date.now() + 12 * 3600_000 })
+    const config = { mcpServers: { aserver: { type: 'url' as const, url: 'https://a' } } }
+    const out = await injectOAuthTokens(config, 'user-1', new Set())
+    expect(out.mcpServers.aserver.headers?.Authorization).toBe('Bearer LONG')
+    expect(refreshAccessToken).not.toHaveBeenCalled()
+  })
+
+  it('still injects a valid token at launch when the early refresh fails', async () => {
+    refreshImpl = async () => { throw new Error('invalid_grant') }
+    tokens.set('https://a::user-1', { serverUrl: 'https://a', accessToken: 'STILL_OK', refreshToken: 'RT', tokenType: 'Bearer', expiresAt: Date.now() + 30 * 60_000 })
+    const config = { mcpServers: { aserver: { type: 'url' as const, url: 'https://a' } } }
+    const out = await injectOAuthTokens(config, 'user-1', new Set())
+    expect(out.mcpServers.aserver.headers?.Authorization).toBe('Bearer STILL_OK')
+  })
+
   it('skips an expired token with no refresh token', async () => {
     tokens.set('https://a::user-1', { serverUrl: 'https://a', accessToken: 'OLD', tokenType: 'Bearer', expiresAt: Date.now() - 1 })
     const config = { mcpServers: { aserver: { type: 'url' as const, url: 'https://a' } } }

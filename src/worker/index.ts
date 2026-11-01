@@ -423,6 +423,10 @@ function connect(): void {
     } else if (msg.type === 'run:cancel') {
       console.log(`[worker] Cancel requested for run ${msg.runId}`)
       void handles.get(msg.runId)?.cancel()
+    } else if (msg.type === 'run:credentials') {
+      handles.get(msg.runId)?.updateRepoToken?.(msg.repoToken).catch((err) => {
+        console.error(`[worker] Failed to refresh credentials for run ${msg.runId}:`, err)
+      })
     } else if (msg.type === 'run:ack') {
       applyAck(msg.runId, msg.sequence)
     } else if (msg.type === 'run:resume') {

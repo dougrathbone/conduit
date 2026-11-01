@@ -94,6 +94,11 @@ export interface WorkerHandle {
   readonly workerId?: string
   /** Request termination (SIGTERM semantics locally; cancel/kill remotely). */
   cancel(): Promise<void>
+  /**
+   * Swap in a freshly minted repo token (GitHub App installation tokens expire
+   * after about an hour). Absent when the run has no tokenized checkout.
+   */
+  updateRepoToken?(token: string): Promise<void>
 }
 
 /**
