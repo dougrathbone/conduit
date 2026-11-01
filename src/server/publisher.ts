@@ -159,12 +159,93 @@ function escapeSlackEntities(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+/**
+ * Slack rewrites every bare `https://…` into `<https://…>`, including inside
+ * inline code. A code span then shows those angle brackets as literal text
+ * (the dependency-upgrade run's `` `Bad credentials (https://api.github.com/graphql)` ``).
+ * Lift the URL out of the span so it becomes a real link and the surrounding
+ * code stays code. Trailing sentence punctuation is left outside the link.
+ */
+function splitUrlsOutOfInlineCode(inner: string): string {
+  const re = /https?:\/\/[^\s`<>]+/gi
+  let out = ''
+  let last = 0
+  let found = false
+  let match: RegExpExecArray | null
+  while ((match = re.exec(inner)) !== null) {
+    found = true
+    let url = match[0]
+    let end = match.index + url.length
+    while (url.length > 0 && /[.,;:!?)]$/.test(url)) {
+      const ch = url[url.length - 1]
+      if (ch === ')' && url.includes('(')) break
+      url = url.slice(0, -1)
+      end -= 1
+    }
+    const before = inner.slice(last, match.index)
+    if (before) out += `\`${before}\``
+    if (url) out += `<${url}>`
+    last = end
+  }
+  if (!found) return `\`${inner}\``
+  const after = inner.slice(last)
+  if (after) out += `\`${after}\``
+  return out
+}
+
+/** Code is stashed so list/bold conversion can't rewrite samples. */
+function stashSlackCode(text: string): { text: string; slots: string[] } {
+  const slots: string[] = []
+  const put = (raw: string) => {
+    const token = `\uE000${slots.length}\uE001`
+    if (raw.startsWith('```')) {
+      // A fenced sample should stay one block. Break the scheme so Slack's
+      // autolinker doesn't wrap the URL in angle brackets inside the fence.
+      slots.push(
+        escapeSlackEntities(raw).replace(/https?:\/\//gi, (scheme) => scheme.replace('://', ':\u200b//'))
+      )
+    } else {
+      slots.push(splitUrlsOutOfInlineCode(escapeSlackEntities(raw.slice(1, -1))))
+    }
+    return token
+  }
+  let out = text.replace(/```[\s\S]*?```/g, put)
+  out = out.replace(/`[^`\n]+`/g, put)
+  return { text: out, slots }
+}
+
+function restoreSlackCode(text: string, slots: string[]): string {
+  return text.replace(/\uE000(\d+)\uE001/g, (_m, n: string) => slots[Number(n)] ?? '')
+}
+
+/**
+ * Slack has no nested-list syntax. A mix of `-`, `*`, and `1.` at shifting
+ * indents renders as a ragged wall. Collapse that to a `•` (numbers kept)
+ * at a stable indent.
+ */
+function normalizeSlackLists(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      const m = line.match(/^(\s*)([-*]|\d+\.)\s+(.*)$/)
+      if (!m) return line
+      const spaces = m[1].replace(/\t/g, '  ').length
+      const depth = spaces === 0 ? 0 : spaces <= 2 ? 1 : 2
+      const indent = '    '.repeat(depth)
+      const marker = /^\d+\.$/.test(m[2]) ? m[2] : '•'
+      return `${indent}${marker} ${m[3]}`
+    })
+    .join('\n')
+}
+
 /** Exported for unit tests. */
 export function markdownToSlackMrkdwn(text: string): string {
-  let result = escapeSlackEntities(text)
+  const { text: stashed, slots } = stashSlackCode(text)
+  let result = escapeSlackEntities(stashed)
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>')
   result = result.replace(/\*\*([^*]+)\*\*/g, '*$1*')
-  return result
+  result = normalizeSlackLists(result)
+  return restoreSlackCode(result, slots)
 }
 
 interface SlackBlock {

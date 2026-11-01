@@ -172,6 +172,49 @@ describe('markdownToSlackMrkdwn', () => {
       'See <https://example.com/pr/1?a=1&amp;b=2|PR #1> for *details*.'
     )
   })
+
+  it('lifts a URL out of inline code so Slack does not print angle brackets around it', () => {
+    // Regression: the dependency-upgrade summary quoted an error as
+    // `Bad credentials (https://api.github.com/graphql)`. Slack autolinks
+    // the URL inside the code span, and the client then shows the literal
+    // text "<https://api.github.com/graphql>".
+    const input = 'failed with `HTTP 401: Bad credentials (https://api.github.com/graphql)` today'
+    expect(markdownToSlackMrkdwn(input)).toBe(
+      'failed with `HTTP 401: Bad credentials (`<https://api.github.com/graphql>`)` today'
+    )
+  })
+
+  it('leaves a prose URL alone so Slack can autolink it', () => {
+    expect(markdownToSlackMrkdwn('Draft: https://github.com/org/repo/pull/new/deps/pkg')).toBe(
+      'Draft: https://github.com/org/repo/pull/new/deps/pkg'
+    )
+  })
+
+  it('does not autolink or reformat a fenced sample', () => {
+    const input = ['```', '- not a bullet', 'curl https://example.com/a', '```'].join('\n')
+    const result = markdownToSlackMrkdwn(input)
+    expect(result).toContain('- not a bullet')
+    expect(result).not.toContain('• not a bullet')
+    expect(result).toContain('https:\u200b//example.com/a')
+    expect(result).not.toContain('<https')
+  })
+
+  it('normalizes nested markdown lists to a stable Slack indent', () => {
+    const input = [
+      '- **Baseline: green.** checked',
+      '  - nested detail',
+      '  1. **Upgrade pkg**',
+      '     - Branch: `deps/pkg`',
+    ].join('\n')
+    expect(markdownToSlackMrkdwn(input)).toBe(
+      [
+        '• *Baseline: green.* checked',
+        '    • nested detail',
+        '    1. *Upgrade pkg*',
+        '        • Branch: `deps/pkg`',
+      ].join('\n')
+    )
+  })
 })
 
 describe('buildFailureNotice', () => {
