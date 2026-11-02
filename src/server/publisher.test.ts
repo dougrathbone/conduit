@@ -199,6 +199,31 @@ describe('markdownToSlackMrkdwn', () => {
     expect(result).not.toContain('<https')
   })
 
+  it('turns markdown headings into Slack bold instead of leaving the hashes', () => {
+    // Regression: the front-end performance summary opened with
+    // "## Front-End Performance Loop — Run Summary", which Slack shows
+    // with the hashes still visible.
+    const input = [
+      '## Front-End Performance Loop — Run Summary',
+      '',
+      '**Job executed:** Job 3 — Start next fix',
+      '### Already **bold** title',
+    ].join('\n')
+    expect(markdownToSlackMrkdwn(input)).toBe(
+      [
+        '*Front-End Performance Loop — Run Summary*',
+        '',
+        '*Job executed:* Job 3 — Start next fix',
+        '*Already bold title*',
+      ].join('\n')
+    )
+  })
+
+  it('does not rewrite a heading inside a fenced sample', () => {
+    const input = ['```', '## not a heading', '```'].join('\n')
+    expect(markdownToSlackMrkdwn(input)).toContain('## not a heading')
+  })
+
   it('normalizes nested markdown lists to a stable Slack indent', () => {
     const input = [
       '- **Baseline: green.** checked',

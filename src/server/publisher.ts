@@ -219,6 +219,24 @@ function restoreSlackCode(text: string, slots: string[]): string {
 }
 
 /**
+ * Slack has no heading syntax. A line like `## Front-End Performance Loop`
+ * is posted with the hashes visible. Turn ATX headings into a bold line.
+ * Bold markers already converted from `**` are stripped so the title is
+ * wrapped once.
+ */
+function normalizeSlackHeadings(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => {
+      const m = line.match(/^#{1,6}\s+(.+?)\s*#*\s*$/)
+      if (!m) return line
+      const title = m[1].replace(/\*/g, '').replace(/\s+/g, ' ').trim()
+      return title ? `*${title}*` : line
+    })
+    .join('\n')
+}
+
+/**
  * Slack has no nested-list syntax. A mix of `-`, `*`, and `1.` at shifting
  * indents renders as a ragged wall. Collapse that to a `•` (numbers kept)
  * at a stable indent.
@@ -244,6 +262,7 @@ export function markdownToSlackMrkdwn(text: string): string {
   let result = escapeSlackEntities(stashed)
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>')
   result = result.replace(/\*\*([^*]+)\*\*/g, '*$1*')
+  result = normalizeSlackHeadings(result)
   result = normalizeSlackLists(result)
   return restoreSlackCode(result, slots)
 }
