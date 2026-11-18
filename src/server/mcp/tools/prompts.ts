@@ -11,6 +11,7 @@ import { ClientError } from '../../errors'
 import { requireAgent, type McpCaller, type McpDeps } from '../context'
 import { applyPromptEdit, summarizePromptDiff } from '../promptEdit'
 import { registerTool, type ToolEnv } from '../registry'
+import { PUBLISH_OUTPUT_HINT } from '../publishOutput'
 import type { AgentConfig, ExecutionRun, PromptRevision, RunStatus } from '../../../shared/types'
 
 const noteSchema = z
@@ -164,7 +165,7 @@ export function registerPromptTools(server: McpServer, env: ToolEnv): void {
     name: 'update_agent_prompt',
     title: 'Replace agent prompt',
     description:
-      "Replace an agent's whole prompt. Records a revision with your note so it can be restored. Prefer edit_agent_prompt for targeted changes.",
+      `Replace an agent's whole prompt. Records a revision with your note so it can be restored. Prefer edit_agent_prompt for targeted changes. ${PUBLISH_OUTPUT_HINT}`,
     access: 'write',
     input: { agentId: z.string(), prompt: z.string().min(1), note: noteSchema, expectedUpdatedAt: expectedUpdatedAtSchema },
     run: async ({ agentId, prompt, note, expectedUpdatedAt }, { caller, deps }) =>
@@ -179,7 +180,7 @@ export function registerPromptTools(server: McpServer, env: ToolEnv): void {
     name: 'edit_agent_prompt',
     title: 'Edit agent prompt',
     description:
-      'Targeted edit: replace an exact substring of the prompt. oldText must match exactly once unless replaceAll is set. Records a revision with your note. Returns a diff of the change.',
+      `Targeted edit: replace an exact substring of the prompt. oldText must match exactly once unless replaceAll is set. Records a revision with your note. Returns a diff of the change. ${PUBLISH_OUTPUT_HINT}`,
     access: 'write',
     input: {
       agentId: z.string(),

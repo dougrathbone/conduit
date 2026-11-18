@@ -12,6 +12,7 @@ import { digestRunLog } from './runDigest'
 import { jsonText, type ToolEnv } from './registry'
 import { failureKind, summarizeRun } from './tools/runs'
 import { promptPerformance } from './tools/prompts'
+import { PUBLISH_OUTPUT_GUIDE } from './publishOutput'
 
 function userMessage(text: string, description: string): GetPromptResult {
   return { description, messages: [{ role: 'user', content: { type: 'text', text } }] }
@@ -91,8 +92,11 @@ export function registerPrompts(server: McpServer, { caller }: ToolEnv): void {
           'Work through it:',
           '1. Read 2–3 representative runs (get_run, then get_run_log) — failures first, but also a success to see what good looks like.',
           '2. Tie each problem to the prompt: a missing instruction, an ambiguity, a conflicting rule, or missing context/tools (then the fix may be configuration, not the prompt).',
-          '3. Propose specific edits, each with the evidence behind it. Keep the prompt\'s structure and voice; avoid rewriting what already works.',
-          '4. Only if asked to apply: use edit_agent_prompt for each change with a note citing the run ids, then optionally start_run and compare with get_prompt_performance. A bad change can be undone with restore_prompt_revision.',
+          '3. Check the output contract below. The prompt must tell the agent to finish with exactly one publish block of standard markdown. A missing block, an ambiguous one, or instructions to write Slack mrkdwn are defects — propose a fix.',
+          '4. Propose specific edits, each with the evidence behind it. Keep the prompt\'s structure and voice; avoid rewriting what already works.',
+          '5. Only if asked to apply: use edit_agent_prompt for each change with a note citing the run ids, then optionally start_run and compare with get_prompt_performance. A bad change can be undone with restore_prompt_revision.',
+          '',
+          PUBLISH_OUTPUT_GUIDE,
         ].join('\n'),
         `Improve the prompt of ${agent.name}`
       )
@@ -158,8 +162,11 @@ export function registerPrompts(server: McpServer, { caller }: ToolEnv): void {
           '',
           'Runners: claude (Claude Code), amp, cursor (cursor-agent; set model for an exact model id).',
           '',
-          'Propose: name, description, runner, repository (if it works on code), a complete prompt (objective, context, step-by-step procedure, constraints, definition of done, and what to output), MCP servers it needs (list_global_mcp_servers first — globals are already loaded), publish targets, and a trigger (cron schedule, webhook, or Slack mention).',
+          'Propose: name, description, runner, repository (if it works on code), a complete prompt (objective, context, step-by-step procedure, constraints, definition of done), MCP servers it needs (list_global_mcp_servers first — globals are already loaded), publish targets, and a trigger (cron schedule, webhook, or Slack mention).',
+          'The prompt\'s Output section must tell the agent to finish with exactly one publish block, copied from the contract below. Ask for standard markdown inside it, never Slack mrkdwn.',
           'Ask for confirmation, then create it with create_agent and create_trigger. Suggest a first start_run to validate it.',
+          '',
+          PUBLISH_OUTPUT_GUIDE,
         ].join('\n'),
         'Design a new agent'
       )

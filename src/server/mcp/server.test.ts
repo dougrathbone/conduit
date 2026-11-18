@@ -269,6 +269,34 @@ describe('Conduit MCP server', () => {
     expect(client.getInstructions()).toContain('get_conduit_status')
   })
 
+  it('tells agents to finish with a publish block of standard markdown', async () => {
+    const client = await connect(caller('alice', 'write'))
+    const instructions = client.getInstructions() ?? ''
+    expect(instructions).toContain('<!--CONDUIT:PUBLISH-->')
+    expect(instructions).toContain('<!--/CONDUIT:PUBLISH-->')
+    expect(instructions).toMatch(/last message/)
+    expect(instructions).toMatch(/standard markdown/)
+
+    const byName = new Map((await client.listTools()).tools.map((t) => [t.name, t.description ?? '']))
+    for (const name of ['create_agent', 'update_agent_prompt', 'edit_agent_prompt', 'list_publish_targets']) {
+      expect(byName.get(name), name).toContain('<!--CONDUIT:PUBLISH-->')
+    }
+
+    const textOf = async (name: string, args: Record<string, string>) => {
+      const prompt = await client.getPrompt({ name, arguments: args })
+      return prompt.messages
+        .map((m) => (m.content.type === 'text' ? m.content.text : ''))
+        .join('\n')
+    }
+    const design = await textOf('design-agent', { goal: 'summarize open PRs' })
+    expect(design).toContain('<!--CONDUIT:PUBLISH-->')
+    expect(design).toContain('<!--/CONDUIT:PUBLISH-->')
+    expect(design).toMatch(/standard markdown/)
+    const improve = await textOf('improve-agent-prompt', { agentId: 'a1' })
+    expect(improve).toContain('<!--CONDUIT:PUBLISH-->')
+    expect(improve).toMatch(/Slack mrkdwn|Slack-native/)
+  })
+
   it('hides write tools from read-scoped tokens and marks the rest read-only', async () => {
     const client = await connect(caller('alice', 'read'))
     const tools = (await client.listTools()).tools

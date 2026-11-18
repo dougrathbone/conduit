@@ -410,6 +410,14 @@ on a write keeps the stored value.
  `conduit://runs/{runId}`, `conduit://runs/{runId}/log`.
 - Prompts — `investigate-run`, `improve-agent-prompt`, `triage-failures`, `design-agent`.
 
+**Output contract**: a prompt written or revised through this MCP must tell the
+agent to end with one `<!--CONDUIT:PUBLISH-->` … `<!--/CONDUIT:PUBLISH-->` block
+of standard markdown. That block is the only text posted to publish targets;
+without one, only the last message is delivered and labelled as having no
+summary. The text lives in `src/server/mcp/publishOutput.ts` (server
+instructions, `design-agent`, `improve-agent-prompt`, and the create/edit
+prompt tool descriptions) and is extracted by `src/server/publisher.ts`.
+
 **Prompt history**: every prompt change (UI or MCP) is recorded in
 `prompt_revisions` (`src/main/db/queries/promptRevisions.ts`); the first change
 also stores a `baseline`; consecutive UI autosaves by the same user within 10

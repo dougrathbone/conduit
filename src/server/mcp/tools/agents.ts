@@ -8,6 +8,7 @@ import { getPublishTarget } from '../../../main/db/queries/publishTargets'
 import { canAccessEntity } from '../../../main/db/queries/access'
 import { listGlobalMcps } from '../../../main/db/queries/globalMcps'
 import { ClientError } from '../../errors'
+import { PUBLISH_OUTPUT_HINT } from '../publishOutput'
 import { checkMcpServerHealth, listMcpServerTools } from '../../mcpServerProbe'
 import { isOwnedBy, requireAgent, requireAgentOwner, type McpCaller } from '../context'
 import { applyRecordPatch, mergeMcpEntry, redactAgent, redactMcpEntry, redactTrigger } from '../redact'
@@ -149,12 +150,12 @@ export function registerAgentTools(server: McpServer, env: ToolEnv): void {
     name: 'create_agent',
     title: 'Create agent',
     description:
-      'Create a new agent owned by you. Use list_repositories / list_publish_targets to find ids to attach. Returns the created agent.',
+      `Create a new agent owned by you. Use list_repositories / list_publish_targets to find ids to attach. Returns the created agent. ${PUBLISH_OUTPUT_HINT}`,
     access: 'write',
     input: {
       name: z.string().min(1),
       runner: runnerSchema.describe("Agent CLI: 'claude' (Claude Code), 'amp', or 'cursor' (cursor-agent)."),
-      prompt: z.string().min(1).describe('The task prompt the agent runs with.'),
+      prompt: z.string().min(1).describe(`The task prompt the agent runs with. ${PUBLISH_OUTPUT_HINT}`),
       description: z.string().optional(),
       model: z.string().optional().describe("Exact model id for the cursor runner (e.g. 'claude-opus-5-high')."),
       effort: effortSchema.optional().describe('Reasoning effort (claude runner).'),

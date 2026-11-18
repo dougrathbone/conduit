@@ -14,6 +14,7 @@ import { checkRunnerClis } from '../../runnerCli'
 import { assertRepositoryUrl, runConnectionTest, withEncryptedSecrets } from '../../repoCredentials'
 import { generateSshKeyPair } from '../../sshKey'
 import { redactGlobalMcp, redactPublishTarget, redactUrl } from '../redact'
+import { PUBLISH_OUTPUT_HINT } from '../publishOutput'
 import { errorMessage, registerTool, type ToolEnv } from '../registry'
 import { failureKind, summarizeRun } from './runs'
 import type { Repository, RepositoryInput } from '../../../shared/types'
@@ -235,7 +236,7 @@ export function registerWorkspaceTools(server: McpServer, env: ToolEnv): void {
     name: 'list_publish_targets',
     title: 'List publish targets',
     description:
-      'Publish targets (Slack, email, webhook) visible to you. Attach them to agents via update_agent publishTargetIds. Secrets are redacted.',
+      `Publish targets (Slack, email, webhook) visible to you. Attach them to agents via update_agent publishTargetIds. Secrets are redacted. ${PUBLISH_OUTPUT_HINT}`,
     access: 'read',
     input: {},
     run: async (_args, { caller }) =>

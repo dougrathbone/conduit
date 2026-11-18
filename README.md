@@ -207,7 +207,7 @@ Publish targets deliver agent output to external channels. Create targets in the
 | **Email** | SMTP | Host, port, TLS, credentials, from/to, subject template |
 | **Webhook** | HTTP POST/PUT | URL, custom headers, optional HMAC-SHA256 signing secret |
 
-The agent controls what gets published. If its output contains a publish block, only the content between the tags is sent; otherwise the full stdout is delivered:
+The agent controls what gets published. Its prompt should tell it to finish with one publish block of standard markdown (not Slack syntax). Only the content between the tags is sent. Without a block, only the agent's last message is posted, labelled as having no publish summary:
 
 ```
 <!--CONDUIT:PUBLISH-->

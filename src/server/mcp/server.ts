@@ -8,6 +8,7 @@ import { registerPromptTools } from './tools/prompts'
 import { registerRunTools } from './tools/runs'
 import { registerTriggerTools } from './tools/triggers'
 import { registerWorkspaceTools } from './tools/workspace'
+import { PUBLISH_OUTPUT_GUIDE } from './publishOutput'
 
 export const CONDUIT_MCP_SERVER_NAME = 'conduit'
 export const CONDUIT_MCP_SERVER_VERSION = '1.0.0'
@@ -23,7 +24,9 @@ Start with get_conduit_status for an overview, then list_agents.
 
 Secret values are always returned as "[redacted]"; sending "[redacted]" back in a write keeps the stored value.
 Every prompt change records a revision with your note, so explain why you changed it.
-Tools that create, change, delete, or start things are only available with a write-scoped token.`
+Tools that create, change, delete, or start things are only available with a write-scoped token.
+
+${PUBLISH_OUTPUT_GUIDE}`
 
 /** Build an MCP server bound to one caller. Tools/prompts/resources are filtered by the caller's scope. */
 export function createConduitMcpServer(caller: McpCaller, deps: McpDeps): McpServer {
