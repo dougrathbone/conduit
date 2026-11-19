@@ -41,6 +41,49 @@ export function parseRunUsage(event: unknown): RunUsage | undefined {
   return entries.length > 0 ? (Object.fromEntries(entries) as RunUsage) : undefined
 }
 
+const ADDITIVE_USAGE_KEYS = [
+  'costUsd',
+  'inputTokens',
+  'outputTokens',
+  'cacheReadTokens',
+  'cacheWriteTokens',
+  'numTurns',
+] as const satisfies readonly (keyof RunUsage)[]
+
+/** Wall-clock figures. Parallel sessions overlap, so the longest one stands. */
+const DURATION_USAGE_KEYS = ['cliDurationMs', 'apiDurationMs'] as const satisfies readonly (keyof RunUsage)[]
+
+function usageNumbers(parts: RunUsage[], key: keyof RunUsage): number[] {
+  return parts.map((p) => p[key]).filter((v): v is number => typeof v === 'number')
+}
+
+/**
+ * Combine every `result` event a run reported.
+ *
+ * A run with subagents emits one result per session, and the last one to
+ * arrive is often a short subagent rather than the run. Adding the last event
+ * over the earlier ones drops most of the cost. Cost, tokens and turns are
+ * summed across sessions. Session durations overlap, so those take the max.
+ * A field nobody reported stays unset.
+ */
+export function mergeRunUsage(parts: Array<RunUsage | undefined>): RunUsage | undefined {
+  const present = parts.filter(
+    (p): p is RunUsage => !!p && Object.values(p).some((v) => typeof v === 'number')
+  )
+  if (present.length === 0) return undefined
+
+  const usage: RunUsage = {}
+  for (const key of ADDITIVE_USAGE_KEYS) {
+    const values = usageNumbers(present, key)
+    if (values.length > 0) usage[key] = values.reduce((a, b) => a + b, 0)
+  }
+  for (const key of DURATION_USAGE_KEYS) {
+    const values = usageNumbers(present, key)
+    if (values.length > 0) usage[key] = Math.max(...values)
+  }
+  return Object.keys(usage).length > 0 ? usage : undefined
+}
+
 export function formatDurationMs(ms: number): string {
   const totalSeconds = Math.max(0, Math.round(ms / 1000))
   const hours = Math.floor(totalSeconds / 3600)

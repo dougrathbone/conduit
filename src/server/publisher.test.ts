@@ -219,6 +219,34 @@ describe('markdownToSlackMrkdwn', () => {
     )
   })
 
+  it('flattens a markdown table to bullets and still links the cells', () => {
+    // Regression: the 2026-11-18 patrol posted its PR list as a table, which
+    // Slack shows as raw pipes and a separator rule.
+    const input = [
+      '## Sentrypede Patrol — 2026-11-18',
+      '',
+      '| PR | Title | Status |',
+      '|---|---|---|',
+      '| [#50888](https://github.com/heydovetail/platform/pull/50888) | fix: guard against undefined depth | Review ready |',
+      '| [#51527](https://github.com/heydovetail/platform/pull/51527) | fix: provide companion layout context | Draft |',
+    ].join('\n')
+    expect(markdownToSlackMrkdwn(input)).toBe(
+      [
+        '*Sentrypede Patrol — 2026-11-18*',
+        '',
+        '• <https://github.com/heydovetail/platform/pull/50888|#50888> — fix: guard against undefined depth — Review ready',
+        '• <https://github.com/heydovetail/platform/pull/51527|#51527> — fix: provide companion layout context — Draft',
+      ].join('\n')
+    )
+  })
+
+  it('does not rewrite a table inside a fenced sample', () => {
+    const input = ['```', '| a | b |', '|---|---|', '| 1 | 2 |', '```'].join('\n')
+    const result = markdownToSlackMrkdwn(input)
+    expect(result).toContain('| a | b |')
+    expect(result).not.toContain('• a')
+  })
+
   it('does not rewrite a heading inside a fenced sample', () => {
     const input = ['```', '## not a heading', '```'].join('\n')
     expect(markdownToSlackMrkdwn(input)).toContain('## not a heading')

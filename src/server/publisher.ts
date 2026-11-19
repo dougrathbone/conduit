@@ -256,10 +256,60 @@ function normalizeSlackLists(text: string): string {
     .join('\n')
 }
 
+function isMarkdownTableRow(line: string): boolean {
+  const trimmed = line.trim()
+  return trimmed.startsWith('|') && trimmed.endsWith('|') && trimmed.length > 1
+}
+
+function markdownTableCells(line: string): string[] {
+  return line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map((cell) => cell.trim())
+}
+
+function isMarkdownSeparatorRow(line: string): boolean {
+  const cells = markdownTableCells(line)
+  return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell))
+}
+
+/**
+ * Slack renders a markdown table as the raw pipes. A run of table rows becomes
+ * one bullet per data row, cells joined, with the header and the `|---|` rule
+ * dropped. A single pipe line is left alone.
+ */
+function flattenMarkdownTables(text: string): string {
+  const lines = text.split('\n')
+  const out: string[] = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i] ?? ''
+    if (!isMarkdownTableRow(line) || !isMarkdownTableRow(lines[i + 1] ?? '')) {
+      out.push(line)
+      i++
+      continue
+    }
+    const block: string[] = []
+    while (i < lines.length && isMarkdownTableRow(lines[i] ?? '')) {
+      block.push(lines[i] ?? '')
+      i++
+    }
+    const data = isMarkdownSeparatorRow(block[1] ?? '') ? block.slice(2) : block
+    for (const row of data) {
+      if (isMarkdownSeparatorRow(row)) continue
+      const cells = markdownTableCells(row).filter(Boolean)
+      if (cells.length > 0) out.push(`- ${cells.join(' — ')}`)
+    }
+  }
+  return out.join('\n')
+}
+
 /** Exported for unit tests. */
 export function markdownToSlackMrkdwn(text: string): string {
   const { text: stashed, slots } = stashSlackCode(text)
-  let result = escapeSlackEntities(stashed)
+  let result = escapeSlackEntities(flattenMarkdownTables(stashed))
   result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<$2|$1>')
   result = result.replace(/\*\*([^*]+)\*\*/g, '*$1*')
   result = normalizeSlackHeadings(result)

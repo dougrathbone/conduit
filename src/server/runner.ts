@@ -3,7 +3,7 @@ import * as path from 'path'
 import type { ExecutionRun, RunEvent, RunUsage, TriggerContext, RunnerType, Repository } from '../shared/types'
 import type { RunSpec, WorkspaceSpec, WorkerEventSink, WorkerHandle } from '../shared/worker'
 import { summarizeEvent } from '../shared/runEvents'
-import { formatRunMetering } from '../shared/usage'
+import { formatRunMetering, mergeRunUsage } from '../shared/usage'
 import { createRun, updateRun, updateRunIfRunning, getRunningRunForAgent } from '../main/db/queries/runs'
 import { getAgent } from '../main/db/queries/agents'
 import { getRepository } from '../main/db/queries/repositories'
@@ -298,7 +298,11 @@ export function createRunOrchestration(opts: {
   }
   let logCapped = RUN_LOG_MAX_BYTES > 0 && logBytesWritten >= RUN_LOG_MAX_BYTES
   let lastLine = run.lastLine ?? ''
-  let usage: RunUsage | undefined = run.usage
+  // One entry per result event. Merged on each arrival so a restart between
+  // the result and the exit still has every session seen so far, and so the
+  // last event cannot replace the earlier ones.
+  const usageReports: RunUsage[] = run.usage ? [run.usage] : []
+  let usage: RunUsage | undefined = mergeRunUsage(usageReports)
 
   const eventBuffer: RunEvent[] = []
   let flushScheduled = false
@@ -344,7 +348,8 @@ export function createRunOrchestration(opts: {
     forward: forwardRunEvent,
     live: (event) => {
       if (event.kind === 'result' && event.usage) {
-        usage = event.usage
+        usageReports.push(event.usage)
+        usage = mergeRunUsage(usageReports)
         // Persist as soon as the CLI reports it, so a server restart between the
         // result event and the exit frame does not lose the run's metering.
         void (async () => {

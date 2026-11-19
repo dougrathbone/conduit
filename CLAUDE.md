@@ -253,10 +253,13 @@ cost. Types live in `src/shared/types.ts` (`RunUsage`); parsing/formatting in
   own estimate); Cursor reports tokens/timing but no cost; Amp reports whatever its
   Claude-compatible `result` carries. Fields a CLI doesn't report stay **unset** —
   never estimated, never defaulted to 0.
-- **Persistence**: `runs.usage` (JSON TEXT) is written when the `result` event
+- **Persistence**: `runs.usage` (JSON TEXT) is written when a `result` event
   arrives (so a server restart before the exit frame doesn't lose it) and again at
-  finalize. Because `usage` rides on `RunEventInit`, remote/EKS/Fargate workers need
-  no protocol change.
+  finalize. A run emits one result per session — the main conversation and each
+  subagent — and the last of those is often a short subagent. `mergeRunUsage`
+  sums cost, tokens and turns across every result seen, and takes the longest
+  session duration. Because `usage` rides on `RunEventInit`, remote/EKS/Fargate
+  workers need no protocol change.
 - **Reporting**: at finalize the server emits a `metering` event (`durationMs`,
   `usage`, `runner`, and a one-line `text`) through the normal event path — it lands
   in the run's `logs/<runId>.jsonl`, the process stdout log (`{runId, agentId, kind:

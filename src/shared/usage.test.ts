@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parseRunUsage, formatRunMetering, totalTokens, formatCostUsd } from './usage'
+import { parseRunUsage, mergeRunUsage, formatRunMetering, totalTokens, formatCostUsd } from './usage'
 
 describe('parseRunUsage', () => {
   it('reads Claude Code snake_case cost, tokens, turns and timing', () => {
@@ -55,6 +55,46 @@ describe('parseRunUsage', () => {
   it('returns undefined when the event carries nothing', () => {
     expect(parseRunUsage({ type: 'result', subtype: 'success' })).toBeUndefined()
     expect(parseRunUsage(null)).toBeUndefined()
+  })
+})
+
+describe('mergeRunUsage', () => {
+  it('sums cost, tokens and turns, and keeps the longest session duration', () => {
+    expect(
+      mergeRunUsage([
+        { costUsd: 10, inputTokens: 100, outputTokens: 20, numTurns: 40, cliDurationMs: 50_000, apiDurationMs: 40_000 },
+        { costUsd: 2, inputTokens: 30, outputTokens: 5, numTurns: 7, cliDurationMs: 8_000, apiDurationMs: 6_000 },
+      ])
+    ).toEqual({
+      costUsd: 12,
+      inputTokens: 130,
+      outputTokens: 25,
+      numTurns: 47,
+      cliDurationMs: 50_000,
+      apiDurationMs: 40_000,
+    })
+  })
+
+  it('does not let the last, smaller result replace an earlier one', () => {
+    const merged = mergeRunUsage([
+      { costUsd: 11.9, numTurns: 53, cacheReadTokens: 4_000_000 },
+      { costUsd: 5.94, numTurns: 7, cacheReadTokens: 331_574 },
+    ])
+    expect(merged?.costUsd).toBeCloseTo(17.84)
+    expect(merged?.numTurns).toBe(60)
+  })
+
+  it('leaves a field unset when no result reported it', () => {
+    expect(mergeRunUsage([{ inputTokens: 10 }, { outputTokens: 4 }])).toEqual({
+      inputTokens: 10,
+      outputTokens: 4,
+    })
+    expect(mergeRunUsage([{ inputTokens: 10 }])).not.toHaveProperty('costUsd')
+  })
+
+  it('returns undefined when nothing reported usage', () => {
+    expect(mergeRunUsage([undefined, undefined])).toBeUndefined()
+    expect(mergeRunUsage([])).toBeUndefined()
   })
 })
 

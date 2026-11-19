@@ -111,6 +111,35 @@ describe('createRunOrchestration metering', () => {
     expect(JSON.parse(forwarded[0])).toMatchObject({ runId: run.id, agentId: 'agent-1', usage })
   })
 
+  it('adds usage across every result event instead of keeping the last one', async () => {
+    const run = seedRun()
+    const orch = createRunOrchestration({ run, broadcast, runner: 'claude' })
+    orch.sink.onEvent({
+      kind: 'result',
+      isError: false,
+      text: 'Completed',
+      usage: { costUsd: 10, inputTokens: 1000, numTurns: 40, cliDurationMs: 50_000 },
+    })
+    orch.sink.onEvent({
+      kind: 'result',
+      isError: false,
+      text: 'Completed',
+      usage: { costUsd: 2, inputTokens: 100, numTurns: 7, cliDurationMs: 8_000 },
+    })
+
+    await orch.sink.onExit('completed', 0)
+
+    const combined = { costUsd: 12, inputTokens: 1100, numTurns: 47, cliDurationMs: 50_000 }
+    expect(updateRunIfRunning).toHaveBeenCalledWith(
+      run.id,
+      expect.objectContaining({ status: 'completed', usage: combined })
+    )
+    const metering = logEvents(run).find((e) => e.kind === 'metering')!
+    expect(metering.usage).toEqual(combined)
+    expect(metering.text).toContain('cost $12.00')
+    expect(metering.text).toContain('47 turns')
+  })
+
   it('still reports session duration when the CLI reported no usage', async () => {
     const run = seedRun()
     const orch = createRunOrchestration({ run, broadcast, runner: 'cursor' })
