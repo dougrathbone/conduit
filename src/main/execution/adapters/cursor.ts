@@ -28,6 +28,8 @@ export interface CursorArgsOptions {
    * New configurations use an exact model identifier and ignore this field.
    */
   effort?: string
+  /** Continue this earlier cursor-agent session (`--resume <id>`) instead of starting a new one. */
+  resumeSessionId?: string
 }
 
 /** Base identifiers offered by the old Cursor model picker. Only these are
@@ -53,7 +55,26 @@ export function buildCursorArgs(opts: CursorArgsOptions = {}): string[] {
   const args = ['-p', '--output-format', 'stream-json', '--force', '--approve-mcps', '--trust']
   const model = opts.model?.trim()
   if (model) args.push('--model', resolveCursorModel(model, opts.effort))
+  const resume = opts.resumeSessionId?.trim()
+  if (resume) args.push('--resume', resume)
   return args
+}
+
+/**
+ * The cursor-agent session id from an NDJSON line, if it is the `system`/`init`
+ * event. Every stream-json event carries it; init is the first, so reading just
+ * that one is enough to resume the session after the CLI dies mid-run.
+ */
+export function cursorSessionId(line: string): string | undefined {
+  const trimmed = line.trim()
+  if (!trimmed.startsWith('{')) return undefined
+  try {
+    const event = JSON.parse(trimmed) as { type?: string; subtype?: string; session_id?: unknown }
+    if (event.type !== 'system' || event.subtype !== 'init') return undefined
+    return typeof event.session_id === 'string' && event.session_id.trim() ? event.session_id.trim() : undefined
+  } catch {
+    return undefined
+  }
 }
 
 import type { RunEventInit } from '../../../shared/types'

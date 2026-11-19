@@ -283,6 +283,18 @@ notice; the final attempt publishes as normal. Runs that lasted longer are not r
 the original failure on record. Code: `src/server/runRetry.ts`, `scheduleRunRetry` in
 `src/server/runner.ts`.
 
+**Cursor session resume (long runs)** — the run-level retry above deliberately skips runs
+past 15 minutes, but cursor-agent also loses its HTTP/2 stream to the Cursor API late
+in long runs (`RetriableError: [canceled] http/2 stream closed with error code CANCEL`,
+seen while the agent was idle in an `Await` on CI). So `LocalWorkerFactory` (and therefore
+every remote/EKS/Fargate worker) handles it itself: when cursor-agent exits non-zero and
+its last stderr line classifies as `provider_unavailable`, the worker respawns it with
+`--resume <session_id>` (id read from the `system/init` event) and a "continue where you
+left off" prompt, in the same workspace — no work is redone. Up to 3 resumes after 15s /
+60s / 180s (`CONDUIT_CURSOR_RESUME_MAX_ATTEMPTS`, `0` disables); a cancel during the
+backoff ends the run. Only if resumes are exhausted does the run fail and fall through to
+the normal failure path. Code: `src/server/workers/cursorResume.ts`, `localWorker.ts`.
+
 ## Key Patterns
 
 **Adding a new entity type** — follow the publish targets pattern:

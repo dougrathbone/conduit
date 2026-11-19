@@ -1,7 +1,31 @@
 import { describe, it, expect } from 'vitest'
-import { buildCursorArgs, parseCursorEvents } from './cursor'
+import { buildCursorArgs, cursorSessionId, parseCursorEvents } from './cursor'
 
 const line = (obj: unknown) => JSON.stringify(obj)
+
+describe('cursorSessionId', () => {
+  it('reads the session id from the init event', () => {
+    expect(cursorSessionId(line({ type: 'system', subtype: 'init', session_id: 'abc-123' }))).toBe('abc-123')
+  })
+
+  it('ignores other events, non-JSON lines, and blank ids', () => {
+    expect(cursorSessionId(line({ type: 'assistant', session_id: 'abc-123' }))).toBeUndefined()
+    expect(cursorSessionId('not json')).toBeUndefined()
+    expect(cursorSessionId('')).toBeUndefined()
+    expect(cursorSessionId(line({ type: 'system', subtype: 'init', session_id: '  ' }))).toBeUndefined()
+  })
+})
+
+describe('buildCursorArgs resume', () => {
+  it('adds --resume with the session id', () => {
+    const args = buildCursorArgs({ resumeSessionId: 'abc-123' })
+    expect(args[args.indexOf('--resume') + 1]).toBe('abc-123')
+  })
+
+  it('does not resume by default', () => {
+    expect(buildCursorArgs()).not.toContain('--resume')
+  })
+})
 
 describe('buildCursorArgs', () => {
   it('runs headless in Run Everything mode and trusts the materialized workspace', () => {

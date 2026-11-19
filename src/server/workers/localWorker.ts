@@ -11,10 +11,26 @@ import { startMcpAuthRelay, type McpAuthRelay } from './mcpAuthRelay'
 import { createConfiguredWorktree, removeWorktree, runGit, buildAuthUrl, configureWorktreeGit, DEFAULT_GIT_TIMEOUT_MS } from '../gitOps'
 import { buildClaudeArgs, parseClaudeEvents } from '../../main/execution/adapters/claude'
 import { buildAmpArgs, parseAmpEvents } from '../../main/execution/adapters/amp'
-import { buildCursorArgs, parseCursorEvents } from '../../main/execution/adapters/cursor'
+import { buildCursorArgs, cursorSessionId, parseCursorEvents } from '../../main/execution/adapters/cursor'
+import {
+  CURSOR_RESUME_PROMPT,
+  cursorResumeDelayMs,
+  resolveCursorResumeMaxAttempts,
+  shouldResumeCursor,
+} from './cursorResume'
 import { assertVolumeHasSpace } from '../diskPressure'
 import { cliKillDiagnostic } from '../runFailure'
 import { WORKSPACES_BASE } from '../../main/utils/paths'
+
+/** Stderr kept to judge why the CLI died (only its last line is inspected). */
+const STDERR_TAIL_BYTES = 4096
+
+export interface LocalWorkerOptions {
+  /** cursor-agent session resumes per run (default from CONDUIT_CURSOR_RESUME_MAX_ATTEMPTS). `0` disables. */
+  resumeMaxAttempts?: number
+  /** Backoff before resume n, 1-based (tests inject short delays). */
+  resumeDelayMs?: (attempt: number) => number
+}
 
 /**
  * In-process worker: executes runs by spawning the agent CLI on this host.
@@ -26,8 +42,15 @@ import { WORKSPACES_BASE } from '../../main/utils/paths'
 export class LocalWorkerFactory implements WorkerFactory {
   readonly kind = 'local'
 
-  // Live child processes keyed by runId (pod-local by design).
-  private active = new Map<string, ChildProcess>()
+  // Cancel hooks for live runs keyed by runId (pod-local by design).
+  private active = new Map<string, () => void>()
+  private readonly resumeMaxAttempts: number
+  private readonly resumeDelayMs: (attempt: number) => number
+
+  constructor(opts: LocalWorkerOptions = {}) {
+    this.resumeMaxAttempts = opts.resumeMaxAttempts ?? resolveCursorResumeMaxAttempts()
+    this.resumeDelayMs = opts.resumeDelayMs ?? cursorResumeDelayMs
+  }
 
   async startRun(spec: RunSpec, sink: WorkerEventSink): Promise<WorkerHandle> {
     // Refuse to materialize a multi-GB worktree/clone when the backing volume
@@ -201,95 +224,165 @@ export class LocalWorkerFactory implements WorkerFactory {
     // 4. Spawn the runner CLI. Cursor runs cursor-agent in "Run Everything"
     // mode (--force / --yolo) — see buildCursorArgs — so the agent executes
     // commands and edits without approval.
-    const cliArgs =
+    const buildArgs = (resumeSessionId?: string): string[] =>
       spec.runner === 'amp'
         ? buildAmpArgs(mcpConfigPath!)
         : spec.runner === 'cursor'
-          ? buildCursorArgs({ model: spec.model, effort: spec.effort })
+          ? buildCursorArgs({ model: spec.model, effort: spec.effort, resumeSessionId })
           : buildClaudeArgs(mcpConfigPath!, spec.effort, spec.strictMcpConfig)
 
     const binary = spec.runner === 'amp' ? 'amp' : spec.runner === 'cursor' ? 'cursor-agent' : 'claude'
-
-    let child: ChildProcess
-    try {
-      child = spawn(binary, cliArgs, {
-        cwd: workspacePath,
-        env,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      })
-    } catch (err) {
-      await restoreWorkspaceMcp()
-      disposeRepoCredentials()
-      throw err
-    }
-
-    // Write prompt to stdin — avoids --mcp-config <configs...> greedily
-    // consuming the prompt as an additional config path argument.
-    if (child.stdin) {
-      child.stdin.write(spec.prompt)
-      child.stdin.end()
-    }
-
-    this.active.set(spec.runId, child)
-
-    const handle: WorkerHandle = {
-      runId: spec.runId,
-      workspacePath,
-      worktreeClonePath,
-      ephemeral,
-      cancel: async () => {
-        try {
-          child.kill('SIGTERM')
-        } catch (err) {
-          console.error(`[workers/local] Failed to kill process for run ${spec.runId}:`, err)
-        }
-      },
-      updateRepoToken: repoCredentials ? (token) => repoCredentials.update(token) : undefined,
-      updateMcpAuth: relay ? async (auth) => relay.update(auth) : undefined,
-    }
-
-    // Spawn errors (binary not in PATH, etc.) — the orchestrator owns
-    // reporting/finalization via onError; 'close' may still fire afterwards.
-    child.on('error', (err) => {
-      this.active.delete(spec.runId)
-      void restoreWorkspaceMcp()
-      disposeRepoCredentials()
-      sink.onError?.(err)
-    })
 
     // Readline on stdout for NDJSON parsing → structured events.
     const parseEvents =
       spec.runner === 'amp' ? parseAmpEvents : spec.runner === 'cursor' ? parseCursorEvents : parseClaudeEvents
 
-    if (child.stdout) {
-      const rl = createInterface({ input: child.stdout, crlfDelay: Infinity })
-      rl.on('line', (line) => {
-        for (const ev of parseEvents(line)) sink.onEvent(ev)
-      })
-    }
+    // cursor-agent only: when the provider drops its stream the CLI exits 1 with
+    // a RetriableError, however far into the run it was. Rather than fail an
+    // hour of work, respawn it with `--resume <session>` (see cursorResume.ts).
+    let sessionId: string | undefined
+    let stderrTail = ''
+    let resumes = 0
+    let cancelled = false
+    let finished = false
+    let resumeTimer: NodeJS.Timeout | undefined
+    let child: ChildProcess
 
-    if (child.stderr) {
-      child.stderr.on('data', (data: Buffer) => {
-        sink.onEvent({ kind: 'raw', stream: 'stderr', text: data.toString('utf8') })
-      })
-    }
-
-    child.on('close', async (code, signal) => {
+    /** Terminal handling, once: release run resources and report the exit. */
+    const finish = async (code: number | null, signal: NodeJS.Signals | null): Promise<void> => {
+      if (finished) return
+      finished = true
       this.active.delete(spec.runId)
       await restoreWorkspaceMcp()
       disposeRepoCredentials()
       const diagnostic = cliKillDiagnostic(code, signal)
       if (diagnostic) sink.onEvent({ kind: 'raw', stream: 'system', text: diagnostic })
       sink.onExit(code === 0 ? 'completed' : 'failed', code)
-    })
+    }
+
+    const launch = (prompt: string, resumeSessionId?: string): ChildProcess => {
+      const proc = spawn(binary, buildArgs(resumeSessionId), {
+        cwd: workspacePath,
+        env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+
+      // Write prompt to stdin — avoids --mcp-config <configs...> greedily
+      // consuming the prompt as an additional config path argument.
+      if (proc.stdin) {
+        proc.stdin.write(prompt)
+        proc.stdin.end()
+      }
+
+      // Spawn errors (binary not in PATH, etc.) — the orchestrator owns
+      // reporting/finalization via onError; 'close' may still fire afterwards.
+      proc.on('error', (err) => {
+        this.active.delete(spec.runId)
+        void restoreWorkspaceMcp()
+        disposeRepoCredentials()
+        sink.onError?.(err)
+      })
+
+      if (proc.stdout) {
+        const rl = createInterface({ input: proc.stdout, crlfDelay: Infinity })
+        rl.on('line', (line) => {
+          if (spec.runner === 'cursor' && !sessionId) sessionId = cursorSessionId(line)
+          for (const ev of parseEvents(line)) sink.onEvent(ev)
+        })
+      }
+
+      if (proc.stderr) {
+        proc.stderr.on('data', (data: Buffer) => {
+          const text = data.toString('utf8')
+          stderrTail = (stderrTail + text).slice(-STDERR_TAIL_BYTES)
+          sink.onEvent({ kind: 'raw', stream: 'stderr', text })
+        })
+      }
+
+      proc.on('close', (code, signal) => {
+        if (
+          spec.runner === 'cursor' &&
+          !cancelled &&
+          !finished &&
+          shouldResumeCursor({
+            sessionId,
+            exitCode: code,
+            stderrTail,
+            attempt: resumes,
+            maxAttempts: this.resumeMaxAttempts,
+          })
+        ) {
+          resumes += 1
+          const delayMs = this.resumeDelayMs(resumes)
+          const secs = Math.round(delayMs / 1000)
+          sink.onEvent({
+            kind: 'raw',
+            stream: 'system',
+            text:
+              `[Conduit: model provider dropped the connection — resuming cursor-agent session ` +
+              `${sessionId} in ${secs}s (resume ${resumes} of ${this.resumeMaxAttempts}).]`,
+          })
+          stderrTail = ''
+          resumeTimer = setTimeout(() => {
+            resumeTimer = undefined
+            if (cancelled || finished) return
+            try {
+              child = launch(CURSOR_RESUME_PROMPT, sessionId)
+            } catch (err) {
+              void finish(1, null)
+              sink.onError?.(err instanceof Error ? err : new Error(String(err)))
+            }
+          }, delayMs)
+          return
+        }
+        void finish(code, signal)
+      })
+
+      return proc
+    }
+
+    try {
+      child = launch(spec.prompt)
+    } catch (err) {
+      await restoreWorkspaceMcp()
+      disposeRepoCredentials()
+      throw err
+    }
+
+    const cancelRun = (): void => {
+      cancelled = true
+      if (resumeTimer) {
+        // Between attempts there is no process to signal — end the run here.
+        clearTimeout(resumeTimer)
+        resumeTimer = undefined
+        void finish(null, 'SIGTERM')
+        return
+      }
+      try {
+        child.kill('SIGTERM')
+      } catch (err) {
+        console.error(`[workers/local] Failed to kill process for run ${spec.runId}:`, err)
+      }
+    }
+    this.active.set(spec.runId, cancelRun)
+
+    const handle: WorkerHandle = {
+      runId: spec.runId,
+      workspacePath,
+      worktreeClonePath,
+      ephemeral,
+      cancel: async () => cancelRun(),
+      updateRepoToken: repoCredentials ? (token) => repoCredentials.update(token) : undefined,
+      updateMcpAuth: relay ? async (auth) => relay.update(auth) : undefined,
+    }
 
     return handle
   }
 
   async shutdown(): Promise<void> {
-    for (const [runId, child] of this.active) {
+    for (const [runId, cancel] of [...this.active]) {
       try {
-        child.kill('SIGTERM')
+        cancel()
       } catch (err) {
         console.error(`[workers/local] Shutdown kill failed for run ${runId}:`, err)
       }
