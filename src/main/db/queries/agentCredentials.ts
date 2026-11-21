@@ -19,7 +19,8 @@ export async function getCredentialStatus(userId: string): Promise<AgentCredenti
 
 /**
  * Store (encrypted) or clear a user's credential for a runner. An empty/blank
- * value deletes the row so the runner falls back to the host environment.
+ * value deletes the row so a run falls back to another user's key for that CLI,
+ * then the worker's own environment.
  */
 export async function setCredential(userId: string, runner: RunnerType, value: string): Promise<void> {
   if (!RUNNERS.includes(runner)) throw new Error(`Unknown runner: ${runner}`)
@@ -41,10 +42,24 @@ export async function setCredential(userId: string, runner: RunnerType, value: s
   })
 }
 
-/** Decrypt a user's stored credential for a runner (server-side, for env injection). */
-export async function getCredentialValue(userId: string, runner: RunnerType): Promise<string | null> {
-  const rows = await getDb().select().from(agentCredentials)
-    .where(and(eq(agentCredentials.userId, userId), eq(agentCredentials.runner, runner)))
-  if (rows.length === 0) return null
-  return decryptSecret(rows[0].valueEnc)
+/**
+ * Key injected into a run. The acting user's own key wins. When they have not
+ * saved one, any user's key for that CLI is shared — the most recently saved
+ * wins — so a scheduled run of someone else's agent still authenticates.
+ */
+export async function resolveRunnerCredential(userId: string, runner: RunnerType): Promise<string | null> {
+  const rows = await getDb().select().from(agentCredentials).where(eq(agentCredentials.runner, runner))
+  const own = rows.find((row) => row.userId === userId)
+  if (own) {
+    const value = decryptSecret(own.valueEnc).trim()
+    if (value) return value
+  }
+  const shared = rows
+    .filter((row) => row.userId !== userId)
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+  for (const row of shared) {
+    const value = decryptSecret(row.valueEnc).trim()
+    if (value) return value
+  }
+  return null
 }

@@ -532,17 +532,19 @@ The PEM is **write-only** from the client: it's sent on create/update and never 
 ## Agent Credentials
 
 The **Settings** screen (left nav → Settings, route `/settings`) lets each user store
-API keys/tokens for the agent CLIs. Keys are **per-user**, encrypted at rest with
-`CONDUIT_SECRET_KEY` (`src/server/crypto.ts`), and injected into the runner process
-environment at launch.
+API keys/tokens for the agent CLIs. Keys are encrypted at rest with
+`CONDUIT_SECRET_KEY` (`src/server/crypto.ts`) and injected into the runner process
+environment at launch. A saved key is shared by every run: the acting user's own
+key is preferred, and otherwise the most recently saved key for that CLI is used.
 
 - Table `agent_credentials` — PK `(user_id, runner)`, column `value_enc` (encrypted).
 - Runner → env var mapping: `claude → ANTHROPIC_API_KEY`, `amp → AMP_API_KEY`,
   `cursor → CURSOR_API_KEY` (`RUNNER_ENV_VAR` in `src/server/runner.ts`).
-- Injection (`buildRunnerEnv` in `src/server/runner.ts`): resolves the run's acting user
-  (`startedBy`, else the agent owner), decrypts their stored key, and sets the env var —
-  but an explicit per-agent `envVars` entry always wins, and a missing key falls back to
-  the host environment.
+- Injection (`buildRunnerEnvOverlay` in `src/server/runner.ts`): resolves the run's acting user
+  (`startedBy`, else the agent owner) and decrypts their stored key. When that user has none,
+  the most recently saved key for that CLI from any user is used, so a scheduled run of
+  someone else's agent still authenticates. An explicit per-agent `envVars` entry always
+  wins, and a missing key falls back to the host environment.
 - Status is **write-only** from the client: the API exposes only whether a key is
   configured (`AgentCredentialStatus`), never the secret.
 

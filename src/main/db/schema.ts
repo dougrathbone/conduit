@@ -101,8 +101,9 @@ export const mcpOAuthPending = pgTable('mcp_oauth_pending', {
   createdAt: bigint('created_at', { mode: 'number' }).notNull(),
 })
 
-// Per-user API keys/tokens for the agent CLIs (claude/amp/cursor), encrypted at
-// rest. Injected into the runner process env at launch. One row per (user, runner).
+// API keys/tokens for the agent CLIs (claude/amp/cursor), encrypted at rest.
+// One row per (user, runner). A run uses the acting user's key, or any user's
+// most recently saved key for that CLI when the acting user has none.
 export const agentCredentials = pgTable('agent_credentials', {
   userId: text('user_id').notNull(),
   runner: text('runner').notNull(),

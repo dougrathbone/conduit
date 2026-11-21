@@ -290,10 +290,11 @@ export function SettingsManager() {
           <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-[var(--accent)]/10 border border-[var(--accent)]/20 text-xs text-[var(--text-secondary)]">
             <Info className="h-3.5 w-3.5 text-[var(--accent)] flex-shrink-0 mt-0.5" />
             <span>
-              Keys and the background-task timeout are stored per agent harness and scoped to your
-              account — every agent you own uses them. Keys are encrypted at rest and injected as the
-              runner's environment variable. An explicit env var or timeout set on an individual agent
-              overrides what you store here.
+              A key saved here is shared by every run. Your own key is used when you have saved
+              one; otherwise the most recently saved key for that CLI is used, including scheduled
+              runs of agents you do not own. Keys are encrypted at rest. An env var set on an
+              individual agent overrides the shared key. The background-task timeout stays on your
+              account.
             </span>
           </div>
 

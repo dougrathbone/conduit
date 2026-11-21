@@ -7,7 +7,7 @@ import { formatRunMetering, mergeRunUsage } from '../shared/usage'
 import { createRun, updateRun, updateRunIfRunning, getRunningRunForAgent } from '../main/db/queries/runs'
 import { getAgent } from '../main/db/queries/agents'
 import { getRepository } from '../main/db/queries/repositories'
-import { getCredentialValue } from '../main/db/queries/agentCredentials'
+import { resolveRunnerCredential } from '../main/db/queries/agentCredentials'
 import { getRunnerTimeout } from '../main/db/queries/runnerSettings'
 import { resolveBgTaskTimeoutSeconds, bgTaskTimeoutEnvEntry } from './runnerTimeout'
 import { deleteWorkspace } from '../main/execution/workspace'
@@ -55,12 +55,12 @@ const RUNNER_ENV_VAR: Record<string, string> = {
 
 /**
  * Build the RunSpec env overlay for a run: the agent's explicit envVars, then
- * the acting user's stored runner credential (Settings screen) injected as the
- * runner's API-key env var, the resolved background-task timeout injected as
- * the runner's wait-ceiling env var, and the resolved repo credential exposed
- * as GH_TOKEN for the `gh` CLI. An explicit per-agent envVar always wins over
- * every injected value. The worker applies this overlay on top of its own
- * process env at spawn time.
+ * the runner API key (the acting user's Settings key, or any user's most
+ * recently saved key for that CLI), the resolved background-task timeout
+ * injected as the runner's wait-ceiling env var, and the resolved repo
+ * credential exposed as GH_TOKEN for the `gh` CLI. An explicit per-agent
+ * envVar always wins over every injected value. The worker applies this
+ * overlay on top of its own process env at spawn time.
  */
 async function buildRunnerEnvOverlay(
   agent: { runner: string; envVars?: Record<string, string>; ownerId?: string; bgTaskTimeoutSeconds?: number },
@@ -79,7 +79,7 @@ async function buildRunnerEnvOverlay(
   const envVar = RUNNER_ENV_VAR[agent.runner]
   if (envVar && !(agent.envVars && envVar in agent.envVars)) {
     try {
-      const cred = await getCredentialValue(ownerId, agent.runner as 'claude' | 'amp' | 'cursor')
+      const cred = await resolveRunnerCredential(ownerId, agent.runner as 'claude' | 'amp' | 'cursor')
       if (cred) env[envVar] = cred
     } catch (err) {
       console.error(`[server/runner] Failed to load ${agent.runner} credential for ${ownerId}:`, err)
