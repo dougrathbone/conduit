@@ -255,10 +255,11 @@ cost. Types live in `src/shared/types.ts` (`RunUsage`); parsing/formatting in
   never estimated, never defaulted to 0.
 - **Persistence**: `runs.usage` (JSON TEXT) is written when a `result` event
   arrives (so a server restart before the exit frame doesn't lose it) and again at
-  finalize. A run emits one result per session — the main conversation and each
-  subagent — and the last of those is often a short subagent. `mergeRunUsage`
-  sums cost, tokens and turns across every result seen, and takes the longest
-  session duration. Because `usage` rides on `RunEventInit`, remote/EKS/Fargate
+  finalize. A run emits one `result` per query — every wake-up for a finished
+  background task starts another — and the last is often a short one.
+  `mergeRunUsage` keeps the **largest** `costUsd` (Claude's `total_cost_usd` is
+  the running session total, so adding results counts early spend again) and
+  **sums** tokens, turns and durations (each result covers only its own query). Because `usage` rides on `RunEventInit`, remote/EKS/Fargate
   workers need no protocol change.
 - **Reporting**: at finalize the server emits a `metering` event (`durationMs`,
   `usage`, `runner`, and a one-line `text`) through the normal event path — it lands

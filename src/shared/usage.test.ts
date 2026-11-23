@@ -59,29 +59,34 @@ describe('parseRunUsage', () => {
 })
 
 describe('mergeRunUsage', () => {
-  it('sums cost, tokens and turns, and keeps the longest session duration', () => {
+  it('takes the largest cost, because each result repeats the session total, and sums the rest', () => {
     expect(
       mergeRunUsage([
-        { costUsd: 10, inputTokens: 100, outputTokens: 20, numTurns: 40, cliDurationMs: 50_000, apiDurationMs: 40_000 },
-        { costUsd: 2, inputTokens: 30, outputTokens: 5, numTurns: 7, cliDurationMs: 8_000, apiDurationMs: 6_000 },
+        { costUsd: 4, inputTokens: 100, outputTokens: 20, numTurns: 40, cliDurationMs: 50_000, apiDurationMs: 40_000 },
+        { costUsd: 9, inputTokens: 30, outputTokens: 5, numTurns: 7, cliDurationMs: 8_000, apiDurationMs: 6_000 },
+        { costUsd: 12, inputTokens: 10, outputTokens: 1, numTurns: 2, cliDurationMs: 1_000, apiDurationMs: 500 },
       ])
     ).toEqual({
       costUsd: 12,
-      inputTokens: 130,
-      outputTokens: 25,
-      numTurns: 47,
-      cliDurationMs: 50_000,
-      apiDurationMs: 40_000,
+      inputTokens: 140,
+      outputTokens: 26,
+      numTurns: 49,
+      cliDurationMs: 59_000,
+      apiDurationMs: 46_500,
     })
   })
 
-  it('does not let the last, smaller result replace an earlier one', () => {
-    const merged = mergeRunUsage([
-      { costUsd: 11.9, numTurns: 53, cacheReadTokens: 4_000_000 },
-      { costUsd: 5.94, numTurns: 7, cacheReadTokens: 331_574 },
-    ])
-    expect(merged?.costUsd).toBeCloseTo(17.84)
-    expect(merged?.numTurns).toBe(60)
+  it('does not add up a growing session total', () => {
+    // Regression: 15 results from one 70 minute run reported 1, 2, 3 … 15 dollars
+    // spent so far. Adding them gave $120 for a run that cost $15.
+    const totals = Array.from({ length: 15 }, (_, i) => ({ costUsd: i + 1, numTurns: 10 }))
+    const merged = mergeRunUsage(totals)
+    expect(merged?.costUsd).toBe(15)
+    expect(merged?.numTurns).toBe(150)
+  })
+
+  it('keeps the earlier cost when a later, smaller result arrives out of order', () => {
+    expect(mergeRunUsage([{ costUsd: 11.9 }, { costUsd: 5.94 }])?.costUsd).toBe(11.9)
   })
 
   it('leaves a field unset when no result reported it', () => {

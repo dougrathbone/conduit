@@ -111,7 +111,7 @@ describe('createRunOrchestration metering', () => {
     expect(JSON.parse(forwarded[0])).toMatchObject({ runId: run.id, agentId: 'agent-1', usage })
   })
 
-  it('adds usage across every result event instead of keeping the last one', async () => {
+  it('adds per-query usage across result events and keeps the cost as the session total', async () => {
     const run = seedRun()
     const orch = createRunOrchestration({ run, broadcast, runner: 'claude' })
     orch.sink.onEvent({
@@ -124,12 +124,12 @@ describe('createRunOrchestration metering', () => {
       kind: 'result',
       isError: false,
       text: 'Completed',
-      usage: { costUsd: 2, inputTokens: 100, numTurns: 7, cliDurationMs: 8_000 },
+      usage: { costUsd: 12, inputTokens: 100, numTurns: 7, cliDurationMs: 8_000 },
     })
 
     await orch.sink.onExit('completed', 0)
 
-    const combined = { costUsd: 12, inputTokens: 1100, numTurns: 47, cliDurationMs: 50_000 }
+    const combined = { costUsd: 12, inputTokens: 1100, numTurns: 47, cliDurationMs: 58_000 }
     expect(updateRunIfRunning).toHaveBeenCalledWith(
       run.id,
       expect.objectContaining({ status: 'completed', usage: combined })
