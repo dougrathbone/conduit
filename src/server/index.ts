@@ -89,6 +89,7 @@ import { sessionMiddleware } from './auth/middleware'
 import { authRouter as authRoutes } from './auth/routes'
 import { ensureDevUser, getDevContext } from './auth/devBypass'
 import { canAccessEntity, isEntityOwner } from '../main/db/queries/access'
+import { assertAgentRepositoryChangeAllowed } from './agentRepoAccess'
 import { deleteClient as deleteMcpOAuthClient } from '../main/db/queries/mcpOAuthClients'
 import { deleteToken as deleteMcpOAuthToken } from '../main/db/queries/oauthTokens'
 import { auditMcpOAuth } from './mcpOAuth/audit'
@@ -253,13 +254,24 @@ const handlers: Record<string, HandlerFn> = {
   // Agents
   'agents:list': (_args, _ws, ctx) => Promise.resolve(listAgents(ctx.userId, ctx.userGroupIds)),
   'agents:get': ([id]) => Promise.resolve(getAgent(id as string)),
-  'agents:create': ([data], _ws, ctx) =>
-    Promise.resolve(createAgent(data as Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>, ctx.userId)),
+  'agents:create': async ([data], _ws, ctx) => {
+    const input = data as Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>
+    await assertAgentRepositoryChangeAllowed(null, input.repositoryId, (repoId) =>
+      canAccessEntity('repository', repoId, ctx.userId, ctx.userGroupIds)
+    )
+    return createAgent(input, ctx.userId)
+  },
   'agents:update': async ([id, data], _ws, ctx) => {
     if (!(await canAccessEntity('agent', id as string, ctx.userId, ctx.userGroupIds))) {
       throw new ClientError('Access denied')
     }
     const patch = data as Partial<Omit<AgentConfig, 'id' | 'createdAt' | 'updatedAt'>>
+    if (patch.repositoryId !== undefined) {
+      const existing = await getAgent(id as string)
+      await assertAgentRepositoryChangeAllowed(existing?.repositoryId, patch.repositoryId, (repoId) =>
+        canAccessEntity('repository', repoId, ctx.userId, ctx.userGroupIds)
+      )
+    }
     const before = patch.prompt !== undefined ? await getAgent(id as string) : null
     const updated = await updateAgent(id as string, patch)
     if (before && patch.prompt !== undefined) {

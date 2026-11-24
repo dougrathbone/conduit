@@ -173,7 +173,7 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
   const { data: agent, isLoading } = useAgent(agentId)
   const updateAgent = useUpdateAgent()
   const { data: allPublishTargets = [] } = usePublishTargets()
-  const { data: allRepos = [] } = useRepositories()
+  const { data: allRepos = [], isLoading: reposLoading } = useRepositories()
   const { data: triggers = [] } = useTriggers(agentId)
   useRepoSyncEvents()
   const { setShowPublishTargets, setShowRepositories } = useUIStore()
@@ -337,8 +337,13 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
   const promptSummary = promptLen > 0 ? `${promptLen} chars` : 'empty'
 
   const selectedRepo = allRepos.find((r) => r.id === draft.repositoryId)
+  // A repository this agent already uses but the viewer can't see (not owned or
+  // shared with them). It stays configured; the viewer just can't change it.
+  const repoRestricted = Boolean(draft.repositoryId) && !reposLoading && !selectedRepo
   const workspaceLabel = selectedRepo
     ? `${selectedRepo.name} (${selectedRepo.defaultBranch})`
+    : repoRestricted
+    ? 'restricted repository'
     : draft.workingDir
     ? 'custom dir'
     : 'ephemeral'
@@ -464,8 +469,13 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
             <select
               value={draft.repositoryId ?? ''}
               onChange={(e) => handleChange('repositoryId', e.target.value || undefined)}
-              className="w-full h-9 rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] px-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)]"
+              disabled={repoRestricted}
+              title={repoRestricted ? "This agent uses a repository that isn't shared with you" : undefined}
+              className="w-full h-9 rounded-md border border-[var(--border)] bg-[var(--bg-secondary)] px-3 text-sm text-[var(--text-primary)] focus:outline-none focus:ring-1 focus:ring-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-60"
             >
+              {repoRestricted && (
+                <option value={draft.repositoryId}>Restricted repository (not shared with you)</option>
+              )}
               <option value="">None (ephemeral workspace)</option>
               {allRepos.map((repo) => (
                 <option key={repo.id} value={repo.id}>
@@ -491,6 +501,12 @@ export const AgentEditor = forwardRef<AgentEditorHandle, AgentEditorProps>(funct
                 </div>
               )
             })()}
+            {repoRestricted && (
+              <p className="text-xs text-[var(--text-secondary)]">
+                This agent is already configured with a repository you don't have access to. It will
+                keep using it, but only people with access to that repository can change it.
+              </p>
+            )}
             <p className="text-xs text-[var(--text-secondary)]">
               Assign a managed repository to give the agent an isolated worktree per run.{' '}
               <button
